@@ -14,3 +14,6 @@ path = "src/main.rs"
 
 [dependencies]
 sadda-engine = { path = "../engine" }
+eframe = "0.34"
+egui_plot = "0.35"
+rfd = "0.17"
