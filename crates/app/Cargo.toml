@@ -1,0 +1,16 @@
+[package]
+name = "sadda-app"
+description = "Desktop GUI for the sadda speech-analysis toolkit (egui + wgpu)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "sadda-app"
+path = "src/main.rs"
+
+[dependencies]
+sadda-engine = { path = "../engine" }

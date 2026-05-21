@@ -1,0 +1,14 @@
+[package]
+name = "sadda-python"
+description = "PyO3 bindings for the sadda speech-analysis toolkit; built into the `sadda` Python module via maturin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sadda-engine = { path = "../engine" }
+
+# PyO3 wiring intentionally deferred until the engine has surface worth exposing.

@@ -1,0 +1,11 @@
+[package]
+name = "sadda-engine"
+description = "Core engine for the sadda speech-analysis toolkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]

@@ -1,0 +1,14 @@
+[package]
+name = "sadda-uniffi"
+description = "UniFFI bindings for the sadda speech-analysis toolkit (mobile / cross-language FFI)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sadda-engine = { path = "../engine" }
+
+# UniFFI wiring deferred until the Phase 0 spike actually bridges a method to Swift / Kotlin.
