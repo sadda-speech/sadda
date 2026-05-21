@@ -10,6 +10,12 @@ pub enum EngineError {
 
     #[error("unsupported audio format: {0}")]
     UnsupportedFormat(String),
+
+    #[error("SQLite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+
+    #[error("corpus error: {0}")]
+    Corpus(String),
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;

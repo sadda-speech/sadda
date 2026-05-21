@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use numpy::{IntoPyArray, PyArray1};
-use pyo3::exceptions::{PyIOError, PyValueError};
+use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
@@ -14,6 +14,12 @@ fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
         }
         sadda_engine::EngineError::UnsupportedFormat(msg) => {
             PyValueError::new_err(format!("unsupported audio format: {msg}"))
+        }
+        sadda_engine::EngineError::Sqlite(err) => {
+            PyRuntimeError::new_err(format!("corpus database error: {err}"))
+        }
+        sadda_engine::EngineError::Corpus(msg) => {
+            PyRuntimeError::new_err(format!("corpus error: {msg}"))
         }
     }
 }
