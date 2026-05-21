@@ -10,4 +10,5 @@ rust-version.workspace = true
 
 [dependencies]
 hound = "3.5"
+rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2"
