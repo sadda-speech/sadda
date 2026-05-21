@@ -6,15 +6,19 @@
 //! run a script, and capture its output. UI integration (the egui script
 //! panel widget) and exposing the `sadda` engine API to embedded scripts are
 //! follow-ups.
+#![warn(missing_docs)]
 
 use pyo3::Python;
 use pyo3::ffi::c_str;
 use pyo3::prelude::*;
 use pyo3::types::{PyAnyMethods, PyDict};
 
+/// Captured streams from a single [`run_script`] invocation.
 #[derive(Debug)]
 pub struct ScriptOutput {
+    /// Everything the script printed to `sys.stdout`.
     pub stdout: String,
+    /// Everything the script printed to `sys.stderr`.
     pub stderr: String,
 }
 

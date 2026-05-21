@@ -6,6 +6,45 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-21 — Documentation strategy: discipline now, site at 0.1, polish at 1.0
+
+Goal: settle when and how docs grow. The milestone plan already committed to *"documentation grows incrementally per phase, not as a separate final phase"* but didn't schedule it. This entry pins concrete starts per phase.
+
+### Three layers, three different starts
+
+| Doc layer | What it is | Starts |
+|---|---|---|
+| **API reference** | `///` doc comments on every public Rust item, docstrings on every PyO3-exposed Python item. Auto-compiles to docs via `cargo doc` and (later) mkdocstrings | **Now (Phase 0).** Enforced via `#![warn(missing_docs)]` on library crates + CI's `-D warnings` |
+| **User-facing docs site** | mkdocs-material + mkdocstrings; conceptual guides drawn from DEVLOG entries; quickstart tutorial; auto-generated API reference; GitHub Pages hosting | **End of Phase 1 (0.1 PyPI release)** — when there's a Python API stable enough for outside users to actually try |
+| **Polished docs site + migration** | Parselmouth migration docs, notebook tutorials, bundled sample projects, visual GUI walkthroughs | **Phase 7 (toward 1.0)**, per the existing milestone-plan deliverables |
+
+### Why these particular start points
+
+- **API reference now.** Cost of writing a one-line doc comment when you write a function is near-zero; cost of retrofitting hundreds of public items at 0.1 is a multi-day audit nobody wants. Enforcing via a lint means the discipline doesn't depend on remembering. PyO3 `///` comments on `#[pyfunction]` / `#[pymethods]` become Python docstrings automatically — same source of truth.
+- **Docs site at end of Phase 1.** Before 0.1 the Python API isn't stable enough to write tutorials against — examples would rot constantly. After 0.1 there's an audience (PyPI installers) who genuinely benefit. Earlier than that is writing for a reader who doesn't exist yet.
+- **GUI tutorials at Phase 2.** Screenshots of an unstable GUI rot every week. Wait until 0.2 ships.
+- **Migration docs at Phase 7.** Praat-to-sadda migration is high-effort writing; do it once when the API is stable and not before.
+
+### Concrete starts this turn
+
+- `#![warn(missing_docs)]` enabled on the four library crates: `sadda-engine`, `sadda-python`, `sadda-script-engine`, `sadda-uniffi`. The `app` binary crate is excluded — binaries don't expose a library surface.
+- Existing public items that lacked doc comments are filled in (audit done across the four library crates in the same commit).
+- CI's `-D warnings` makes future PRs that omit doc comments fail. Adding a public item is now contract-bound to come with a one-line doc.
+
+### Cross-references / what this entry updates
+
+- Extends the 2026-05-18 milestone-plan entry's "documentation grows incrementally" principle with a concrete per-phase schedule.
+- Touches the API-surface entry (2026-05-18): `sadda.ml` and other PROVISIONAL surfaces still get docs, but their docstrings can call out the stability tier explicitly.
+
+### Sources / references
+
+- mkdocs-material: https://squidfunk.github.io/mkdocs-material
+- mkdocstrings (Python API rendering): https://mkdocstrings.github.io
+- rustdoc book: https://doc.rust-lang.org/rustdoc/
+- PyO3 docs guide on docstrings: https://pyo3.rs/v0.28.0/function/signature.html#documenting-functions
+
+---
+
 ## 2026-05-20 — Profile catalog: five v1 profiles over the entity / tier / refdist / measure surfaces
 
 Goal: close the "profile catalog" open follow-up from the corpus entry. Specify which profiles ship at v1, what each profile concretely contains, and the policy around default profile, authoring path, and mid-flight profile changes. The mechanism (profile = schema validator over JSON `extra`) was already settled in the corpus entry; this entry settles content and governance.

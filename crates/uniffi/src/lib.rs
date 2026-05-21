@@ -4,9 +4,12 @@
 //! At Phase 0 only `engine_version()` is exposed — the architectural smoke
 //! test for the Rust ↔ Swift bridge. Real mobile API expansion lands in
 //! Phase 6 (per the 2026-05-18 milestone plan).
+#![warn(missing_docs)]
 
 uniffi::setup_scaffolding!();
 
+/// Returns the underlying `sadda-engine` crate version. UniFFI exposes this
+/// as `engineVersion()` in the generated Swift / Kotlin / Python bindings.
 #[uniffi::export]
 pub fn engine_version() -> String {
     sadda_engine::version().to_string()

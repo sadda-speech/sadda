@@ -1,3 +1,7 @@
+//! Fundamental-frequency (f0) estimation via time-domain autocorrelation.
+//! Phase 0 implementation; sub-sample lag interpolation and a voicing
+//! decision are deferred.
+
 use crate::Audio;
 
 /// Configuration for the autocorrelation pitch tracker.
@@ -27,7 +31,10 @@ impl Default for PitchConfig {
 /// One pitch estimate at a given time point.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PitchFrame {
+    /// Centre time of the analysis frame, in seconds from the start of the audio.
     pub time_seconds: f64,
+    /// Estimated f0 in Hz. No voicing decision is applied yet — silent frames
+    /// still get whichever lag happened to maximise the autocorrelation.
     pub frequency_hz: f32,
 }
 

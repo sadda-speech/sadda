@@ -1,3 +1,7 @@
+//! Project directory + SQLite-backed corpus database. The full v1 entity model
+//! (Speaker, Session, Tier, AuditLog, ProcessingRun, …) lands later; today the
+//! schema covers only `project` and `bundle`.
+
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
@@ -46,13 +50,24 @@ pub struct Project {
     conn: Connection,
 }
 
+/// Metadata for one recording inside a [`Project`].
+///
+/// At Phase 0 a bundle is a single audio file plus its acoustic header.
+/// The full v1 bundle model will additionally own tiers, derived signals,
+/// instrument calibration, etc.
 #[derive(Debug, Clone)]
 pub struct Bundle {
+    /// Bundle id (primary key in the corpus database).
     pub id: i64,
+    /// Human-readable bundle name (set at registration time).
     pub name: String,
+    /// Audio file path relative to the project root.
     pub audio_relative_path: String,
+    /// Audio sample rate in Hz.
     pub sample_rate: u32,
+    /// Number of audio channels (1 = mono, 2 = stereo, …).
     pub channels: u16,
+    /// Number of audio frames (samples per channel).
     pub n_frames: usize,
 }
 
@@ -102,10 +117,13 @@ impl Project {
         Ok(Project { root, conn })
     }
 
+    /// Returns the project's filesystem root directory.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    /// Returns the project's human-readable name (from the singleton row in
+    /// the `project` table).
     pub fn name(&self) -> Result<String> {
         let name: String =
             self.conn
