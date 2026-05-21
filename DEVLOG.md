@@ -6,6 +6,120 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-21 — Sparse tier types (B2): three annotation tables, Rust-level cardinality, polars wrap in Python
+
+Goal: settle the fourth Phase 1 slice. B2 puts annotation rows into the three sparse-tier tables, wires tier-header + annotation CRUD into the Project API, enforces parent-child cardinality at insert time, and ships the first cut of `proj.query(...) → polars.DataFrame`.
+
+### What B2 must deliver
+
+From the Phase-1 slicing entry: (1) `interval`, `point`, `reference` tier types with CRUD; (2) first cut of `proj.query(...) → polars.DataFrame`; (3) parent-child cardinality enforced at insert time.
+
+### Three separate annotation tables
+
+The 2026-05-18 corpus data-model entry already pinned three per-type tables (versus a single discriminated annotation table). Schemas:
+
+```sql
+annotation_interval (
+    id, tier_id, start_seconds REAL, end_seconds REAL,
+    label, parent_annotation_id, extra,
+    CHECK (end_seconds > start_seconds)
+);
+annotation_point (
+    id, tier_id, time_seconds REAL, label, parent_annotation_id, extra
+);
+annotation_reference (
+    id, tier_id, target_kind TEXT, target_id INTEGER,
+    label, parent_annotation_id, extra,
+    CHECK (target_kind IN ('bundle','session','speaker','tier','annotation'))
+);
+```
+
+All three are audited per the B1 trigger-rebuild discipline; V4 includes 9 new audit triggers.
+
+### Polars integration: Python-side wrap
+
+Three options surfaced — Python-side wrap of Rust-supplied rows, `polars-rs` + `pyo3-polars` in Rust, or LazyFrame via path scan. Python-side wrap won because:
+- No new Rust deps. `polars-rs` pulls ~50 transitive crates and lengthens cold builds substantially; not worth it for sparse-tier scale (≤ ~100K rows per project).
+- The Arrow-zero-copy story matters mostly for *dense* tiers (continuous_vector embeddings, continuous_numeric tracks). B3 introduces Parquet sidecars where Arrow buffers are already the native format; that's the natural place to add `polars-rs` if needed.
+- The Python wrapper is trivial: Rust returns `Vec<row tuples>`, `__init__.py` calls `polars.DataFrame(rows, schema=...)` with a tier-type-specific column shape.
+
+`polars` joins `numpy` in the runtime deps in `pyproject.toml`.
+
+### Cardinality enforcement: engine-level (Rust)
+
+SQL triggers can't easily express "the parent_annotation_id must reference the correct one of three possible parent annotation tables, chosen by the parent tier's type." Rust-level enforcement at insert time is straightforward, gives clear error messages, and avoids trigger debugging when something goes wrong.
+
+The check in `Project::add_interval` (and the analogous point/reference methods):
+
+```
+let tier = self.get_tier(tier_id)?;
+match tier.parent_id {
+    None => { /* no parent: no check */ }
+    Some(parent_tier_id) => {
+        let parent_annotation_id = spec.parent_annotation_id
+            .ok_or_else(|| EngineError::Cardinality(
+                "child tier requires parent_annotation_id".into()))?;
+        // Verify parent annotation exists in the parent tier's right table.
+        ensure_parent_exists(self, parent_tier_id, parent_annotation_id)?;
+        match tier.cardinality.as_deref() {
+            Some("one_to_one") => ensure_parent_is_unique(...)?,
+            Some("one_to_many") | Some("none") | None => {}
+            Some("many_to_one") => return Err(EngineError::Cardinality(
+                "many_to_one cardinality is not supported until B-cluster follow-up".into())),
+            Some(other) => return Err(...),
+        }
+    }
+}
+```
+
+New `EngineError::Cardinality(String)` variant covers all the failure modes — clearer than reusing `Corpus(String)`.
+
+### Many-to-one deferred
+
+The v1 use cases all naturally fit `one_to_many` (word→phones, syllable→phones, …). `many_to_one` (multiple parents per child) is inherently a join table the rest of the model doesn't have. V4 keeps the cardinality enum's `many_to_one` value (the V3 CHECK already lists it), but `add_interval` / `add_point` / `add_reference` reject it with a clear "not supported until follow-up" message. A future B-cluster slice can add the join table when a real use case surfaces.
+
+### Confirmed B2 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Annotation tables | **Three: `annotation_interval`, `annotation_point`, `annotation_reference`** | Already pinned by the corpus data-model entry; per-type tables keep columns typed and queries direct |
+| Polars | **Python-side wrap; `polars-rs` deferred to B3** | No new Rust deps; cheap to swap when Parquet sidecars need Arrow zero-copy |
+| Cardinality enforcement | **Engine-level Rust check at insert time** | SQL triggers can't dispatch on parent tier's type cleanly; Rust gives clear error messages |
+| `many_to_one` | **Deferred** | No v1 use case requires it; the join table can land when a use case appears |
+| API surface | **Both DataFrame and typed accessors** | `proj.query(tier_id)` → polars.DataFrame for AI-engineer ergonomics; `proj.intervals(tier_id)` → `list[Interval]` for OO callers and tests |
+
+### Layout
+
+- `crates/engine/migrations/V4__sparse_annotations.sql` — three tables + indexes + 9 audit triggers.
+- `crates/engine/src/corpus.rs` — `Tier` / `Interval` / `Point` / `Reference` structs + their `*Spec` builders; `add_tier`, `tiers`, `get_tier`, `add_interval`, `intervals`, `add_point`, `points`, `add_reference`, `references_for` (avoiding the `references` reserved-ish name), plus a Rust helper `query_tier_rows(tier_id) → Vec<RowTuple>` for the Python query wrapper.
+- `crates/engine/src/error.rs` — adds `EngineError::Cardinality(String)`.
+- `crates/python/src/lib.rs` — PyTier / PyInterval / PyPoint / PyReference + insert/list bindings; raw query method returns Python tuples.
+- `python/sadda/__init__.py` — wires `Project.query(tier_id)` (Python method patched onto the Rust class) to call the raw method and build a `polars.DataFrame` with tier-type-aware column schema.
+- `pyproject.toml` — adds `polars>=1.0` to runtime deps.
+
+### Trigger-rebuild discipline (reminder)
+
+V4 adds three new audited tables — annotation_interval, annotation_point, annotation_reference. The audit triggers are created in V4 alongside the tables. Any future ALTER TABLE on these tables must DROP+CREATE the triggers per the B1 entry's rule.
+
+### What this entry doesn't decide
+
+- **Dense tier CRUD + Parquet sidecars.** That's B3.
+- **Cross-bundle query language.** `proj.query(tier_id)` is the first cut; richer filtering (`proj.query(tier_name="phones", bundles=...)`, EMU-EQL-style traversal) is a later API slice.
+- **`many_to_one` join table.** Deferred until a use case appears.
+- **Polars schema-typed inserts.** B2 returns DataFrames *from* the corpus; inserting *from* a DataFrame (bulk write of annotations) is a later ergonomic.
+- **TextGrid/EAF I/O.** That's D1 / D2 and consumes B2's tier types.
+
+### Sources / references
+
+- 2026-05-18 corpus data-model entry (sparse tier storage decision)
+- 2026-05-18 Python API surface entry (polars as primary query-result type)
+- 2026-05-21 Phase 1 slicing entry (B2 row)
+- 2026-05-21 B1 entry (trigger-rebuild discipline)
+- EMU-SDMS level/segment model: https://ips-lmu.github.io/EMU.html
+- polars Python API: https://docs.pola.rs/api/python/stable/
+
+---
+
 ## 2026-05-21 — Full entity schema + AuditLog (B1): triggers + JSON1, Speaker/Session API only, schema-only for the rest
 
 Goal: settle the third Phase 1 slice. B1 lays down the SQLite-side scaffolding for the v1 entity model (Speaker, Session, Bundle-extension, Tier-header, Entity, EntityRef, Instrument, Protocol, ProcessingRun, AuditLog) and the trigger-based audit infrastructure. Annotation CRUD (B2) and Parquet sidecars (B3) build on top of this schema; F1's recipes write `processing_run` rows.

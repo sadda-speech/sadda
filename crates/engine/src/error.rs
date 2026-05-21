@@ -45,6 +45,13 @@ pub enum EngineError {
         /// Highest version known to this build of the engine.
         engine_max: i64,
     },
+
+    /// A parent-child cardinality rule was violated at annotation insert
+    /// time (missing required `parent_annotation_id`, non-existent parent,
+    /// `one_to_one` violation, …). Surfaced by `Project::add_interval` /
+    /// `add_point` / `add_reference`.
+    #[error("cardinality violation: {0}")]
+    Cardinality(String),
 }
 
 /// Convenience alias for `Result<T, EngineError>`, mirroring the std lib's

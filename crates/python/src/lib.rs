@@ -36,6 +36,9 @@ fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
         } => PyRuntimeError::new_err(format!(
             "corpus database schema (v{db_version}) is newer than this engine (max v{engine_max}); upgrade sadda or restore an older backup"
         )),
+        sadda_engine::EngineError::Cardinality(msg) => {
+            PyValueError::new_err(format!("cardinality violation: {msg}"))
+        }
     }
 }
 
@@ -288,6 +291,248 @@ impl PySession {
     }
 }
 
+/// One annotation tier: the header row in `tier`. Annotation rows
+/// belonging to it live in `annotation_interval` / `annotation_point` /
+/// `annotation_reference` (for the three sparse types) or a Parquet sidecar
+/// (the three dense types, landing in B3). Read-only view; create via
+/// `Project.add_tier(...)`.
+#[gen_stub_pyclass]
+#[pyclass(name = "Tier", frozen)]
+struct PyTier {
+    inner: sadda_engine::Tier,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyTier {
+    /// Tier id (primary key).
+    #[getter]
+    fn id(&self) -> i64 {
+        self.inner.id
+    }
+    /// Bundle this tier belongs to.
+    #[getter]
+    fn bundle_id(&self) -> i64 {
+        self.inner.bundle_id
+    }
+    /// Human-readable tier name (unique within a bundle).
+    #[getter]
+    fn name(&self) -> String {
+        self.inner.name.clone()
+    }
+    /// Tier type: one of `interval`, `point`, `reference`,
+    /// `continuous_numeric`, `continuous_vector`, `categorical_sampled`.
+    #[getter]
+    fn r#type(&self) -> &'static str {
+        self.inner.r#type.as_str()
+    }
+    /// Optional parent tier id.
+    #[getter]
+    fn parent_id(&self) -> Option<i64> {
+        self.inner.parent_id
+    }
+    /// Parent-child cardinality (`one_to_one` | `one_to_many` | `many_to_one`
+    /// | `none`).
+    #[getter]
+    fn cardinality(&self) -> Option<String> {
+        self.inner.cardinality.clone()
+    }
+    /// JSON `schema` payload.
+    #[getter]
+    fn schema(&self) -> Option<String> {
+        self.inner.schema.clone()
+    }
+    /// JSON `extra` payload.
+    #[getter]
+    fn extra(&self) -> Option<String> {
+        self.inner.extra.clone()
+    }
+    /// ISO 8601 UTC creation timestamp.
+    #[getter]
+    fn created_at(&self) -> String {
+        self.inner.created_at.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Tier(id={}, name={:?}, type={:?}, bundle_id={})",
+            self.inner.id,
+            self.inner.name,
+            self.inner.r#type.as_str(),
+            self.inner.bundle_id,
+        )
+    }
+}
+
+/// One interval annotation. Read-only view; create via
+/// `Project.add_interval(...)`.
+#[gen_stub_pyclass]
+#[pyclass(name = "Interval", frozen)]
+struct PyInterval {
+    inner: sadda_engine::Interval,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyInterval {
+    /// Annotation id.
+    #[getter]
+    fn id(&self) -> i64 {
+        self.inner.id
+    }
+    /// Tier this interval belongs to.
+    #[getter]
+    fn tier_id(&self) -> i64 {
+        self.inner.tier_id
+    }
+    /// Start time in seconds.
+    #[getter]
+    fn start_seconds(&self) -> f64 {
+        self.inner.start_seconds
+    }
+    /// End time in seconds.
+    #[getter]
+    fn end_seconds(&self) -> f64 {
+        self.inner.end_seconds
+    }
+    /// Duration in seconds (`end_seconds - start_seconds`).
+    #[getter]
+    fn duration_seconds(&self) -> f64 {
+        self.inner.end_seconds - self.inner.start_seconds
+    }
+    /// Label string.
+    #[getter]
+    fn label(&self) -> Option<String> {
+        self.inner.label.clone()
+    }
+    /// Parent annotation id in the parent tier.
+    #[getter]
+    fn parent_annotation_id(&self) -> Option<i64> {
+        self.inner.parent_annotation_id
+    }
+    /// JSON `extra` payload.
+    #[getter]
+    fn extra(&self) -> Option<String> {
+        self.inner.extra.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Interval(id={}, tier_id={}, start={}, end={}, label={:?})",
+            self.inner.id,
+            self.inner.tier_id,
+            self.inner.start_seconds,
+            self.inner.end_seconds,
+            self.inner.label,
+        )
+    }
+}
+
+/// One point annotation. Read-only view; create via
+/// `Project.add_point(...)`.
+#[gen_stub_pyclass]
+#[pyclass(name = "Point", frozen)]
+struct PyPoint {
+    inner: sadda_engine::Point,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyPoint {
+    /// Annotation id.
+    #[getter]
+    fn id(&self) -> i64 {
+        self.inner.id
+    }
+    /// Tier this point belongs to.
+    #[getter]
+    fn tier_id(&self) -> i64 {
+        self.inner.tier_id
+    }
+    /// Time in seconds.
+    #[getter]
+    fn time_seconds(&self) -> f64 {
+        self.inner.time_seconds
+    }
+    /// Label string.
+    #[getter]
+    fn label(&self) -> Option<String> {
+        self.inner.label.clone()
+    }
+    /// Parent annotation id.
+    #[getter]
+    fn parent_annotation_id(&self) -> Option<i64> {
+        self.inner.parent_annotation_id
+    }
+    /// JSON `extra` payload.
+    #[getter]
+    fn extra(&self) -> Option<String> {
+        self.inner.extra.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Point(id={}, tier_id={}, time={}, label={:?})",
+            self.inner.id, self.inner.tier_id, self.inner.time_seconds, self.inner.label,
+        )
+    }
+}
+
+/// One reference annotation. Read-only view; create via
+/// `Project.add_reference(...)`.
+#[gen_stub_pyclass]
+#[pyclass(name = "Reference", frozen)]
+struct PyReference {
+    inner: sadda_engine::Reference,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyReference {
+    /// Annotation id.
+    #[getter]
+    fn id(&self) -> i64 {
+        self.inner.id
+    }
+    /// Tier this reference belongs to.
+    #[getter]
+    fn tier_id(&self) -> i64 {
+        self.inner.tier_id
+    }
+    /// Target kind: `bundle` | `session` | `speaker` | `tier` | `annotation`.
+    #[getter]
+    fn target_kind(&self) -> String {
+        self.inner.target_kind.clone()
+    }
+    /// Target row id.
+    #[getter]
+    fn target_id(&self) -> i64 {
+        self.inner.target_id
+    }
+    /// Label string.
+    #[getter]
+    fn label(&self) -> Option<String> {
+        self.inner.label.clone()
+    }
+    /// Parent annotation id.
+    #[getter]
+    fn parent_annotation_id(&self) -> Option<i64> {
+        self.inner.parent_annotation_id
+    }
+    /// JSON `extra` payload.
+    #[getter]
+    fn extra(&self) -> Option<String> {
+        self.inner.extra.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Reference(id={}, tier_id={}, target_kind={:?}, target_id={})",
+            self.inner.id, self.inner.tier_id, self.inner.target_kind, self.inner.target_id,
+        )
+    }
+}
+
 /// A sadda project: a directory holding audio, derived signals, attachments,
 /// and a SQLite-backed corpus database. Construct via `sadda.new_project(...)`
 /// or `sadda.open_project(...)`.
@@ -453,6 +698,157 @@ impl PyProject {
         self.inner.set_audit_user(user).map_err(engine_err_to_py)
     }
 
+    /// Inserts a Tier row. `type` is one of `interval`, `point`, `reference`,
+    /// `continuous_numeric`, `continuous_vector`, `categorical_sampled`.
+    /// Returns the new tier's id.
+    #[pyo3(signature = (
+        bundle_id, name, r#type, *,
+        parent_id=None, cardinality=None, schema=None, extra=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_tier(
+        &self,
+        bundle_id: i64,
+        name: &str,
+        r#type: &str,
+        parent_id: Option<i64>,
+        cardinality: Option<String>,
+        schema: Option<String>,
+        extra: Option<String>,
+    ) -> PyResult<i64> {
+        let tier_type = r#type
+            .parse::<sadda_engine::TierType>()
+            .map_err(engine_err_to_py)?;
+        let spec = sadda_engine::TierSpec {
+            bundle_id,
+            name: name.into(),
+            r#type: Some(tier_type),
+            parent_id,
+            cardinality,
+            schema,
+            extra,
+        };
+        self.inner.add_tier(&spec).map_err(engine_err_to_py)
+    }
+
+    /// Lists tiers, optionally restricted to a single bundle.
+    #[pyo3(signature = (bundle_id=None))]
+    fn tiers(&self, bundle_id: Option<i64>) -> PyResult<Vec<PyTier>> {
+        self.inner
+            .tiers(bundle_id)
+            .map(|ts| ts.into_iter().map(|inner| PyTier { inner }).collect())
+            .map_err(engine_err_to_py)
+    }
+
+    /// Fetches a single tier by id.
+    fn get_tier(&self, id: i64) -> PyResult<PyTier> {
+        self.inner
+            .get_tier(id)
+            .map(|inner| PyTier { inner })
+            .map_err(engine_err_to_py)
+    }
+
+    /// Inserts an interval annotation. Enforces parent-child cardinality at
+    /// insert time; raises `ValueError` on cardinality violation.
+    #[pyo3(signature = (
+        tier_id, start_seconds, end_seconds, *,
+        label=None, parent_annotation_id=None, extra=None,
+    ))]
+    fn add_interval(
+        &self,
+        tier_id: i64,
+        start_seconds: f64,
+        end_seconds: f64,
+        label: Option<String>,
+        parent_annotation_id: Option<i64>,
+        extra: Option<String>,
+    ) -> PyResult<i64> {
+        let spec = sadda_engine::IntervalSpec {
+            tier_id,
+            start_seconds,
+            end_seconds,
+            label,
+            parent_annotation_id,
+            extra,
+        };
+        self.inner.add_interval(&spec).map_err(engine_err_to_py)
+    }
+
+    /// Lists intervals for a tier in (start_seconds, id) order.
+    fn intervals(&self, tier_id: i64) -> PyResult<Vec<PyInterval>> {
+        self.inner
+            .intervals(tier_id)
+            .map(|rs| rs.into_iter().map(|inner| PyInterval { inner }).collect())
+            .map_err(engine_err_to_py)
+    }
+
+    /// Inserts a point annotation. Enforces parent-child cardinality.
+    #[pyo3(signature = (
+        tier_id, time_seconds, *,
+        label=None, parent_annotation_id=None, extra=None,
+    ))]
+    fn add_point(
+        &self,
+        tier_id: i64,
+        time_seconds: f64,
+        label: Option<String>,
+        parent_annotation_id: Option<i64>,
+        extra: Option<String>,
+    ) -> PyResult<i64> {
+        let spec = sadda_engine::PointSpec {
+            tier_id,
+            time_seconds,
+            label,
+            parent_annotation_id,
+            extra,
+        };
+        self.inner.add_point(&spec).map_err(engine_err_to_py)
+    }
+
+    /// Lists points for a tier in (time_seconds, id) order.
+    fn points(&self, tier_id: i64) -> PyResult<Vec<PyPoint>> {
+        self.inner
+            .points(tier_id)
+            .map(|rs| rs.into_iter().map(|inner| PyPoint { inner }).collect())
+            .map_err(engine_err_to_py)
+    }
+
+    /// Inserts a reference annotation pointing at another row via
+    /// `(target_kind, target_id)`.
+    #[pyo3(signature = (
+        tier_id, target_kind, target_id, *,
+        label=None, parent_annotation_id=None, extra=None,
+    ))]
+    fn add_reference(
+        &self,
+        tier_id: i64,
+        target_kind: &str,
+        target_id: i64,
+        label: Option<String>,
+        parent_annotation_id: Option<i64>,
+        extra: Option<String>,
+    ) -> PyResult<i64> {
+        let spec = sadda_engine::ReferenceSpec {
+            tier_id,
+            target_kind: target_kind.into(),
+            target_id,
+            label,
+            parent_annotation_id,
+            extra,
+        };
+        self.inner.add_reference(&spec).map_err(engine_err_to_py)
+    }
+
+    /// Lists references for a tier in id order. Named `references_for`
+    /// rather than `references` (which collides with Rust's `ref` family
+    /// of grep targets).
+    fn references_for(&self, tier_id: i64) -> PyResult<Vec<PyReference>> {
+        self.inner
+            .references_for(tier_id)
+            .map(|rs| rs.into_iter().map(|inner| PyReference { inner }).collect())
+            .map_err(engine_err_to_py)
+    }
+
     fn __repr__(&self) -> String {
         format!("Project(root={:?})", self.root())
     }
@@ -543,6 +939,10 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBundle>()?;
     m.add_class::<PySpeaker>()?;
     m.add_class::<PySession>()?;
+    m.add_class::<PyTier>()?;
+    m.add_class::<PyInterval>()?;
+    m.add_class::<PyPoint>()?;
+    m.add_class::<PyReference>()?;
     m.add_class::<PyProject>()?;
     Ok(())
 }

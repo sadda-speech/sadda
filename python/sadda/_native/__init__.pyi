@@ -10,9 +10,13 @@ import typing
 __all__ = [
     "Audio",
     "Bundle",
+    "Interval",
+    "Point",
     "Project",
+    "Reference",
     "Session",
     "Speaker",
+    "Tier",
     "f0",
     "load_wav",
     "new_project",
@@ -115,6 +119,92 @@ class Bundle:
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
+class Interval:
+    r"""
+    One interval annotation. Read-only view; create via
+    `Project.add_interval(...)`.
+    """
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Annotation id.
+        """
+    @property
+    def tier_id(self) -> builtins.int:
+        r"""
+        Tier this interval belongs to.
+        """
+    @property
+    def start_seconds(self) -> builtins.float:
+        r"""
+        Start time in seconds.
+        """
+    @property
+    def end_seconds(self) -> builtins.float:
+        r"""
+        End time in seconds.
+        """
+    @property
+    def duration_seconds(self) -> builtins.float:
+        r"""
+        Duration in seconds (`end_seconds - start_seconds`).
+        """
+    @property
+    def label(self) -> typing.Optional[builtins.str]:
+        r"""
+        Label string.
+        """
+    @property
+    def parent_annotation_id(self) -> typing.Optional[builtins.int]:
+        r"""
+        Parent annotation id in the parent tier.
+        """
+    @property
+    def extra(self) -> typing.Optional[builtins.str]:
+        r"""
+        JSON `extra` payload.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class Point:
+    r"""
+    One point annotation. Read-only view; create via
+    `Project.add_point(...)`.
+    """
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Annotation id.
+        """
+    @property
+    def tier_id(self) -> builtins.int:
+        r"""
+        Tier this point belongs to.
+        """
+    @property
+    def time_seconds(self) -> builtins.float:
+        r"""
+        Time in seconds.
+        """
+    @property
+    def label(self) -> typing.Optional[builtins.str]:
+        r"""
+        Label string.
+        """
+    @property
+    def parent_annotation_id(self) -> typing.Optional[builtins.int]:
+        r"""
+        Parent annotation id.
+        """
+    @property
+    def extra(self) -> typing.Optional[builtins.str]:
+        r"""
+        JSON `extra` payload.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
 class Project:
     r"""
     A sadda project: a directory holding audio, derived signals, attachments,
@@ -180,6 +270,91 @@ class Project:
         r"""
         Sets the user string written into `audit_log.user` for subsequent
         mutations on this connection.
+        """
+    def add_tier(self, bundle_id: builtins.int, name: builtins.str, r#type: builtins.str, *, parent_id: typing.Optional[builtins.int] = None, cardinality: typing.Optional[builtins.str] = None, schema: typing.Optional[builtins.str] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
+        r"""
+        Inserts a Tier row. `type` is one of `interval`, `point`, `reference`,
+        `continuous_numeric`, `continuous_vector`, `categorical_sampled`.
+        Returns the new tier's id.
+        """
+    def tiers(self, bundle_id: typing.Optional[builtins.int] = None) -> builtins.list[Tier]:
+        r"""
+        Lists tiers, optionally restricted to a single bundle.
+        """
+    def get_tier(self, id: builtins.int) -> Tier:
+        r"""
+        Fetches a single tier by id.
+        """
+    def add_interval(self, tier_id: builtins.int, start_seconds: builtins.float, end_seconds: builtins.float, *, label: typing.Optional[builtins.str] = None, parent_annotation_id: typing.Optional[builtins.int] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
+        r"""
+        Inserts an interval annotation. Enforces parent-child cardinality at
+        insert time; raises `ValueError` on cardinality violation.
+        """
+    def intervals(self, tier_id: builtins.int) -> builtins.list[Interval]:
+        r"""
+        Lists intervals for a tier in (start_seconds, id) order.
+        """
+    def add_point(self, tier_id: builtins.int, time_seconds: builtins.float, *, label: typing.Optional[builtins.str] = None, parent_annotation_id: typing.Optional[builtins.int] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
+        r"""
+        Inserts a point annotation. Enforces parent-child cardinality.
+        """
+    def points(self, tier_id: builtins.int) -> builtins.list[Point]:
+        r"""
+        Lists points for a tier in (time_seconds, id) order.
+        """
+    def add_reference(self, tier_id: builtins.int, target_kind: builtins.str, target_id: builtins.int, *, label: typing.Optional[builtins.str] = None, parent_annotation_id: typing.Optional[builtins.int] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
+        r"""
+        Inserts a reference annotation pointing at another row via
+        `(target_kind, target_id)`.
+        """
+    def references_for(self, tier_id: builtins.int) -> builtins.list[Reference]:
+        r"""
+        Lists references for a tier in id order. Named `references_for`
+        rather than `references` (which collides with Rust's `ref` family
+        of grep targets).
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class Reference:
+    r"""
+    One reference annotation. Read-only view; create via
+    `Project.add_reference(...)`.
+    """
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Annotation id.
+        """
+    @property
+    def tier_id(self) -> builtins.int:
+        r"""
+        Tier this reference belongs to.
+        """
+    @property
+    def target_kind(self) -> builtins.str:
+        r"""
+        Target kind: `bundle` | `session` | `speaker` | `tier` | `annotation`.
+        """
+    @property
+    def target_id(self) -> builtins.int:
+        r"""
+        Target row id.
+        """
+    @property
+    def label(self) -> typing.Optional[builtins.str]:
+        r"""
+        Label string.
+        """
+    @property
+    def parent_annotation_id(self) -> typing.Optional[builtins.int]:
+        r"""
+        Parent annotation id.
+        """
+    @property
+    def extra(self) -> typing.Optional[builtins.str]:
+        r"""
+        JSON `extra` payload.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -276,6 +451,64 @@ class Speaker:
     def extra(self) -> typing.Optional[builtins.str]:
         r"""
         Freeform JSON payload.
+        """
+    @property
+    def created_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC creation timestamp.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class Tier:
+    r"""
+    One annotation tier: the header row in `tier`. Annotation rows
+    belonging to it live in `annotation_interval` / `annotation_point` /
+    `annotation_reference` (for the three sparse types) or a Parquet sidecar
+    (the three dense types, landing in B3). Read-only view; create via
+    `Project.add_tier(...)`.
+    """
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Tier id (primary key).
+        """
+    @property
+    def bundle_id(self) -> builtins.int:
+        r"""
+        Bundle this tier belongs to.
+        """
+    @property
+    def name(self) -> builtins.str:
+        r"""
+        Human-readable tier name (unique within a bundle).
+        """
+    @property
+    def r#type(self) -> builtins.str:
+        r"""
+        Tier type: one of `interval`, `point`, `reference`,
+        `continuous_numeric`, `continuous_vector`, `categorical_sampled`.
+        """
+    @property
+    def parent_id(self) -> typing.Optional[builtins.int]:
+        r"""
+        Optional parent tier id.
+        """
+    @property
+    def cardinality(self) -> typing.Optional[builtins.str]:
+        r"""
+        Parent-child cardinality (`one_to_one` | `one_to_many` | `many_to_one`
+        | `none`).
+        """
+    @property
+    def schema(self) -> typing.Optional[builtins.str]:
+        r"""
+        JSON `schema` payload.
+        """
+    @property
+    def extra(self) -> typing.Optional[builtins.str]:
+        r"""
+        JSON `extra` payload.
         """
     @property
     def created_at(self) -> builtins.str:
