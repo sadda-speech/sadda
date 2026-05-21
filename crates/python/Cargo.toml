@@ -8,7 +8,11 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "sadda"
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 sadda-engine = { path = "../engine" }
-
-# PyO3 wiring intentionally deferred until the engine has surface worth exposing.
+pyo3 = { version = "0.28", features = ["extension-module"] }
+numpy = "0.28"
