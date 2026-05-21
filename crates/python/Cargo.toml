@@ -14,5 +14,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 sadda-engine = { path = "../engine" }
-pyo3 = { version = "0.28", features = ["extension-module"] }
+# NOTE: extension-module is enabled via pyproject.toml's [tool.maturin]
+# section when building the wheel; keeping it off here avoids unifying it
+# across the workspace (which would break crates/script-engine's
+# auto-initialize embedding mode).
+pyo3 = { version = "0.28" }
 numpy = "0.28"

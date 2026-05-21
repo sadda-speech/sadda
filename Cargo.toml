@@ -5,6 +5,7 @@ members = [
     "crates/python",
     "crates/app",
     "crates/uniffi",
+    "crates/script-engine",
 ]
 
 [workspace.package]
