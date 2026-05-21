@@ -9,3 +9,5 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+hound = "3.5"
+thiserror = "2"
