@@ -1,6 +1,12 @@
-//! Project directory + SQLite-backed corpus database. The full v1 entity model
-//! (Speaker, Session, Tier, AuditLog, ProcessingRun, …) lands later; today the
-//! schema covers only `project` and `bundle`.
+//! Project directory + SQLite-backed corpus database. Schema is owned by the
+//! [`migrations`] module; this file holds the user-facing types (`Project`,
+//! `Bundle`) and the project-directory layout.
+//!
+//! The full v1 entity model (Speaker, Session, Tier, AuditLog, ProcessingRun, …)
+//! lands in the B-cluster slices; today the schema covers only `project`,
+//! `bundle`, and `schema_migrations`.
+
+pub mod migrations;
 
 use std::path::{Path, PathBuf};
 
@@ -8,35 +14,6 @@ use rusqlite::Connection;
 
 use crate::Audio;
 use crate::error::{EngineError, Result};
-
-/// Schema version of the corpus database written by this engine.
-/// Bumped whenever the schema changes; future migration scaffolding will
-/// live alongside this constant.
-pub const SCHEMA_VERSION: i64 = 1;
-
-const SCHEMA_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version    INTEGER NOT NULL PRIMARY KEY,
-    applied_at TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS project (
-    id         INTEGER PRIMARY KEY CHECK (id = 1),
-    name       TEXT    NOT NULL,
-    profile    TEXT    NOT NULL DEFAULT 'phonetician',
-    created_at TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS bundle (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    name                TEXT    NOT NULL,
-    audio_relative_path TEXT    NOT NULL UNIQUE,
-    sample_rate         INTEGER NOT NULL,
-    channels            INTEGER NOT NULL,
-    n_frames            INTEGER NOT NULL,
-    created_at          TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-"#;
 
 /// A sadda project: a directory holding audio, derived signals, attachments,
 /// and a SQLite-backed corpus database.
@@ -72,7 +49,9 @@ pub struct Bundle {
 }
 
 impl Project {
-    /// Creates a new project at `path`. The path must not exist yet.
+    /// Creates a new project at `path`. The path must not exist yet. Lays
+    /// down the directory tree, opens a fresh `corpus.db`, runs the full
+    /// migration chain, and writes the `project.toml` marker.
     pub fn create(path: impl AsRef<Path>, name: &str) -> Result<Self> {
         let root = path.as_ref().to_path_buf();
         if root.exists() {
@@ -87,23 +66,23 @@ impl Project {
         std::fs::create_dir_all(root.join("attachments"))?;
         std::fs::create_dir_all(root.join("exports"))?;
 
-        let conn = Connection::open(root.join("corpus.db"))?;
-        conn.execute_batch(SCHEMA_SQL)?;
+        let mut conn = Connection::open(root.join("corpus.db"))?;
+        migrations::run(&mut conn)?;
         conn.execute("INSERT INTO project (id, name) VALUES (1, ?1)", [name])?;
-        conn.execute(
-            "INSERT INTO schema_migrations (version) VALUES (?1)",
-            [SCHEMA_VERSION],
-        )?;
 
         let toml = format!(
-            "name = \"{name}\"\nschema_version = {SCHEMA_VERSION}\nprofile = \"phonetician\"\n"
+            "name = \"{name}\"\nschema_version = {}\nprofile = \"phonetician\"\n",
+            migrations::engine_max_version()
         );
         std::fs::write(root.join("project.toml"), toml)?;
 
         Ok(Project { root, conn })
     }
 
-    /// Opens an existing project at `path`.
+    /// Opens an existing project at `path`. Applies any pending migrations
+    /// first, writing a `corpus.db.bak.<old_version>` backup beforehand.
+    /// Refuses to open a database whose schema version exceeds this engine's
+    /// (returning [`EngineError::SchemaTooNew`]).
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let root = path.as_ref().to_path_buf();
         let db_path = root.join("corpus.db");
@@ -113,7 +92,21 @@ impl Project {
                 root.display()
             )));
         }
-        let conn = Connection::open(&db_path)?;
+        let mut conn = Connection::open(&db_path)?;
+
+        let db_version = migrations::current_db_version(&conn)?;
+        let engine_max = migrations::engine_max_version();
+        if db_version > engine_max {
+            return Err(EngineError::SchemaTooNew {
+                db_version,
+                engine_max,
+            });
+        }
+        if db_version < engine_max {
+            backup_corpus_db(&conn, &db_path, db_version)?;
+            migrations::run(&mut conn)?;
+        }
+
         Ok(Project { root, conn })
     }
 
@@ -198,6 +191,14 @@ impl Project {
         )?;
         Audio::from_wav_path(self.root.join(rel_path))
     }
+}
+
+fn backup_corpus_db(conn: &Connection, db_path: &Path, from_version: i64) -> Result<()> {
+    // Flush any WAL state into the main file so the copy is self-contained.
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    let backup_path = db_path.with_file_name(format!("corpus.db.bak.{from_version}"));
+    std::fs::copy(db_path, &backup_path)?;
+    Ok(())
 }
 
 #[cfg(test)]

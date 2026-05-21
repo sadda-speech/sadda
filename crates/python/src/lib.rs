@@ -26,6 +26,12 @@ fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
         sadda_engine::EngineError::Corpus(msg) => {
             PyRuntimeError::new_err(format!("corpus error: {msg}"))
         }
+        sadda_engine::EngineError::SchemaTooNew {
+            db_version,
+            engine_max,
+        } => PyRuntimeError::new_err(format!(
+            "corpus database schema (v{db_version}) is newer than this engine (max v{engine_max}); upgrade sadda or restore an older backup"
+        )),
     }
 }
 
