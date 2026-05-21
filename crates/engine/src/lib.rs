@@ -9,7 +9,7 @@ pub mod error;
 pub mod pitch;
 
 pub use audio::Audio;
-pub use corpus::{Bundle, Project, SCHEMA_VERSION};
+pub use corpus::{Bundle, Project};
 pub use error::{EngineError, Result};
 pub use pitch::{PitchConfig, PitchFrame, autocorrelation};
 
@@ -17,6 +17,13 @@ pub use pitch::{PitchConfig, PitchFrame, autocorrelation};
 /// time. Useful as a sanity check at the language-binding boundaries.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// Returns the highest corpus-database schema version this build of the
+/// engine knows how to apply. Bumped whenever a new migration is added under
+/// `crates/engine/migrations/`.
+pub fn schema_version() -> i64 {
+    corpus::migrations::engine_max_version()
 }
 
 #[cfg(test)]

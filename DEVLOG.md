@@ -6,6 +6,82 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-21 — Migration framework (A1): hand-rolled migrator, forward-only, always back up
+
+Goal: settle the first Phase 1 slice. A1 wires migrations into `engine::corpus` so that every subsequent slice — starting with B1's eight-table schema expansion — rides on proper rails rather than the Phase-0 `CREATE TABLE IF NOT EXISTS` blob.
+
+### What A1 must deliver
+
+From the Phase-1 slicing entry: (1) a real migration framework, (2) the `schema_migrations` table extended for richer provenance, (3) a forward-compat clamp (engine refuses to open a DB newer than itself), (4) `corpus.db.bak.<old_version>` written before any destructive migration, (5) per-migration tests.
+
+### Tool choice: hand-rolled, ~50 LOC
+
+The slicing entry framed the choice as "`sqlx::migrate!` vs `refinery`", but that framing pre-dated the rusqlite commitment in Phase 0. Real candidates with `rusqlite` already in the dep graph:
+
+| | rusqlite_migration | refinery | sqlx::migrate! | hand-rolled |
+|---|---|---|---|---|
+| Native to `rusqlite::Connection` | ✅ | needs shim | ❌ pulls sqlx | ✅ |
+| SQL strings | ✅ | ✅ `V<n>__name.sql` | ✅ | ✅ via `include_str!` |
+| Rust closures per migration | ✅ first-class | ❌ | ❌ | ✅ |
+| Custom version-tracking table | ❌ (uses `PRAGMA user_version` only, by design) | ❌ (uses `refinery_schema_history`) | ❌ (uses `_sqlx_migrations`) | ✅ |
+| Multi-DB | SQLite-only | PG/MySQL/SQLite | PG/MySQL/SQLite/MSSQL | n/a |
+
+The initial recommendation was `rusqlite_migration`, but verifying its API surface (crate version `1.3.1`, the one compatible with our pinned `rusqlite = "0.32"`) revealed a hard constraint: it does **not** support a custom version-tracking table — `PRAGMA user_version` is hard-wired. Upgrading to the 2.x line doesn't fix this; the design is "no custom table" across all versions. `refinery` has the same flavor of issue (its own `refinery_schema_history`). Since Phase 0 deliberately seeded `schema_migrations` as the canonical version-tracking surface and the slicing entry pinned it as the contract A1 extends, sticking with the off-the-shelf tools would mean keeping `schema_migrations` as a parallel audit log written manually from each migration body — collapsing back to most of the hand-rolled code anyway.
+
+Hand-rolled is roughly 50 LOC: a sorted iteration over embedded SQL strings + closure `fn` registrations, each step run inside `conn.transaction()`, each writing its own row into `schema_migrations`. The "supports Rust closures" requirement is trivial without a library. Zero new dependencies, one source of truth for schema version.
+
+### Confirmed A1 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Migration tool | **Hand-rolled (~50 LOC)** | None of the off-the-shelf tools support a custom version-tracking table; Phase 0's `schema_migrations` is canonical; hand-rolled gives one source of truth and zero new deps |
+| Migration direction | **Forward-only** | SQLite's column-drop story makes faithful down-migrations rare; backup files are the real recovery path; restoring `corpus.db.bak.<n>` is the documented recovery flow |
+| Backup policy | **Always back up before any migration run** | Classifying "destructive" per-migration is error-prone; SQLite file copies are cheap; pruning old backups is a separate concern |
+| Version-tracking table | **Keep custom `schema_migrations`, extend it** | Preserves Phase-0 continuity; add `name TEXT` and `checksum TEXT` columns for provenance and tamper detection; written atomically with each migration in the same transaction |
+
+### Layout
+
+- `crates/engine/migrations/V<n>__<short_name>.sql` — versioned SQL migration files, embedded via `include_str!` at compile time. `V1` is the Phase-0 baseline (`project` + `bundle` + `schema_migrations`), restated so a fresh DB walks the same path as upgraded DBs.
+- `crates/engine/src/corpus/migrations.rs` — registry: a `static` slice of `Migration { version, name, kind: Sql(&'static str) | Rust(fn(&Transaction) -> Result<()>), checksum: &'static str }`, plus a `pub fn run(conn: &mut Connection) -> Result<MigrationOutcome>` that applies anything missing.
+- `crates/engine/src/corpus.rs` — refactored: `Project::create` calls `migrations::run` on a fresh DB; `Project::open` runs the forward-compat clamp first, then the backup, then `migrations::run` if anything is pending.
+- `crates/engine/tests/migrations.rs` — integration tests. For each version `N ≥ 2`: seed a DB at `N-1` (using only the SQL up to `V<N-1>`), apply forward, assert post-migration invariants. Plus one "fresh-create from latest" smoke test that walks the full chain on an empty DB.
+
+### Schema_migrations extension
+
+Phase-0 columns: `version INTEGER PRIMARY KEY, applied_at TEXT DEFAULT CURRENT_TIMESTAMP`.
+A1 adds:
+- `name TEXT NOT NULL` — short slug from the migration filename, for listing and grepping
+- `checksum TEXT NOT NULL` — SHA-256 of the SQL body (or `"rust:<fn-name>"` for closure migrations), so a future engine can detect that a previously-applied migration's contents have since changed (tamper / accidental edit). Computed at compile time via a tiny `build.rs` so the constant lives next to the SQL.
+
+The `V1` migration writes its own row into `schema_migrations` to seed the new columns. Phase-0 DBs already in the wild would have a row with `version=1, name=NULL, checksum=NULL`; a `V2` migration handles the backfill before the B1 schema work lands on top.
+
+### Forward-compat clamp
+
+After opening the connection, read `MAX(version)` from `schema_migrations`. If that exceeds the highest version known at compile time (the last entry in the static migration slice), `Project::open` returns `EngineError::SchemaTooNew { db_version, engine_max }` instead of running any analysis. The error message points the user at upgrading the engine.
+
+### Backup mechanics
+
+Before invoking the migration runner, if `MAX(version) < engine_max`:
+1. Issue `PRAGMA wal_checkpoint(TRUNCATE)` to flush WAL state into the main file.
+2. Copy `corpus.db` → `corpus.db.bak.<current_version>` via `std::fs::copy`.
+3. Apply migrations.
+
+Backups are not garbage-collected by A1 — that's a future concern (a `sadda corpus gc-backups` CLI verb, or a `project.toml` retention policy). Disk overhead for v1 corpora is modest enough that this can wait.
+
+### What this entry doesn't decide
+
+- **Backup retention policy.** Out of scope for A1. Likely a CLI verb later.
+- **Closure-migration ergonomics.** The first closure migration arrives in B1 or B2; the exact call-site shape is determined when a real case appears.
+- **Migration linting.** A future `cargo xtask check-migrations` (verify checksums on disk against `schema_migrations`, no out-of-order files) is plausible; A1 ships only the runtime checks.
+
+### Sources / references
+
+- 2026-05-21 Phase 1 slicing entry (this entry expands its A1 row)
+- 2026-05-18 corpus data-model entry (B-cluster scope this framework will carry)
+- `rusqlite_migration` 1.3.1 API verification (custom version table not supported): https://docs.rs/rusqlite_migration/1.3.1/rusqlite_migration/
+
+---
+
 ## 2026-05-21 — Phase 1 slicing: 12 slices in 7 clusters toward 0.1
 
 Goal: sequence Phase 1's deliverables (full corpus schema, six tier types, DSP suite, TextGrid + EAF I/O, live recording, stability decorators, type stubs, recipes, migration framework) into a concrete commit-by-commit ordering. The 2026-05-18 milestone-plan entry committed to Phase 1's *scope*; this entry commits to its *cadence and ordering*.

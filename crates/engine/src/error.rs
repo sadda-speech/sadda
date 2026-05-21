@@ -31,6 +31,20 @@ pub enum EngineError {
     /// bundle, project not found, …).
     #[error("corpus error: {0}")]
     Corpus(String),
+
+    /// The corpus database is at a higher schema version than this engine
+    /// knows how to read. Forward-compat clamp: the engine refuses to open
+    /// rather than risk operating on tables it doesn't understand. Resolution
+    /// is to upgrade the engine (or restore an older `corpus.db.bak.<n>`).
+    #[error(
+        "corpus database schema (v{db_version}) is newer than this engine (max v{engine_max}); upgrade sadda or restore an older backup"
+    )]
+    SchemaTooNew {
+        /// Highest version found in the database's `schema_migrations` table.
+        db_version: i64,
+        /// Highest version known to this build of the engine.
+        engine_max: i64,
+    },
 }
 
 /// Convenience alias for `Result<T, EngineError>`, mirroring the std lib's
