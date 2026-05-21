@@ -1,3 +1,6 @@
+//! WAV loading and the in-memory `Audio` type. Format support today: PCM
+//! 16/24/32-bit integer and 32-bit float; FLAC and other formats follow later.
+
 use std::path::Path;
 
 use crate::error::{EngineError, Result};
@@ -7,7 +10,9 @@ use crate::error::{EngineError, Result};
 pub struct Audio {
     /// Interleaved samples; for stereo the layout is `[L0, R0, L1, R1, ...]`.
     pub samples: Vec<f32>,
+    /// Sample rate in Hz (samples per second per channel).
     pub sample_rate: u32,
+    /// Number of audio channels (1 = mono, 2 = stereo, …).
     pub channels: u16,
 }
 
