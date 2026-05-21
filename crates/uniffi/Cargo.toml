@@ -8,7 +8,14 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lib]
+name = "sadda_uniffi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
 [dependencies]
 sadda-engine = { path = "../engine" }
-
-# UniFFI wiring deferred until the Phase 0 spike actually bridges a method to Swift / Kotlin.
+uniffi = { version = "0.31", features = ["cli"] }
