@@ -188,6 +188,222 @@ impl BundleSpec {
     }
 }
 
+/// One of the six sparse / dense tier types. The three sparse variants
+/// (`interval`, `point`, `reference`) are exposed in B2; the dense ones
+/// (`continuous_numeric`, `continuous_vector`, `categorical_sampled`) ship
+/// with Parquet sidecars in B3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TierType {
+    /// Time-interval annotations: phones, words, segments.
+    Interval,
+    /// Point annotations: event markers, clicks, glottal pulses.
+    Point,
+    /// Reference annotations: lexicon links, trial links, speaker turns.
+    Reference,
+    /// Dense single-channel numeric track (F0, intensity); B3.
+    ContinuousNumeric,
+    /// Dense multi-channel numeric track (embeddings, MFCC); B3.
+    ContinuousVector,
+    /// Dense categorical track (VAD, voicing on/off); B3.
+    CategoricalSampled,
+}
+
+impl TierType {
+    /// Returns the lowercase enum string stored in `tier.type` (matches the
+    /// SQL CHECK constraint values).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TierType::Interval => "interval",
+            TierType::Point => "point",
+            TierType::Reference => "reference",
+            TierType::ContinuousNumeric => "continuous_numeric",
+            TierType::ContinuousVector => "continuous_vector",
+            TierType::CategoricalSampled => "categorical_sampled",
+        }
+    }
+}
+
+impl std::str::FromStr for TierType {
+    type Err = EngineError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Ok(match s {
+            "interval" => TierType::Interval,
+            "point" => TierType::Point,
+            "reference" => TierType::Reference,
+            "continuous_numeric" => TierType::ContinuousNumeric,
+            "continuous_vector" => TierType::ContinuousVector,
+            "categorical_sampled" => TierType::CategoricalSampled,
+            other => return Err(EngineError::Corpus(format!("unknown tier type: {other}"))),
+        })
+    }
+}
+
+/// One annotation tier (the header row in `tier`). Annotation rows belonging
+/// to this tier live in the appropriate sparse table (B2) or a Parquet
+/// sidecar (B3).
+#[derive(Debug, Clone)]
+pub struct Tier {
+    /// Tier id (primary key).
+    pub id: i64,
+    /// Bundle this tier belongs to.
+    pub bundle_id: i64,
+    /// Human-readable tier name (unique within a bundle).
+    pub name: String,
+    /// One of the six tier types.
+    pub r#type: TierType,
+    /// Optional parent tier id (for hierarchical relations like word→phone).
+    pub parent_id: Option<i64>,
+    /// Parent-child cardinality. `None` is treated as `"none"`.
+    pub cardinality: Option<String>,
+    /// JSON `schema` payload describing type-specific config.
+    pub schema: Option<String>,
+    /// Freeform JSON payload.
+    pub extra: Option<String>,
+    /// ISO 8601 UTC timestamp set at insert time.
+    pub created_at: String,
+}
+
+/// Optional fields for creating a [`Tier`]. Use [`TierSpec::new`] for the
+/// minimum (bundle_id, name, type).
+#[derive(Debug, Clone, Default)]
+pub struct TierSpec {
+    /// Bundle the tier attaches to.
+    pub bundle_id: i64,
+    /// Tier name (must be unique within the bundle).
+    pub name: String,
+    /// Tier type.
+    pub r#type: Option<TierType>,
+    /// Optional parent tier.
+    pub parent_id: Option<i64>,
+    /// Parent-child cardinality (`one_to_one` | `one_to_many` | `many_to_one`
+    /// | `none`). Required if `parent_id` is set; ignored otherwise.
+    pub cardinality: Option<String>,
+    /// JSON `schema` payload.
+    pub schema: Option<String>,
+    /// JSON `extra` payload.
+    pub extra: Option<String>,
+}
+
+impl TierSpec {
+    /// Builds a spec from the minimum required fields.
+    pub fn new(bundle_id: i64, name: impl Into<String>, r#type: TierType) -> Self {
+        Self {
+            bundle_id,
+            name: name.into(),
+            r#type: Some(r#type),
+            ..Default::default()
+        }
+    }
+}
+
+/// One interval annotation. Stored in `annotation_interval`.
+#[derive(Debug, Clone)]
+pub struct Interval {
+    /// Annotation id.
+    pub id: i64,
+    /// Tier this interval belongs to.
+    pub tier_id: i64,
+    /// Start time in seconds (must be < `end_seconds`).
+    pub start_seconds: f64,
+    /// End time in seconds.
+    pub end_seconds: f64,
+    /// Label string (e.g. phone or word).
+    pub label: Option<String>,
+    /// Parent annotation id in the parent tier (required if the tier has a
+    /// parent; null otherwise).
+    pub parent_annotation_id: Option<i64>,
+    /// Freeform JSON payload.
+    pub extra: Option<String>,
+}
+
+/// Optional fields for creating an [`Interval`].
+#[derive(Debug, Clone, Default)]
+pub struct IntervalSpec {
+    /// Tier id (required).
+    pub tier_id: i64,
+    /// Start time in seconds.
+    pub start_seconds: f64,
+    /// End time in seconds (must exceed `start_seconds`).
+    pub end_seconds: f64,
+    /// Label string.
+    pub label: Option<String>,
+    /// Parent annotation id (required if tier has a parent; rejected otherwise).
+    pub parent_annotation_id: Option<i64>,
+    /// JSON `extra` payload.
+    pub extra: Option<String>,
+}
+
+/// One point annotation. Stored in `annotation_point`.
+#[derive(Debug, Clone)]
+pub struct Point {
+    /// Annotation id.
+    pub id: i64,
+    /// Tier this point belongs to.
+    pub tier_id: i64,
+    /// Time in seconds.
+    pub time_seconds: f64,
+    /// Label string.
+    pub label: Option<String>,
+    /// Parent annotation id.
+    pub parent_annotation_id: Option<i64>,
+    /// JSON `extra` payload.
+    pub extra: Option<String>,
+}
+
+/// Optional fields for creating a [`Point`].
+#[derive(Debug, Clone, Default)]
+pub struct PointSpec {
+    /// Tier id (required).
+    pub tier_id: i64,
+    /// Time in seconds.
+    pub time_seconds: f64,
+    /// Label string.
+    pub label: Option<String>,
+    /// Parent annotation id (required if tier has a parent).
+    pub parent_annotation_id: Option<i64>,
+    /// JSON `extra` payload.
+    pub extra: Option<String>,
+}
+
+/// One reference annotation. Stored in `annotation_reference`. Points at
+/// another entity / bundle / session / tier / annotation via
+/// `(target_kind, target_id)`.
+#[derive(Debug, Clone)]
+pub struct Reference {
+    /// Annotation id.
+    pub id: i64,
+    /// Tier this reference belongs to.
+    pub tier_id: i64,
+    /// Target kind: `bundle` | `session` | `speaker` | `tier` | `annotation`.
+    pub target_kind: String,
+    /// Target row id within the appropriate target table.
+    pub target_id: i64,
+    /// Label string.
+    pub label: Option<String>,
+    /// Parent annotation id.
+    pub parent_annotation_id: Option<i64>,
+    /// JSON `extra` payload.
+    pub extra: Option<String>,
+}
+
+/// Optional fields for creating a [`Reference`].
+#[derive(Debug, Clone, Default)]
+pub struct ReferenceSpec {
+    /// Tier id (required).
+    pub tier_id: i64,
+    /// Target kind (required; see [`Reference::target_kind`]).
+    pub target_kind: String,
+    /// Target row id (required).
+    pub target_id: i64,
+    /// Label string.
+    pub label: Option<String>,
+    /// Parent annotation id (required if tier has a parent).
+    pub parent_annotation_id: Option<i64>,
+    /// JSON `extra` payload.
+    pub extra: Option<String>,
+}
+
 impl Project {
     /// Creates a new project at `path`. The path must not exist yet. Lays
     /// down the directory tree, opens a fresh `corpus.db`, runs the full
@@ -501,6 +717,354 @@ impl Project {
             .execute("UPDATE _audit_context SET user = ?1 WHERE id = 1", [user])?;
         Ok(())
     }
+
+    /// Inserts a [`Tier`] row.
+    pub fn add_tier(&self, spec: &TierSpec) -> Result<i64> {
+        let tier_type = spec
+            .r#type
+            .ok_or_else(|| EngineError::Corpus("TierSpec.type is required".into()))?;
+        let id: i64 = self.conn.query_row(
+            "INSERT INTO tier (bundle_id, name, type, parent_id, cardinality, schema, extra) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING id",
+            rusqlite::params![
+                spec.bundle_id,
+                spec.name,
+                tier_type.as_str(),
+                spec.parent_id,
+                spec.cardinality,
+                spec.schema,
+                spec.extra,
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// Lists tiers for a given bundle (or every tier in the project when
+    /// `bundle_id` is `None`), in id order.
+    pub fn tiers(&self, bundle_id: Option<i64>) -> Result<Vec<Tier>> {
+        let (sql, params): (&str, Vec<i64>) = match bundle_id {
+            Some(b) => (
+                "SELECT id, bundle_id, name, type, parent_id, cardinality, schema, extra, created_at \
+                 FROM tier WHERE bundle_id = ?1 ORDER BY id",
+                vec![b],
+            ),
+            None => (
+                "SELECT id, bundle_id, name, type, parent_id, cardinality, schema, extra, created_at \
+                 FROM tier ORDER BY id",
+                vec![],
+            ),
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let mapper = |row: &rusqlite::Row<'_>| -> rusqlite::Result<Tier> {
+            let type_str: String = row.get(3)?;
+            Ok(Tier {
+                id: row.get(0)?,
+                bundle_id: row.get(1)?,
+                name: row.get(2)?,
+                r#type: type_str
+                    .parse::<TierType>()
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                parent_id: row.get(4)?,
+                cardinality: row.get(5)?,
+                schema: row.get(6)?,
+                extra: row.get(7)?,
+                created_at: row.get(8)?,
+            })
+        };
+        let rows = if params.is_empty() {
+            stmt.query_map([], mapper)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        } else {
+            stmt.query_map(rusqlite::params_from_iter(params), mapper)?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        Ok(rows)
+    }
+
+    /// Fetches a single tier by id.
+    pub fn get_tier(&self, id: i64) -> Result<Tier> {
+        let tier = self.conn.query_row(
+            "SELECT id, bundle_id, name, type, parent_id, cardinality, schema, extra, created_at \
+             FROM tier WHERE id = ?1",
+            [id],
+            |row| {
+                let type_str: String = row.get(3)?;
+                Ok(Tier {
+                    id: row.get(0)?,
+                    bundle_id: row.get(1)?,
+                    name: row.get(2)?,
+                    r#type: type_str
+                        .parse::<TierType>()
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                    parent_id: row.get(4)?,
+                    cardinality: row.get(5)?,
+                    schema: row.get(6)?,
+                    extra: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            },
+        )?;
+        Ok(tier)
+    }
+
+    /// Inserts an interval annotation. Enforces parent-child cardinality at
+    /// insert time (see the 2026-05-21 B2 DEVLOG entry).
+    pub fn add_interval(&self, spec: &IntervalSpec) -> Result<i64> {
+        let tier = self.get_tier(spec.tier_id)?;
+        if tier.r#type != TierType::Interval {
+            return Err(EngineError::Corpus(format!(
+                "tier {} is type {:?}; expected Interval",
+                tier.id, tier.r#type
+            )));
+        }
+        self.enforce_cardinality(&tier, "annotation_interval", spec.parent_annotation_id)?;
+        let id: i64 = self.conn.query_row(
+            "INSERT INTO annotation_interval \
+                (tier_id, start_seconds, end_seconds, label, parent_annotation_id, extra) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id",
+            rusqlite::params![
+                spec.tier_id,
+                spec.start_seconds,
+                spec.end_seconds,
+                spec.label,
+                spec.parent_annotation_id,
+                spec.extra,
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// Lists intervals for a tier in (start_seconds, id) order.
+    pub fn intervals(&self, tier_id: i64) -> Result<Vec<Interval>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, tier_id, start_seconds, end_seconds, label, parent_annotation_id, extra \
+             FROM annotation_interval WHERE tier_id = ?1 ORDER BY start_seconds, id",
+        )?;
+        let rows = stmt
+            .query_map([tier_id], |row| {
+                Ok(Interval {
+                    id: row.get(0)?,
+                    tier_id: row.get(1)?,
+                    start_seconds: row.get(2)?,
+                    end_seconds: row.get(3)?,
+                    label: row.get(4)?,
+                    parent_annotation_id: row.get(5)?,
+                    extra: row.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Inserts a point annotation.
+    pub fn add_point(&self, spec: &PointSpec) -> Result<i64> {
+        let tier = self.get_tier(spec.tier_id)?;
+        if tier.r#type != TierType::Point {
+            return Err(EngineError::Corpus(format!(
+                "tier {} is type {:?}; expected Point",
+                tier.id, tier.r#type
+            )));
+        }
+        self.enforce_cardinality(&tier, "annotation_point", spec.parent_annotation_id)?;
+        let id: i64 = self.conn.query_row(
+            "INSERT INTO annotation_point \
+                (tier_id, time_seconds, label, parent_annotation_id, extra) \
+             VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
+            rusqlite::params![
+                spec.tier_id,
+                spec.time_seconds,
+                spec.label,
+                spec.parent_annotation_id,
+                spec.extra,
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// Lists points for a tier in (time_seconds, id) order.
+    pub fn points(&self, tier_id: i64) -> Result<Vec<Point>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, tier_id, time_seconds, label, parent_annotation_id, extra \
+             FROM annotation_point WHERE tier_id = ?1 ORDER BY time_seconds, id",
+        )?;
+        let rows = stmt
+            .query_map([tier_id], |row| {
+                Ok(Point {
+                    id: row.get(0)?,
+                    tier_id: row.get(1)?,
+                    time_seconds: row.get(2)?,
+                    label: row.get(3)?,
+                    parent_annotation_id: row.get(4)?,
+                    extra: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Inserts a reference annotation.
+    pub fn add_reference(&self, spec: &ReferenceSpec) -> Result<i64> {
+        let tier = self.get_tier(spec.tier_id)?;
+        if tier.r#type != TierType::Reference {
+            return Err(EngineError::Corpus(format!(
+                "tier {} is type {:?}; expected Reference",
+                tier.id, tier.r#type
+            )));
+        }
+        self.enforce_cardinality(&tier, "annotation_reference", spec.parent_annotation_id)?;
+        let id: i64 = self.conn.query_row(
+            "INSERT INTO annotation_reference \
+                (tier_id, target_kind, target_id, label, parent_annotation_id, extra) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id",
+            rusqlite::params![
+                spec.tier_id,
+                spec.target_kind,
+                spec.target_id,
+                spec.label,
+                spec.parent_annotation_id,
+                spec.extra,
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// Lists references for a tier in id order. Named `references_for` rather
+    /// than `references` because the latter shadows a Rust language keyword
+    /// in common usage and the latter is more grep-able on the API surface.
+    pub fn references_for(&self, tier_id: i64) -> Result<Vec<Reference>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, tier_id, target_kind, target_id, label, parent_annotation_id, extra \
+             FROM annotation_reference WHERE tier_id = ?1 ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([tier_id], |row| {
+                Ok(Reference {
+                    id: row.get(0)?,
+                    tier_id: row.get(1)?,
+                    target_kind: row.get(2)?,
+                    target_id: row.get(3)?,
+                    label: row.get(4)?,
+                    parent_annotation_id: row.get(5)?,
+                    extra: row.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Returns the rows of a sparse tier as a Vec of [`AnnotationRow`] —
+    /// the raw shape the Python layer wraps in a `polars.DataFrame`.
+    pub fn tier_rows(&self, tier_id: i64) -> Result<TierRows> {
+        let tier = self.get_tier(tier_id)?;
+        match tier.r#type {
+            TierType::Interval => Ok(TierRows::Interval(self.intervals(tier_id)?)),
+            TierType::Point => Ok(TierRows::Point(self.points(tier_id)?)),
+            TierType::Reference => Ok(TierRows::Reference(self.references_for(tier_id)?)),
+            TierType::ContinuousNumeric
+            | TierType::ContinuousVector
+            | TierType::CategoricalSampled => Err(EngineError::Corpus(format!(
+                "tier {} is dense ({:?}); use the Parquet sidecar APIs (B3)",
+                tier.id, tier.r#type
+            ))),
+        }
+    }
+
+    fn enforce_cardinality(
+        &self,
+        child_tier: &Tier,
+        child_table: &str,
+        parent_annotation_id: Option<i64>,
+    ) -> Result<()> {
+        let parent_tier_id = match child_tier.parent_id {
+            None => {
+                if parent_annotation_id.is_some() {
+                    return Err(EngineError::Cardinality(format!(
+                        "tier {} has no parent_tier but parent_annotation_id was provided",
+                        child_tier.id
+                    )));
+                }
+                return Ok(());
+            }
+            Some(p) => p,
+        };
+        let parent_annotation_id = parent_annotation_id.ok_or_else(|| {
+            EngineError::Cardinality(format!(
+                "tier {} has parent tier {}; parent_annotation_id is required",
+                child_tier.id, parent_tier_id
+            ))
+        })?;
+
+        // Verify the parent annotation exists in the right table for the
+        // parent tier's type.
+        let parent_tier = self.get_tier(parent_tier_id)?;
+        let parent_table = match parent_tier.r#type {
+            TierType::Interval => "annotation_interval",
+            TierType::Point => "annotation_point",
+            TierType::Reference => "annotation_reference",
+            _ => {
+                return Err(EngineError::Cardinality(format!(
+                    "parent tier {} is dense ({:?}); only sparse tiers can be parents in B2",
+                    parent_tier.id, parent_tier.r#type
+                )));
+            }
+        };
+        let parent_exists: i64 = self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM {parent_table} WHERE id = ?1 AND tier_id = ?2"),
+            rusqlite::params![parent_annotation_id, parent_tier_id],
+            |row| row.get(0),
+        )?;
+        if parent_exists == 0 {
+            return Err(EngineError::Cardinality(format!(
+                "parent annotation {parent_annotation_id} not found in tier {parent_tier_id} \
+                 (table {parent_table})"
+            )));
+        }
+
+        match child_tier.cardinality.as_deref() {
+            Some("one_to_one") => {
+                let already: i64 = self.conn.query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {child_table} \
+                         WHERE tier_id = ?1 AND parent_annotation_id = ?2"
+                    ),
+                    rusqlite::params![child_tier.id, parent_annotation_id],
+                    |row| row.get(0),
+                )?;
+                if already > 0 {
+                    return Err(EngineError::Cardinality(format!(
+                        "one_to_one violation: tier {} already has a child for parent \
+                         annotation {parent_annotation_id}",
+                        child_tier.id
+                    )));
+                }
+                Ok(())
+            }
+            Some("one_to_many") | Some("none") | None => Ok(()),
+            Some("many_to_one") => Err(EngineError::Cardinality(
+                "many_to_one cardinality is not supported until B-cluster follow-up".into(),
+            )),
+            Some(other) => Err(EngineError::Cardinality(format!(
+                "unknown cardinality {other:?}"
+            ))),
+        }
+    }
+}
+
+/// Result of [`Project::tier_rows`]: a typed enum of the three sparse-tier
+/// row shapes. The Python layer dispatches on the variant to build a
+/// tier-type-specific `polars.DataFrame`.
+#[derive(Debug, Clone)]
+pub enum TierRows {
+    /// Rows from an `interval` tier.
+    Interval(Vec<Interval>),
+    /// Rows from a `point` tier.
+    Point(Vec<Point>),
+    /// Rows from a `reference` tier.
+    Reference(Vec<Reference>),
 }
 
 fn backup_corpus_db(conn: &Connection, db_path: &Path, from_version: i64) -> Result<()> {

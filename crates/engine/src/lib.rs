@@ -9,7 +9,10 @@ pub mod error;
 pub mod pitch;
 
 pub use audio::Audio;
-pub use corpus::{Bundle, BundleSpec, Project, Session, SessionSpec, Speaker, SpeakerSpec};
+pub use corpus::{
+    Bundle, BundleSpec, Interval, IntervalSpec, Point, PointSpec, Project, Reference,
+    ReferenceSpec, Session, SessionSpec, Speaker, SpeakerSpec, Tier, TierRows, TierSpec, TierType,
+};
 pub use error::{EngineError, Result};
 pub use pitch::{PitchConfig, PitchFrame, autocorrelation};
 

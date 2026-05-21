@@ -17,6 +17,7 @@ use crate::error::{EngineError, Result};
 const V1_SQL: &str = include_str!("../../migrations/V1__phase0_baseline.sql");
 const V2_SQL: &str = include_str!("../../migrations/V2__schema_migrations_provenance.sql");
 const V3_SQL: &str = include_str!("../../migrations/V3__entity_schema.sql");
+const V4_SQL: &str = include_str!("../../migrations/V4__sparse_annotations.sql");
 
 /// One forward-only migration step.
 struct Migration {
@@ -58,6 +59,11 @@ static MIGRATIONS: &[Migration] = &[
         version: 3,
         name: "entity_schema",
         kind: Kind::Sql(V3_SQL),
+    },
+    Migration {
+        version: 4,
+        name: "sparse_annotations",
+        kind: Kind::Sql(V4_SQL),
     },
 ];
 
@@ -172,7 +178,7 @@ mod tests {
 
     #[test]
     fn engine_max_version_matches_static_table() {
-        assert_eq!(engine_max_version(), 3);
+        assert_eq!(engine_max_version(), 4);
     }
 
     #[test]
@@ -208,6 +214,9 @@ mod tests {
         assert_eq!(rows[2].0, 3);
         assert_eq!(rows[2].1.as_deref(), Some("entity_schema"));
         assert_eq!(rows[2].2.as_deref(), Some(checksum_of(V3_SQL).as_str()));
+        assert_eq!(rows[3].0, 4);
+        assert_eq!(rows[3].1.as_deref(), Some("sparse_annotations"));
+        assert_eq!(rows[3].2.as_deref(), Some(checksum_of(V4_SQL).as_str()));
     }
 
     #[test]
