@@ -38,3 +38,24 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python + project
+        # `uv sync` installs dev deps and uses maturin to build + install
+        # the sadda wheel into .venv/.
+        run: uv sync
+
+      - name: Regenerate type stubs
+        run: uv run cargo run --bin stub_gen
+
+      - name: Verify stubs are committed and up to date
+        run: |
+          if ! git diff --exit-code python/sadda/_native/__init__.pyi; then
+            echo "::error::python/sadda/_native/__init__.pyi is stale. Run 'cargo run --bin stub_gen' and commit the result."
+            exit 1
+          fi
+
+      - name: pytest
+        run: uv run pytest python/tests/ -v

@@ -9,8 +9,15 @@ repository.workspace = true
 rust-version.workspace = true
 
 [lib]
-name = "sadda"
+# Cargo defaults the [lib] name to the snake-cased package name
+# (sadda_python). The pyo3 module symbol is `_native` (matches the
+# #[pymodule] fn name); maturin places the compiled extension at
+# python/sadda/_native.<tag>.so per `module-name` in pyproject.toml.
 crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "stub_gen"
+path = "src/bin/stub_gen.rs"
 
 [dependencies]
 sadda-engine = { path = "../engine" }
@@ -20,3 +27,4 @@ sadda-engine = { path = "../engine" }
 # auto-initialize embedding mode).
 pyo3 = { version = "0.28" }
 numpy = "0.28"
+pyo3-stub-gen = "0.22"
