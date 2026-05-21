@@ -3051,6 +3051,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sadda-script-engine"
+version = "0.0.0"
+dependencies = [
+ "pyo3",
+]
+
+[[package]]
 name = "sadda-uniffi"
 version = "0.0.0"
 dependencies = [
