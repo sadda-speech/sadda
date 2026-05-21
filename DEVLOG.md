@@ -6,6 +6,140 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-21 — Full entity schema + AuditLog (B1): triggers + JSON1, Speaker/Session API only, schema-only for the rest
+
+Goal: settle the third Phase 1 slice. B1 lays down the SQLite-side scaffolding for the v1 entity model (Speaker, Session, Bundle-extension, Tier-header, Entity, EntityRef, Instrument, Protocol, ProcessingRun, AuditLog) and the trigger-based audit infrastructure. Annotation CRUD (B2) and Parquet sidecars (B3) build on top of this schema; F1's recipes write `processing_run` rows.
+
+### What B1 must deliver
+
+From the Phase-1 slicing entry: (1) the schema for nine new entity tables; (2) `extra: json` columns throughout; (3) append-only AuditLog with mutation triggers; (4) ProcessingRun (the renamed ModelRun per the 2026-05-20 ML-registry entry).
+
+### Scope: schema everywhere, API for Speaker + Session + Bundle only
+
+The schema lands in full so subsequent slices (B2, B3, F1, …) build on the same migration. The Rust + Python API surface is intentionally narrower in B1:
+
+| Table | Schema in V3? | Public API in B1? | First public-API slice |
+|---|---|---|---|
+| `speaker` | ✅ | ✅ | B1 |
+| `session` | ✅ | ✅ | B1 |
+| `bundle` (extended) | ✅ | ✅ (optional `session_id` + `speaker_id` args) | B1 |
+| `instrument` | ✅ | — | B2 or later |
+| `protocol` | ✅ | — | E1 (live recording) or experiments slice |
+| `entity` | ✅ | — | profile-driven; later |
+| `entity_ref` | ✅ | — | B2 (when ref-tier annotations land) |
+| `tier` (header) | ✅ | — | B2 (when annotation rows land) |
+| `processing_run` | ✅ | — | F1 (recipe.record) |
+| `audit_log` + `_audit_context` | ✅ | minimal: `proj.set_audit_user(name)` | B1 |
+
+The narrower API surface keeps B1's commit footprint near the Phase-1 cadence target (~750–1000 LOC). Future slices wire each table into Python as their first real user appears, with no further schema work needed.
+
+### AuditLog: SQLite triggers + `_audit_context` singleton
+
+Three options surfaced — application-level (each engine mutation INSERTs its own audit row), triggers (DB enforces; can't be bypassed), or a hybrid. Triggers won because the regulatory-stance entry calls for "every analysis step recorded" — application-level logging is one direct `INSERT` from a forgotten audit row, and any future plugin / SQL CLI usage bypasses it entirely. Triggers fire regardless of caller.
+
+User attribution: a singleton `_audit_context` row holds the current user; triggers read it (`(SELECT user FROM _audit_context)`); the Rust API sets it on connection (`Project::set_audit_user`). Default is `"local"` (no auth in v1). Recipe replay can override per-block when F1 lands.
+
+JSON payloads via SQLite's `json_object()` (JSON1 extension; bundled with rusqlite since long before our pinned 0.32). Trigger shape per audited table:
+
+```sql
+CREATE TRIGGER <table>_audit_insert AFTER INSERT ON <table> BEGIN
+    INSERT INTO audit_log (user, table_name, row_id, op, before, after)
+    VALUES (
+        (SELECT user FROM _audit_context),
+        '<table>',
+        NEW.id,
+        'insert',
+        NULL,
+        json_object('col1', NEW.col1, 'col2', NEW.col2, ...)
+    );
+END;
+-- Plus _audit_update (before + after JSON) and _audit_delete (before only) variants.
+```
+
+Audited tables: `speaker`, `session`, `instrument`, `protocol`, `entity`, `entity_ref`, `bundle`, `tier`, `processing_run`. **NOT** audited: `project` (singleton), `schema_migrations` (managed by migrator), `audit_log` itself (would recurse), `_audit_context` (engine-internal).
+
+**Trigger-rebuild discipline**: any future migration that `ALTER TABLE`s an audited table must `DROP TRIGGER IF EXISTS` + recreate the three triggers so JSON column lists stay current. Codified in a comment at the top of V3 and a checklist line in `crates/engine/migrations/README.md` (to be added).
+
+### Confirmed B1 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Audit mechanism | **SQLite triggers + `_audit_context` singleton** | DB-enforced; survives external SQL writes; matches regulatory stance |
+| Bundle ↔ Speaker | **Nullable FK `bundle.speaker_id`** | Common case covered cleanly; multi-speaker handled via per-segment tier rows in B2 |
+| Python API shape | **Flat methods on `Project`** | Matches Phase-0 / A2 surface; namespacing decision settles once for the whole corpus layer later |
+| `user` field | **`_audit_context` table; engine sets on connection; default `"local"`** | No auth in v1; explicit setter lets F1 recipes scope user per-block |
+| Migration granularity | **One V3 migration** | Cohesive atomic schema bump; aligns with one-slice-one-commit cadence |
+| Schema-only vs API'd tables | **API for Speaker + Session + Bundle-extension; rest schema-only until a first real user appears** | Keeps B1 commit at Phase-1 cadence target; no API churn when later slices add the public surface for Entity/Instrument/…|
+
+### Layout
+
+- `crates/engine/migrations/V3__entity_schema.sql` — full schema bump.
+- `crates/engine/src/corpus.rs` — adds `Speaker`, `Session` structs; `Project::{add_speaker, speakers, get_speaker, add_session, sessions, get_session, set_audit_user, audit_user}`; extends `Project::add_bundle` to accept optional `session_id` + `speaker_id`.
+- `crates/python/src/lib.rs` — PyO3 wrappers; `#[gen_stub_*]` attributes.
+- `python/sadda/__init__.py` — re-exports + `@stable` decoration.
+- `crates/engine/tests/migrations.rs` — extended: V3 applies on fresh DB and on a synthesized post-V2 DB; triggers fire and write the expected JSON; bundle extension keeps existing Phase-0 columns intact.
+- `python/tests/test_corpus.py` — Speaker/Session add+list round-trips.
+
+### Schema sketch
+
+```sql
+-- Entities (each with extra TEXT for JSON payload):
+CREATE TABLE speaker (id, name, sex, birth_year, notes, extra, created_at);
+CREATE TABLE session (id, name, started_at, ended_at, location,
+                     instrument_id REFERENCES instrument(id),
+                     protocol_id   REFERENCES protocol(id),
+                     notes, extra, created_at);
+CREATE TABLE instrument (id, name, kind, serial, calibration, extra, created_at);
+CREATE TABLE protocol (id, name, description, schema, extra, created_at);
+CREATE TABLE entity (id, kind, name, extra, created_at);
+CREATE TABLE entity_ref (id, entity_id, target_kind, target_id, role, extra);
+CREATE TABLE tier (id, bundle_id, name, type, parent_id, cardinality,
+                  schema, extra, created_at, UNIQUE (bundle_id, name));
+CREATE TABLE processing_run (id, bundle_id, kind, processor_id, processor_version,
+                             weights_checksum, parameters, input_tier_ids,
+                             output_tier_ids, output_signal_ids,
+                             started_at, finished_at, status, error_message,
+                             recipe_run_id);
+
+-- Bundle extension:
+ALTER TABLE bundle ADD COLUMN session_id INTEGER REFERENCES session(id);
+ALTER TABLE bundle ADD COLUMN speaker_id INTEGER REFERENCES speaker(id);
+ALTER TABLE bundle ADD COLUMN extra TEXT;
+
+-- Audit:
+CREATE TABLE _audit_context (id INTEGER PK CHECK(id=1), user TEXT NOT NULL DEFAULT 'local');
+INSERT INTO _audit_context VALUES (1, 'local');
+CREATE TABLE audit_log (id, timestamp, user, table_name, row_id, op, before, after);
+
+-- 27 triggers (3 per audited table × 9 audited tables).
+```
+
+Type enums in CHECK constraints:
+- `tier.type IN ('interval', 'point', 'reference', 'continuous_numeric', 'continuous_vector', 'categorical_sampled')`
+- `tier.cardinality IN ('one_to_one', 'one_to_many', 'many_to_one', 'none')`
+- `entity_ref.target_kind IN ('bundle', 'session', 'speaker', 'tier', 'annotation')`
+- `processing_run.kind IN ('ml_model', 'dsp_algorithm', 'clinical_measure', 'plugin')`
+- `processing_run.status IN ('ok', 'error', 'partial')`
+- `audit_log.op IN ('insert', 'update', 'delete')`
+
+### What this entry doesn't decide
+
+- **Trigger regeneration tooling.** A future `cargo xtask audit-triggers` (introspect tables, generate trigger SQL from `PRAGMA table_info`) is plausible but out of scope; per-migration discipline carries B1.
+- **Cross-bundle query API.** The corpus-data-model entry's deferred item ("how a phonetician asks 'all phones across all bundles'") stays deferred — it's a query-language decision, not a schema one. Polars-DataFrame queries via `proj.query(...)` arrive in B2.
+- **JSON-schema validation for `extra`.** Profile schemas validate `extra` payloads — they exist as files per the 2026-05-20 profile-catalog entry; wiring them into the engine's write path is a later concern.
+- **Audit log retention.** Pruning, archival, vacuum policy — out of scope for B1. Likely a CLI verb after real usage.
+
+### Sources / references
+
+- 2026-05-18 corpus data-model entry (entity tables, audit-log shape)
+- 2026-05-20 ML-model-registry entry (ProcessingRun rename + schema)
+- 2026-05-18 clinical regulatory entry (audit-trail requirements)
+- 2026-05-21 Phase 1 slicing entry (B1 row)
+- SQLite JSON1 extension docs: https://sqlite.org/json1.html
+- PostgreSQL audit_trigger pattern: https://wiki.postgresql.org/wiki/Audit_trigger_91plus
+
+---
+
 ## 2026-05-21 — Stability decorators + type stubs (A2): mixed-project layout, pyo3-stub-gen, all-STABLE Phase-0 tiering
 
 Goal: settle the second Phase 1 slice. A2 introduces the API contract — `@stable` / `@provisional` / `@experimental` decorators with one-time runtime warnings — and the type-stub pipeline that every subsequent slice carries. The 2026-05-18 Python-API-surface entry already pinned the tier semantics; A2 commits to *how* they're implemented and integrated.

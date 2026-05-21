@@ -9,8 +9,15 @@ import pathlib
 import typing
 __all__ = [
     "Audio",
+    "Bundle",
+    "Project",
+    "Session",
+    "Speaker",
     "f0",
     "load_wav",
+    "new_project",
+    "open_project",
+    "schema_version",
     "version",
 ]
 
@@ -53,6 +60,230 @@ class Audio:
         """
     def __repr__(self) -> builtins.str: ...
 
+@typing.final
+class Bundle:
+    r"""
+    One recording inside a [`Project`]: audio header plus optional Session +
+    Speaker FKs and a freeform JSON `extra` payload. Read-only view; mutate
+    via `Project.add_bundle(...)`.
+    """
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Bundle id (primary key).
+        """
+    @property
+    def name(self) -> builtins.str:
+        r"""
+        Human-readable bundle name.
+        """
+    @property
+    def audio_relative_path(self) -> builtins.str:
+        r"""
+        Audio file path relative to the project root.
+        """
+    @property
+    def sample_rate(self) -> builtins.int:
+        r"""
+        Audio sample rate in Hz.
+        """
+    @property
+    def channels(self) -> builtins.int:
+        r"""
+        Number of audio channels.
+        """
+    @property
+    def n_frames(self) -> builtins.int:
+        r"""
+        Number of audio frames (samples per channel).
+        """
+    @property
+    def session_id(self) -> typing.Optional[builtins.int]:
+        r"""
+        Optional Session id this bundle belongs to.
+        """
+    @property
+    def speaker_id(self) -> typing.Optional[builtins.int]:
+        r"""
+        Optional Speaker id this bundle recorded.
+        """
+    @property
+    def extra(self) -> typing.Optional[builtins.str]:
+        r"""
+        Freeform JSON payload (stored as text).
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class Project:
+    r"""
+    A sadda project: a directory holding audio, derived signals, attachments,
+    and a SQLite-backed corpus database. Construct via `sadda.new_project(...)`
+    or `sadda.open_project(...)`.
+    """
+    @property
+    def root(self) -> builtins.str:
+        r"""
+        Project's filesystem root.
+        """
+    @property
+    def name(self) -> builtins.str:
+        r"""
+        Project's human-readable name (from the singleton `project` row).
+        """
+    @property
+    def audit_user(self) -> builtins.str:
+        r"""
+        User string written into `audit_log.user` for mutations on this
+        connection. Defaults to `"local"`.
+        """
+    def add_bundle(self, name: builtins.str, source_audio_path: builtins.str | os.PathLike | pathlib.Path, *, session_id: typing.Optional[builtins.int] = None, speaker_id: typing.Optional[builtins.int] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
+        r"""
+        Registers a bundle by copying `source_audio_path` into the project's
+        `signals/original/` directory and recording its metadata in the corpus
+        database. Returns the new bundle's id. Optional kwargs attach the
+        bundle to a Session / Speaker and set a JSON `extra` payload.
+        """
+    def bundles(self) -> builtins.list[Bundle]:
+        r"""
+        Lists all bundles in id order.
+        """
+    def load_audio(self, bundle_id: builtins.int) -> Audio:
+        r"""
+        Loads the audio file for a bundle.
+        """
+    def add_speaker(self, name: builtins.str, *, sex: typing.Optional[builtins.str] = None, birth_year: typing.Optional[builtins.int] = None, notes: typing.Optional[builtins.str] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
+        r"""
+        Inserts a Speaker row. Returns the new speaker's id.
+        """
+    def speakers(self) -> builtins.list[Speaker]:
+        r"""
+        Lists all speakers in id order.
+        """
+    def get_speaker(self, id: builtins.int) -> Speaker:
+        r"""
+        Fetches a single speaker by id.
+        """
+    def add_session(self, name: builtins.str, *, started_at: typing.Optional[builtins.str] = None, ended_at: typing.Optional[builtins.str] = None, location: typing.Optional[builtins.str] = None, instrument_id: typing.Optional[builtins.int] = None, protocol_id: typing.Optional[builtins.int] = None, notes: typing.Optional[builtins.str] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
+        r"""
+        Inserts a Session row. Returns the new session's id.
+        """
+    def sessions(self) -> builtins.list[Session]:
+        r"""
+        Lists all sessions in id order.
+        """
+    def get_session(self, id: builtins.int) -> Session:
+        r"""
+        Fetches a single session by id.
+        """
+    def set_audit_user(self, user: builtins.str) -> None:
+        r"""
+        Sets the user string written into `audit_log.user` for subsequent
+        mutations on this connection.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class Session:
+    r"""
+    A recording session — a time-bounded block during which one or more
+    bundles were captured. Read-only view; create via `Project.add_session(...)`.
+    """
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Session id (primary key).
+        """
+    @property
+    def name(self) -> builtins.str:
+        r"""
+        Human-readable session name.
+        """
+    @property
+    def started_at(self) -> typing.Optional[builtins.str]:
+        r"""
+        ISO 8601 UTC start timestamp.
+        """
+    @property
+    def ended_at(self) -> typing.Optional[builtins.str]:
+        r"""
+        ISO 8601 UTC end timestamp.
+        """
+    @property
+    def location(self) -> typing.Optional[builtins.str]:
+        r"""
+        Free-form location label.
+        """
+    @property
+    def instrument_id(self) -> typing.Optional[builtins.int]:
+        r"""
+        FK into the instrument table.
+        """
+    @property
+    def protocol_id(self) -> typing.Optional[builtins.int]:
+        r"""
+        FK into the protocol table.
+        """
+    @property
+    def notes(self) -> typing.Optional[builtins.str]:
+        r"""
+        Freeform notes.
+        """
+    @property
+    def extra(self) -> typing.Optional[builtins.str]:
+        r"""
+        Freeform JSON payload.
+        """
+    @property
+    def created_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC creation timestamp.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class Speaker:
+    r"""
+    A person who produced speech in the project (participant, patient, case
+    subject, …). Read-only view; create via `Project.add_speaker(...)`.
+    """
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Speaker id (primary key).
+        """
+    @property
+    def name(self) -> builtins.str:
+        r"""
+        Human-readable name or pseudonymous identifier.
+        """
+    @property
+    def sex(self) -> typing.Optional[builtins.str]:
+        r"""
+        Sex / gender label (free text).
+        """
+    @property
+    def birth_year(self) -> typing.Optional[builtins.int]:
+        r"""
+        Birth year (full integer year).
+        """
+    @property
+    def notes(self) -> typing.Optional[builtins.str]:
+        r"""
+        Freeform notes.
+        """
+    @property
+    def extra(self) -> typing.Optional[builtins.str]:
+        r"""
+        Freeform JSON payload.
+        """
+    @property
+    def created_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC creation timestamp.
+        """
+    def __repr__(self) -> builtins.str: ...
+
 def f0(audio: Audio, *, frame_size_seconds: builtins.float = 0.029999999329447746, hop_size_seconds: builtins.float = 0.009999999776482582, min_freq_hz: builtins.float = 75.0, max_freq_hz: builtins.float = 500.0) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float32]]:
     r"""
     Estimates f0 over an Audio via time-domain autocorrelation.
@@ -64,6 +295,24 @@ def f0(audio: Audio, *, frame_size_seconds: builtins.float = 0.02999999932944774
 def load_wav(path: builtins.str | os.PathLike | pathlib.Path) -> Audio:
     r"""
     Loads a WAV file from disk. Returns a sadda.Audio.
+    """
+
+def new_project(path: builtins.str | os.PathLike | pathlib.Path, name: builtins.str) -> Project:
+    r"""
+    Creates a new sadda project at `path` (which must not already exist).
+    Returns a sadda.Project handle ready for `.add_speaker(...)` /
+    `.add_session(...)` / `.add_bundle(...)` calls.
+    """
+
+def open_project(path: builtins.str | os.PathLike | pathlib.Path) -> Project:
+    r"""
+    Opens an existing sadda project at `path`. Applies any pending schema
+    migrations first, writing a `corpus.db.bak.<old_version>` backup.
+    """
+
+def schema_version() -> builtins.int:
+    r"""
+    Returns the highest corpus-database schema version this engine supports.
     """
 
 def version() -> builtins.str:
