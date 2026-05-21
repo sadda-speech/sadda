@@ -2,9 +2,11 @@
 
 pub mod audio;
 pub mod error;
+pub mod pitch;
 
 pub use audio::Audio;
 pub use error::{EngineError, Result};
+pub use pitch::{PitchConfig, PitchFrame, autocorrelation};
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
