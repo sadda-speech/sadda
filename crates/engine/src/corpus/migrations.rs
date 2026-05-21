@@ -16,6 +16,7 @@ use crate::error::{EngineError, Result};
 
 const V1_SQL: &str = include_str!("../../migrations/V1__phase0_baseline.sql");
 const V2_SQL: &str = include_str!("../../migrations/V2__schema_migrations_provenance.sql");
+const V3_SQL: &str = include_str!("../../migrations/V3__entity_schema.sql");
 
 /// One forward-only migration step.
 struct Migration {
@@ -52,6 +53,11 @@ static MIGRATIONS: &[Migration] = &[
             run: v2_run,
             sql_for_checksum: V2_SQL,
         },
+    },
+    Migration {
+        version: 3,
+        name: "entity_schema",
+        kind: Kind::Sql(V3_SQL),
     },
 ];
 
@@ -166,7 +172,7 @@ mod tests {
 
     #[test]
     fn engine_max_version_matches_static_table() {
-        assert_eq!(engine_max_version(), 2);
+        assert_eq!(engine_max_version(), 3);
     }
 
     #[test]
@@ -181,9 +187,9 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         let outcome = run(&mut conn).unwrap();
         assert_eq!(outcome.from_version, 0);
-        assert_eq!(outcome.to_version, 2);
-        assert_eq!(outcome.applied, 2);
-        assert_eq!(current_db_version(&conn).unwrap(), 2);
+        assert_eq!(outcome.to_version, engine_max_version());
+        assert_eq!(outcome.applied, engine_max_version() as usize);
+        assert_eq!(current_db_version(&conn).unwrap(), engine_max_version());
 
         let rows: Vec<(i64, Option<String>, Option<String>)> = conn
             .prepare("SELECT version, name, checksum FROM schema_migrations ORDER BY version")
@@ -192,13 +198,16 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), engine_max_version() as usize);
         assert_eq!(rows[0].0, 1);
         assert_eq!(rows[0].1.as_deref(), Some("phase0_baseline"));
         assert_eq!(rows[0].2.as_deref(), Some(checksum_of(V1_SQL).as_str()));
         assert_eq!(rows[1].0, 2);
         assert_eq!(rows[1].1.as_deref(), Some("schema_migrations_provenance"));
         assert_eq!(rows[1].2.as_deref(), Some(checksum_of(V2_SQL).as_str()));
+        assert_eq!(rows[2].0, 3);
+        assert_eq!(rows[2].1.as_deref(), Some("entity_schema"));
+        assert_eq!(rows[2].2.as_deref(), Some(checksum_of(V3_SQL).as_str()));
     }
 
     #[test]
@@ -206,8 +215,8 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         run(&mut conn).unwrap();
         let again = run(&mut conn).unwrap();
-        assert_eq!(again.from_version, 2);
-        assert_eq!(again.to_version, 2);
+        assert_eq!(again.from_version, engine_max_version());
+        assert_eq!(again.to_version, engine_max_version());
         assert_eq!(again.applied, 0);
     }
 
@@ -226,7 +235,7 @@ mod tests {
                 engine_max,
             }) => {
                 assert_eq!(db_version, 99);
-                assert_eq!(engine_max, 2);
+                assert_eq!(engine_max, engine_max_version());
             }
             other => panic!("expected SchemaTooNew, got {other:?}"),
         }
