@@ -25,6 +25,10 @@ htmlcov/
 *.pyd
 *.dylib
 
+# UniFFI smoke-test artifacts
+crates/uniffi/smoke-test/generated/
+crates/uniffi/smoke-test/smoke
+
 # Editors / OS
 .DS_Store
 Thumbs.db
