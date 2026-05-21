@@ -94,11 +94,10 @@ pub fn current_db_version(conn: &Connection) -> Result<i64> {
     if exists == 0 {
         return Ok(0);
     }
-    let v: Option<i64> = conn.query_row(
-        "SELECT MAX(version) FROM schema_migrations",
-        [],
-        |row| row.get(0),
-    )?;
+    let v: Option<i64> =
+        conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })?;
     Ok(v.unwrap_or(0))
 }
 

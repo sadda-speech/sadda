@@ -1,8 +1,11 @@
-//! PyO3 bindings for sadda — builds into the `sadda` Python module via maturin.
+//! PyO3 bindings for sadda — built by maturin into `sadda._native`, the Rust
+//! submodule of the [`sadda`] Python package. User-facing imports happen via
+//! `python/sadda/__init__.py`, which re-exports these symbols with stability
+//! decorators applied.
 //!
-//! Doc comments on `#[pyfunction]`, `#[pyclass]`, and `#[pymethods]` items here
-//! become the corresponding Python `__doc__` strings, so they serve both the
-//! Rust API reference and `help(sadda.X)` in a REPL.
+//! Doc comments on `#[pyfunction]`, `#[pyclass]`, and `#[pymethods]` items
+//! here become the corresponding Python `__doc__` strings, so they serve both
+//! the Rust API reference and `help(sadda.X)` in a REPL.
 #![warn(missing_docs)]
 
 use std::path::PathBuf;
@@ -10,6 +13,7 @@ use std::path::PathBuf;
 use numpy::{IntoPyArray, PyArray1};
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
 fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
     match e {
@@ -38,11 +42,13 @@ fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
 /// Audio data loaded from disk. Samples are interleaved float32 in `[-1.0, 1.0]`;
 /// for stereo the layout is `[L0, R0, L1, R1, ...]`. Construct via
 /// `sadda.load_wav(path)`.
+#[gen_stub_pyclass]
 #[pyclass(name = "Audio")]
 struct PyAudio {
     inner: sadda_engine::Audio,
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyAudio {
     /// Sample rate in Hz.
@@ -94,12 +100,14 @@ impl PyAudio {
 }
 
 /// Returns the underlying engine version string.
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn version() -> &'static str {
     sadda_engine::version()
 }
 
 /// Loads a WAV file from disk. Returns a sadda.Audio.
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn load_wav(path: PathBuf) -> PyResult<PyAudio> {
     let audio = sadda_engine::Audio::from_wav_path(&path).map_err(engine_err_to_py)?;
@@ -110,6 +118,7 @@ fn load_wav(path: PathBuf) -> PyResult<PyAudio> {
 ///
 /// Returns `(times, frequencies)` as a 2-tuple of NumPy arrays:
 /// `times` is float64 in seconds, `frequencies` is float32 in Hz.
+#[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (audio, *, frame_size_seconds=0.030, hop_size_seconds=0.010, min_freq_hz=75.0, max_freq_hz=500.0))]
 fn f0<'py>(
@@ -132,15 +141,27 @@ fn f0<'py>(
     (times.into_pyarray(py), freqs.into_pyarray(py))
 }
 
-/// sadda — open-source toolkit for phonetics and speech science research.
-///
-/// Phase 0 surface: `version()`, `load_wav(path)`, `f0(audio, ...)` and the
-/// `Audio` class. Many more analyses land in Phase 1.
+/// sadda._native — Rust extension submodule. End users should `import sadda`
+/// and use the decorated re-exports in `sadda.__init__` rather than reaching
+/// in here directly.
 #[pymodule]
-fn sadda(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(load_wav, m)?)?;
     m.add_function(wrap_pyfunction!(f0, m)?)?;
     m.add_class::<PyAudio>()?;
     Ok(())
+}
+
+/// Stub-info gatherer for `pyo3-stub-gen`. The library-provided
+/// `define_stub_info_gatherer!` macro hardcodes the pyproject.toml location to
+/// `CARGO_MANIFEST_DIR/pyproject.toml`; ours lives at the workspace root
+/// (two directories up from `crates/python/`), so we point at it manually.
+pub fn stub_info() -> pyo3_stub_gen::Result<pyo3_stub_gen::StubInfo> {
+    let manifest_dir: &std::path::Path = env!("CARGO_MANIFEST_DIR").as_ref();
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("crates/python/ should sit two directories below the workspace root");
+    pyo3_stub_gen::StubInfo::from_pyproject_toml(workspace_root.join("pyproject.toml"))
 }

@@ -139,10 +139,7 @@ fn opening_phase0_db_upgrades_and_writes_backup() {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
-        assert_eq!(
-            live_cols,
-            vec!["version", "applied_at", "name", "checksum"]
-        );
+        assert_eq!(live_cols, vec!["version", "applied_at", "name", "checksum"]);
 
         let v1: (Option<String>, Option<String>) = live
             .query_row(
