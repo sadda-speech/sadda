@@ -6,6 +6,115 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-21 — Phase 1 slicing: 12 slices in 7 clusters toward 0.1
+
+Goal: sequence Phase 1's deliverables (full corpus schema, six tier types, DSP suite, TextGrid + EAF I/O, live recording, stability decorators, type stubs, recipes, migration framework) into a concrete commit-by-commit ordering. The 2026-05-18 milestone-plan entry committed to Phase 1's *scope*; this entry commits to its *cadence and ordering*.
+
+### What "vertical slice" means in Phase 1
+
+Phase 0's slices touched every architectural layer (engine → corpus → Python → app → UniFFI) per commit. Phase 1's release target is **the Python library on PyPI**, so "vertical" re-reads as: **each slice ends in a usable Python entry point**, not "touches the desktop app." The egui surface stays minimal until Phase 2.
+
+### What changes from Phase 0
+
+| | Phase 0 | Phase 1 |
+|---|---|---|
+| Slices | 8 | 12 |
+| Average LOC / slice | ~375 | ~750 (est.) |
+| Layers crossed per slice | all of them | 2–3 (engine + PyO3 + tests) |
+| Release at end | 0.0 internal | **0.1 to PyPI** |
+
+Slices are roughly 2× thicker than Phase 0 because the work shifts from glue (one layer's worth at a time) to depth (Parquet sidecar I/O alone exceeds the entire Phase 0 corpus crate). Keep one focused commit per slice; CI green after each.
+
+### Decomposition: 7 clusters
+
+Work-items decompose along three orthogonal lines: cross-cutting infrastructure (which gates everything), corpus schema expansion (strict internal dependency chain), and surface work (DSP, I/O, recording, recipes — mostly independent of each other; depends on corpus).
+
+**Cluster A — Cross-cutting infrastructure** (lands first; gates the rest)
+
+1. **Migration framework.** `sqlx::migrate!` or `refinery` wired in; `schema_migrations` table extended (the table itself was seeded in Phase 0 piece 5); engine refuses to open a DB newer than it knows (forward-compat clamp); `corpus.db.bak.<old_version>` written before any destructive migration; per-migration tests. Lands before any schema expansion.
+2. **Stability decorators + type stubs scaffolding.** `@stable / @provisional / @experimental` Python decorators that emit one-time runtime warnings; `pyo3-stub-gen` integrated into the maturin build; `py.typed` marker added; existing Phase-0 APIs (`sadda.version`, `sadda.load_wav`, `sadda.f0`) tiered. Sets the contract that every subsequent slice marks its API surface.
+
+**Cluster B — Corpus schema expansion** (strict order: B1 → B2 → B3)
+
+3. **Full entity schema + AuditLog.** Speaker, Session, Bundle (extended), Tier (header), Entity, EntityRef, Instrument, Protocol. `extra: json` columns throughout. Append-only AuditLog with mutation triggers. ProcessingRun table (the renamed ModelRun per the ML-registry entry).
+4. **Sparse tier types.** `interval`, `point`, `reference` with CRUD + the first cut of `proj.query(...) → polars.DataFrame`. Parent-child cardinality enforced at insert time.
+5. **Dense tier types + Parquet sidecars.** `continuous_numeric`, `continuous_vector`, `categorical_sampled`. `DerivedSignal` registration rows. Reader/writer in `engine::storage::parquet`; mmap-friendly load path so AI-engineer users can `pl.scan_parquet` directly.
+
+**Cluster C — DSP surface** (independent of B; can interleave)
+
+6. **Foundational DSP.** Windowing (Hann, Hamming, Blackman, Gaussian, Kaiser), STFT, spectrogram, intensity. Pure functions over `&[f32]`; no corpus dependency. Polars-friendly outputs.
+7. **Advanced DSP.** Formants via LPC + root-solver; MFCC (mel-filterbank → DCT); refined pitch with voicing decision (extends Phase 0's autocorrelation tracker). Stays inside `engine::dsp`; PyO3 wrappers in `crates/python`.
+
+**Cluster D — Interop I/O**
+
+8. **TextGrid round-trip.** IntervalTier and TextTier import + export; JSON-sentinel (`{json:{…}}`) for attribute round-trip; explicit lossiness documentation. The adoption hinge for Praat users.
+9. **EAF round-trip (bidirectional).** ELAN tier types (ALIGNABLE_ANNOTATION, TIME_SUBDIVISION, SYMBOLIC_ASSOCIATION); `parent_tier_ref` preserved; XML round-trip stable enough that ELAN can re-open exports without warnings.
+
+**Cluster E — Recording**
+
+10. **Live recording (cpal).** `.in_progress/` flow → atomic commit; cpal cross-platform driver; metering callbacks. JACK as a stretch goal — if cpal absorbs the time budget, push JACK to a 0.1.x patch release.
+
+**Cluster F — Reproducibility**
+
+11. **`sadda.recipe.record()` / `.replay()`.** Context manager that logs every analysis call through `ProcessingRun` + `AuditLog`; serializes a recipe as a Python script the user can re-run on the same project or another. Connects the cross-cutting reproducibility need surfaced across corpus + refdist + clinical entries.
+
+**Cluster G — Release**
+
+12. **0.1.0 to PyPI + mkdocs-material docs site.** Claim `sadda` on PyPI; mkdocs-material with mkdocstrings auto-rendering API reference from the Rust `///` doc comments (via a cargo-doc → markdown bridge) and the Python stubs; GitHub Pages hosting; first quickstart tutorial. The 2026-05-21 docs-strategy entry already pinned this as the docs-site start point.
+
+### Dependency graph
+
+```
+A1 ─┐
+    ├─→ B1 ─→ B2 ─→ {D1, D2, F1}
+A2 ─┘    │
+         ├─→ B3 ─→ F1
+         └─→ E1
+
+C1, C2 ──→ (independent; interleave with B)
+
+G12 = last (releases everything above)
+```
+
+Concretely: A1 and A2 first (parallel-OK between them but both before B*). Then B1. C* can begin any time A2 is done — they touch no schema. B2 + B3 follow B1. E1 follows B1. D1 + D2 follow B2 (need at least sparse tiers). F1 follows B1 + the Python API instrumentation that A2 sets up. G12 last.
+
+### Parallel risk spike, off-track
+
+**Embedded CPython distribution.** Per the milestone plan, runs alongside Phase 1 as a fail-fast experiment: one signed macOS `.app` with bundled Python running a real script end-to-end. Validates the packaging story before Phase 7 commits to it. Does **not** gate the 0.1 release — Phase 0's `crates/script-engine` already proved the embed works; the spike is about *shipping* the embed. Pick this up when Mac time is available; tracked separately from the 12-slice plan.
+
+### Confirmed slicing decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| First slice | **Migration framework (A1)** | Infrastructure-first. Every schema change after this rides on solid rails. The first commit is invisible to users; that's fine — Phase 1's first commit is not a marketing release |
+| Slice granularity | **12 slices, ~1 commit each** | Match Phase 0's cadence; atomic CI; easy review. Resist combining clusters into mega-PRs |
+| EAF scope at 0.1 | **Bidirectional** | Don't preemptively apply the cut line. EAF round-trip is in the cut list but cut from default only under pressure; aim for both at 0.1 |
+| PyPI timing | **Single 0.1.0 release at end of Phase 1** | No stub 0.0.x. Name-squatting risk is mitigated by the public `sadda-speech` GitHub org claim already being live. Single launch event |
+
+### What this entry doesn't decide
+
+- **Migration tool choice (`sqlx::migrate!` vs `refinery`).** Settled inside A1's design pass. Both are viable; pick after a small spike.
+- **Recipe serialization format inside F1.** Python script is the user-facing artifact; whether the persistent log is JSON, TOML, or SQL rows is internal.
+- **Which sub-DSP measure goes in C1 vs C2.** Drafted above but the precise cut can shift as code is written.
+- **Live recording UX for the Python API.** `sadda.live.start_session()` is the entry point; subscriber-decorator semantics (per the API-surface entry) are settled at design level but need a concrete spike inside E1.
+- **mkdocs-material theme + nav layout.** Settled inside G12; not architectural.
+
+### Pace and revisit cadence
+
+- Per the milestone plan, Phase 1 is 3–4 months at solo part-time. 12 slices over ~16 weeks ≈ one slice every 1–2 weeks.
+- Revisit this entry after slice 6 (mid-phase). If cadence is slower than 1/week, consider deferring EAF to import-only (the cut-line move) and/or splitting JACK out of E1 entirely.
+- After 0.1 ships: real PyPI users land; feedback may reshape Phase 2 scope. Phase 1 cadence numbers feed into the milestone-plan revisit.
+
+### Sources / references
+
+- 2026-05-18 milestone-plan entry (this entry is downstream of its Phase 1 row)
+- 2026-05-18 corpus data-model entry (B-cluster scope)
+- 2026-05-18 Python API surface entry (A2 stability decorators; F1 recipes)
+- 2026-05-21 documentation strategy entry (G12 docs site)
+- "Tracer Bullets" — Pragmatic Programmer (vertical-slice principle): https://pragprog.com/tips/
+
+---
+
 ## 2026-05-21 — Documentation strategy: discipline now, site at 0.1, polish at 1.0
 
 Goal: settle when and how docs grow. The milestone plan already committed to *"documentation grows incrementally per phase, not as a separate final phase"* but didn't schedule it. This entry pins concrete starts per phase.
