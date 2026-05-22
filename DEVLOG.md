@@ -6,6 +6,260 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-22 — Live recording (E1): cpal capture, rtrb ringbuffer, `.in_progress/` atomic commit, streaming pitch/formants/intensity subscribers
+
+Goal: settle the tenth Phase 1 slice. E1 lands the live-recording surface — the second piece of new functionality after the interop slices, and the most architecturally novel (real-time audio thread + cross-thread plumbing + Python callback dispatch). The 2026-05-18 Python-API-surface entry sketched `sadda.live.start_session(...)` plus subscriber decorators (`@session.on_pitch`, `@session.on_formants`); the 2026-05-21 slicing entry punted the concrete spike "to inside E1." This entry settles it.
+
+### What E1 must deliver
+
+From the Phase-1 slicing entry: (1) `.in_progress/` flow → atomic commit; (2) cpal cross-platform input driver; (3) metering callbacks. Plus the live-coaching surface promised by the API-surface entry: subscriber decorators for pitch, formants, intensity. JACK is **explicitly out of scope** — already cut to a 0.1.x stretch in the slicing entry, and confirmed during this design pass.
+
+### Architecture: three threads, two ringbuffers
+
+Live audio capture cannot block. cpal input callbacks run on a real-time audio thread with hard deadlines (typically 5–20 ms between callbacks at 44.1 kHz); inside the callback we cannot allocate, take locks, or acquire the GIL. Standard pattern across the Rust-Audio ecosystem (Bevy audio, fundsp, samplerate-rs) is to ferry samples to a consumer thread via a lock-free SPSC ringbuffer and do all the slow work there.
+
+```
+┌──────────────────────────────────┐
+│ Audio thread (cpal callback)     │
+│ - receives [f32] chunks from OS  │
+│ - pushes into raw-samples rtrb   │── push samples ──┐
+│ - NO alloc, NO locks, NO GIL     │                  │
+└──────────────────────────────────┘                  │
+                                                      ▼
+                                  ┌──────────────────────────────────┐
+                                  │ Consumer thread (Rust)           │
+                                  │ - drains raw-samples rtrb        │
+                                  │ - writes hound WAV to disk       │
+                                  │ - accumulates DSP window         │
+                                  │ - per hop, runs pitch/intensity/ │
+                                  │   formants on latest window      │
+                                  │ - pushes results into per-       │
+                                  │   measure rtrb queues            │
+                                  └──────────────────────────────────┘
+                                                      │
+                                                      ▼
+                                  ┌──────────────────────────────────┐
+                                  │ Dispatch thread (Rust w/ GIL)    │
+                                  │ - blocking-pop on result rtrbs   │
+                                  │ - Python::with_gil(|py| ...)     │
+                                  │ - invokes registered callables   │
+                                  │ - exits on stop_signal           │
+                                  └──────────────────────────────────┘
+                                                      │
+                                                      ▼
+                                              user's @session.on_pitch
+                                              fn pitch_cb(value, time): ...
+```
+
+Splitting **consumer** from **dispatch** matters: consumer is alloc-free Rust (cheap to run continuously); dispatch holds the GIL to invoke Python (the slow, serialised part). If we merged them, a slow Python callback would stall WAV writing and cause sample drops.
+
+### Crate choices
+
+| Concern | Choice | Why |
+|---|---|---|
+| Audio I/O | **`cpal` 0.16** | Cross-platform (WASAPI / CoreAudio / ALSA / PulseAudio / JACK*); pure-Rust; the de-facto Rust audio I/O crate; used by Bevy. *JACK backend opt-in but we don't enable the feature flag in 0.1 |
+| Lock-free queue | **`rtrb` 0.3** | SPSC ringbuffer the Rust-Audio working group recommends. Wait-free producer, alloc-free push. Minimal API surface (`Producer::push` / `Consumer::pop`). |
+| WAV writer | **`hound` 3.5** | Already a dep (used by tests); supports streamed writes via `write_sample` in a loop |
+| UUID for dirnames | **`uuid` 1** with `v4` | Standard; pure-Rust |
+
+Three new top-level deps (`cpal`, `rtrb`, `uuid`). `hound` is already in tree.
+
+### Session lifecycle
+
+A `LiveSession` is created at `sadda.live.start_session(project, device=..., sample_rate=..., channels=..., name=...)`. The name eventually becomes the bundle name; if absent, a timestamp-based default is used. Construction does:
+
+1. Validates that `signals/.in_progress/` exists; mints `<uuid4>` subdir; opens `audio.wav` for streamed write.
+2. Spawns the audio thread via `cpal::Device::build_input_stream`.
+3. Spawns the consumer thread (Rust).
+4. Spawns the dispatch thread (Rust, holds GIL on each iteration).
+5. Returns the `LiveSession` Python object.
+
+State transitions:
+
+```
+        start_session()         stop()                  commit() | discard()
+Idle ───────────────────► Recording ───────────────► Stopped ──────────────► Committed/Discarded
+                              │                           │
+                              └── auto-flush hound ──────►┘
+```
+
+Calling `stop()` joins all three threads (with a 1-second timeout), flushes hound, and returns control. `commit()` then does the atomic move + bundle insert + processing_run insert; `discard()` deletes the `.in_progress/<uuid>/` directory.
+
+Why split `stop()` and `commit()`: lets the caller inspect meter/result history *after* recording but *before* deciding to keep the bundle. A `with sadda.live.start_session(...) as session:` context manager commits on clean exit and discards on exception.
+
+### Python API
+
+```python
+session = sadda.live.start_session(
+    project,
+    device="default",          # or a specific device name from list_devices()
+    sample_rate=44100,
+    channels=1,
+    name="practice_session_1",
+    analysis_window_ms=30,     # frame size for streaming DSP
+    analysis_hop_ms=10,        # hop between analysis frames
+)
+
+@session.on_meter
+def on_meter(peak_db, rms_db, t):
+    ui.update_meter(peak_db, rms_db)
+
+@session.on_pitch
+def on_pitch(f0_hz, voiced, t):
+    if voiced:
+        print(f"{t:.3f}s  f0={f0_hz:.1f} Hz")
+
+@session.on_intensity
+def on_intensity(intensity_db, t):
+    ...
+
+@session.on_formants
+def on_formants(formants, t):
+    # formants: list[float], length = num_formants requested
+    ...
+
+session.start()              # actually begins capture
+time.sleep(5.0)
+session.stop()
+bundle_id = session.commit() # atomic: moves WAV in, inserts bundle + processing_run
+
+# or:
+with sadda.live.start_session(proj, name="x") as session:
+    @session.on_pitch
+    def cb(f0, voiced, t): ...
+    session.start()
+    time.sleep(5.0)
+# commits on clean exit; discards on exception
+```
+
+Module surface in `sadda.live`:
+
+- `start_session(project, *, device="default", sample_rate=44100, channels=1, name=None, analysis_window_ms=30, analysis_hop_ms=10) → LiveSession`
+- `list_input_devices() → list[str]`
+- `default_input_device() → str | None`
+- `LiveSession` (subscriber decorators + lifecycle methods listed above)
+
+All `PROVISIONAL` per the API-surface entry's stability tiers.
+
+### Streaming-DSP plan
+
+The consumer thread maintains a `VecDeque<f32>` of the last `window_samples` audio samples. Whenever it has advanced by `hop_samples` since the last analysis, it takes a snapshot of the most recent window and runs the DSP suite:
+
+- **Intensity** — RMS of the window in dB-FS via `sadda_engine::dsp::intensity::rms_db` (already in C1).
+- **Pitch** — autocorrelation pitch via `sadda_engine::pitch::autocorrelation` (already in Phase 0 + C2's voicing extension). Single-frame call: no buffering needed.
+- **Formants** — LPC (Burg) + Aberth root-solver via `sadda_engine::dsp::formants::lpc_formants` (already in C2). Default `num_formants = 4`, `lpc_order = 2 + sample_rate / 1000` per the standard rule.
+
+Meter (peak + RMS) is computed once per *chunk* (cpal's natural buffer size, typically ~512–2048 samples), not once per analysis hop. Faster reaction for level UIs; not a "real DSP frame."
+
+Each measure has its own result `rtrb` (size 256 entries) so a slow Python callback for one measure doesn't back-pressure the others.
+
+### Atomic commit flow
+
+```
+signals/
+├── original/                  # committed bundles
+├── derived/                   # B3 Parquet sidecars
+└── .in_progress/              # NEW
+    └── <uuid4>/
+        ├── audio.wav          # streamed by hound
+        └── meta.toml          # device, sr, channels, started_at, intent_name
+```
+
+`commit()` runs these inside a single SQLite transaction:
+
+1. `fsync(audio.wav)` + close.
+2. `std::fs::rename(.in_progress/<uuid>/audio.wav → signals/original/<sanitized_name>.wav)`. `rename` is atomic on same-filesystem POSIX moves and on Windows (via `MoveFileEx`).
+3. `Project::add_bundle_with(name, audio_path)` — same path the existing static-file import uses; reuses its audit trigger on the bundle insert.
+4. INSERT into `processing_run` with `kind = 'live_recording'`, `processor_id = 'sadda.live'`, `parameters = {device, sr, channels, duration_s, analysis_hop_ms, analysis_window_ms}`.
+5. `std::fs::remove_dir(.in_progress/<uuid>/)` — meta.toml left behind for forensics if step 4 fails.
+
+If any step fails, the transaction rolls back and the `.in_progress/<uuid>/` directory is left intact for inspection.
+
+### `processing_run.kind` migration
+
+Current `CHECK (kind IN (...))` constraint must accept `'live_recording'`. Schema migration V7 adds it. The migration:
+
+```sql
+-- V7__processing_run_kind_live_recording.sql
+-- SQLite has no ALTER TABLE … CHECK; recreate the table.
+CREATE TABLE processing_run__new (
+    ... -- identical columns ...,
+    kind TEXT NOT NULL CHECK (kind IN (
+        'dsp_algorithm', 'ml_inference', 'manual_edit', 'live_recording'
+    )),
+    ...
+);
+INSERT INTO processing_run__new SELECT * FROM processing_run;
+DROP TABLE processing_run;
+ALTER TABLE processing_run__new RENAME TO processing_run;
+-- Recreate indices + triggers.
+```
+
+This is the first non-trivial migration since B1 — exercises A1's migration framework and forces us to validate the `corpus.db.bak.<old_version>` backup path actually works on a real schema change.
+
+### Confirmed E1 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Audio I/O crate | **`cpal` 0.16** | De-facto Rust cross-platform audio; pure-Rust on three of four backends |
+| Cross-thread plumbing | **`rtrb` 0.3 SPSC** | Wait-free producer; alloc-free push; orthodox choice for RT audio in Rust |
+| Thread split | **Audio + Consumer + Dispatch (3 threads)** | Keeps GIL acquisition off the consumer path so slow Python callbacks can't drop samples |
+| API scope at 0.1 | **Full: recording + metering + on_pitch + on_intensity + on_formants** | Per user direction (this entry); ~1500–1800 LOC slice |
+| JACK backend | **Cut from 0.1** | cpal's JACK feature flag stays off; revisit in 0.1.x |
+| Bundle attachment | **Session creates the bundle on `commit()`** | No orphan bundle row if recording fails; `.in_progress/` directory is the failure-mode artifact |
+| processing_run kind | **`'live_recording'` (new)** | Distinguishable from DSP/import events in audit queries; requires V7 schema migration |
+| Default analysis frame | **30 ms window / 10 ms hop** | Standard for pitch + formants; matches Praat's default short-term analysis settings |
+| Default sample rate | **44_100 Hz, 1 channel, f32** | Universal device support; speech-band oversampled enough for formants |
+| Subscriber dispatch | **Python thread spawned by start(); joined on stop()** | Matches sounddevice convention; no asyncio in v1 (per API-surface entry) |
+
+### Layout
+
+- `crates/engine/Cargo.toml` — adds `cpal = "0.16"`, `rtrb = "0.3"`, `uuid = { version = "1", features = ["v4"] }`.
+- `crates/engine/src/live/mod.rs` — `LiveSession`, `LiveConfig`, `SessionState` enum, plus the `pyclass`-friendly Rust API (no pyo3 deps here — just `std`).
+- `crates/engine/src/live/capture.rs` — cpal stream construction, audio-thread closure, ringbuffer producer side.
+- `crates/engine/src/live/consumer.rs` — consumer thread loop, WAV writer wrapper, DSP-frame scheduler.
+- `crates/engine/src/live/results.rs` — per-measure result types + ringbuffer types.
+- `crates/engine/src/corpus.rs` — `Project::commit_recording(uuid, name, params) → bundle_id` helper.
+- `crates/engine/migrations/V7__processing_run_kind_live_recording.sql` — the CHECK-constraint migration.
+- `crates/engine/tests/live_recording.rs` — integration test using a synthetic in-process producer (no cpal in CI).
+- `crates/python/src/live.rs` — PyO3 `PyLiveSession`, decorator methods, dispatch thread.
+- `python/sadda/live/__init__.py` — pure-Python re-exports + the context manager wrapper.
+- `python/tests/test_live.py` — tests against the synthetic-producer path.
+
+### Lossiness / what E1 deliberately doesn't ship
+
+- **Live JACK input** — cut; revisit 0.1.x.
+- **Live MIDI / control surface input** — not in scope.
+- **Pre-roll buffer** — recording starts when `session.start()` returns; no "rewind 2 seconds" feature.
+- **Pause / resume** — single contiguous capture per session. Pause/resume can layer in later as `Session::pause()` / `Session::resume()`; not v1.
+- **Live waveform / spectrogram subscribers** — `on_meter` covers peak/RMS for level UIs; live waveform / spectrogram are deferred (would need a high-rate subscriber, separate budget). The frame data is still on disk so post-hoc plotting works fine.
+- **Multi-channel analysis** — recording supports `channels >= 1`, but the DSP path runs only on channel 0. Multi-channel formants/pitch fan-out is a future enhancement.
+- **Auto device-disconnect handling** — if the OS yanks the device mid-stream, the session enters an `Error` state and the caller must explicitly `discard()`. Reconnection logic is not v1.
+- **Live recording into an existing bundle** — `commit()` always creates a new bundle. Replacing or appending to an existing bundle's audio is a separate operation.
+- **In-app surface** — `sadda.app` integration (a live-meter widget) is Phase-2 work; E1 ships only the library API.
+
+### What this entry doesn't decide
+
+- **Exact ringbuffer sizes** — depends on chunk size on each platform; tunable constants. Sensible starting points: 4× `chunk_samples` for raw-samples rtrb; 256 entries for each result rtrb.
+- **Behaviour on overrun / underrun** — if the consumer can't keep up (e.g. disk stalled), we count drops and surface a `session.dropped_chunks` property. Whether to also raise an error after a threshold is TBD; safe default for v1 is "count but continue."
+- **Exact `meta.toml` schema** — minimum is device / sr / channels / started_at / intent_name; can grow as forensics workflows surface.
+- **Whether `LiveSession` is reusable** — v1 ships single-use (one session → one bundle). Reusable sessions can layer in later if a workflow needs them.
+- **`PROVISIONAL` decorator coverage** — every new public Python entry point in `sadda.live` is marked `@provisional` per the A2 contract. The exact warning text is settled inside A2's helpers.
+
+### Sources / references
+
+- 2026-05-21 Phase 1 slicing entry (E1 row + the live-recording UX open item)
+- 2026-05-18 Python API surface entry (`sadda.live` namespace, subscriber decorators, sync-by-default async stance)
+- 2026-05-18 corpus data-model entry (processing_run shape; bundle insert semantics)
+- 2026-05-21 C1 entry (intensity / windowing primitives reused here)
+- 2026-05-21 C2 entry (pitch with voicing; LPC formants reused here)
+- `cpal`: <https://github.com/RustAudio/cpal>
+- `rtrb`: <https://github.com/mgeier/rtrb>
+- The Rust-Audio working group's "real-time safety in audio threads" notes: <https://github.com/RustAudio/cpal#real-time-safety>
+- sounddevice (Python; closest API analogue): <https://python-sounddevice.readthedocs.io/>
+
+---
+
 ## 2026-05-22 — EAF round-trip (D2): quick-xml, EAF 2.8 target, tier hierarchy via PARENT_REF, points as degenerate alignables
 
 Goal: settle the ninth Phase 1 slice. D2 lands ELAN .eaf import + export — the second-tier interop after Praat TextGrid. The crucial difference from D1: **tier hierarchy survives the round-trip** (EAF natively models `PARENT_REF`).
