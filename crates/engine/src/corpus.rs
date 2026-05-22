@@ -13,7 +13,7 @@ pub mod migrations;
 
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::Audio;
 use crate::error::{EngineError, Result};
@@ -385,6 +385,32 @@ pub struct Reference {
     pub parent_annotation_id: Option<i64>,
     /// JSON `extra` payload.
     pub extra: Option<String>,
+}
+
+/// Registration row for a Parquet sidecar holding a dense tier's data.
+/// Created automatically by `Project::write_continuous_numeric` /
+/// `write_continuous_vector` / `write_categorical_sampled`.
+#[derive(Debug, Clone)]
+pub struct DerivedSignal {
+    /// DerivedSignal id (primary key).
+    pub id: i64,
+    /// FK into [`Tier`] — unique (one sidecar per tier in v1).
+    pub tier_id: i64,
+    /// Path to the Parquet sidecar, relative to the project root.
+    pub relative_path: String,
+    /// Number of frames in the sidecar.
+    pub n_frames: i64,
+    /// Number of dimensions per frame (1 for `continuous_numeric` and
+    /// `categorical_sampled`; >= 1 for `continuous_vector`).
+    pub n_dims: i64,
+    /// Sample rate in Hz. `None` for non-sampled or variable-rate signals.
+    pub sample_rate_hz: Option<f64>,
+    /// Dtype label: `f64`, `f32`, `utf8`, … (v1 uses `f64` and `utf8` only).
+    pub dtype: String,
+    /// Freeform JSON payload.
+    pub extra: Option<String>,
+    /// ISO 8601 UTC creation timestamp.
+    pub created_at: String,
 }
 
 /// Optional fields for creating a [`Reference`].
@@ -973,6 +999,194 @@ impl Project {
         }
     }
 
+    /// Writes a `continuous_numeric` Parquet sidecar for the tier and records
+    /// it in `derived_signal`. Returns the new `derived_signal.id`.
+    /// Fails if the tier isn't `continuous_numeric` or already has a sidecar.
+    pub fn write_continuous_numeric(
+        &self,
+        tier_id: i64,
+        samples: &[f64],
+        sample_rate_hz: f64,
+    ) -> Result<i64> {
+        let tier = self.get_tier(tier_id)?;
+        if tier.r#type != TierType::ContinuousNumeric {
+            return Err(EngineError::Corpus(format!(
+                "tier {} is type {:?}; expected ContinuousNumeric",
+                tier.id, tier.r#type
+            )));
+        }
+        self.guard_no_existing_derived_signal(&tier)?;
+        let (abs, rel) = self.dense_paths_for(&tier)?;
+        crate::storage::dense::write_continuous_numeric(&abs, samples)?;
+        self.insert_derived_signal_row(&tier, &rel, samples.len() as i64, 1, sample_rate_hz, "f64")
+    }
+
+    /// Reads a `continuous_numeric` sidecar back into a `Vec<f64>`.
+    pub fn read_continuous_numeric(&self, tier_id: i64) -> Result<Vec<f64>> {
+        let ds = self.expect_derived_signal(tier_id, TierType::ContinuousNumeric)?;
+        crate::storage::dense::read_continuous_numeric(&self.root.join(&ds.relative_path))
+    }
+
+    /// Writes a `continuous_vector` Parquet sidecar.
+    pub fn write_continuous_vector(
+        &self,
+        tier_id: i64,
+        frames: ndarray::ArrayView2<'_, f64>,
+        sample_rate_hz: f64,
+    ) -> Result<i64> {
+        let tier = self.get_tier(tier_id)?;
+        if tier.r#type != TierType::ContinuousVector {
+            return Err(EngineError::Corpus(format!(
+                "tier {} is type {:?}; expected ContinuousVector",
+                tier.id, tier.r#type
+            )));
+        }
+        self.guard_no_existing_derived_signal(&tier)?;
+        let (n_frames, n_dims) = frames.dim();
+        let (abs, rel) = self.dense_paths_for(&tier)?;
+        crate::storage::dense::write_continuous_vector(&abs, frames)?;
+        self.insert_derived_signal_row(
+            &tier,
+            &rel,
+            n_frames as i64,
+            n_dims as i64,
+            sample_rate_hz,
+            "f64",
+        )
+    }
+
+    /// Reads a `continuous_vector` sidecar back into an
+    /// `ndarray::Array2<f64>` of shape `[n_frames, n_dims]`.
+    pub fn read_continuous_vector(&self, tier_id: i64) -> Result<ndarray::Array2<f64>> {
+        let ds = self.expect_derived_signal(tier_id, TierType::ContinuousVector)?;
+        crate::storage::dense::read_continuous_vector(&self.root.join(&ds.relative_path))
+    }
+
+    /// Writes a `categorical_sampled` Parquet sidecar.
+    pub fn write_categorical_sampled(
+        &self,
+        tier_id: i64,
+        labels: &[String],
+        sample_rate_hz: f64,
+    ) -> Result<i64> {
+        let tier = self.get_tier(tier_id)?;
+        if tier.r#type != TierType::CategoricalSampled {
+            return Err(EngineError::Corpus(format!(
+                "tier {} is type {:?}; expected CategoricalSampled",
+                tier.id, tier.r#type
+            )));
+        }
+        self.guard_no_existing_derived_signal(&tier)?;
+        let (abs, rel) = self.dense_paths_for(&tier)?;
+        crate::storage::dense::write_categorical_sampled(&abs, labels)?;
+        self.insert_derived_signal_row(&tier, &rel, labels.len() as i64, 1, sample_rate_hz, "utf8")
+    }
+
+    /// Reads a `categorical_sampled` sidecar back into `Vec<String>`.
+    pub fn read_categorical_sampled(&self, tier_id: i64) -> Result<Vec<String>> {
+        let ds = self.expect_derived_signal(tier_id, TierType::CategoricalSampled)?;
+        crate::storage::dense::read_categorical_sampled(&self.root.join(&ds.relative_path))
+    }
+
+    /// Returns the [`DerivedSignal`] row for a tier, or `None` if no sidecar
+    /// has been written yet.
+    pub fn derived_signal(&self, tier_id: i64) -> Result<Option<DerivedSignal>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, tier_id, relative_path, n_frames, n_dims, \
+                    sample_rate_hz, dtype, extra, created_at \
+             FROM derived_signal WHERE tier_id = ?1",
+        )?;
+        let row = stmt
+            .query_row([tier_id], |row| {
+                Ok(DerivedSignal {
+                    id: row.get(0)?,
+                    tier_id: row.get(1)?,
+                    relative_path: row.get(2)?,
+                    n_frames: row.get(3)?,
+                    n_dims: row.get(4)?,
+                    sample_rate_hz: row.get(5)?,
+                    dtype: row.get(6)?,
+                    extra: row.get(7)?,
+                    created_at: row.get(8)?,
+                })
+            })
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Returns the absolute filesystem path of a dense tier's Parquet
+    /// sidecar, or `None` if no sidecar has been written yet. Intended for
+    /// external readers (e.g. `polars.scan_parquet(path)` directly).
+    pub fn dense_path(&self, tier_id: i64) -> Result<Option<PathBuf>> {
+        Ok(self
+            .derived_signal(tier_id)?
+            .map(|ds| self.root.join(ds.relative_path)))
+    }
+
+    fn dense_paths_for(&self, tier: &Tier) -> Result<(PathBuf, String)> {
+        let sanitized = sanitize_filename(&tier.name);
+        let rel_dir = Path::new("signals")
+            .join("derived")
+            .join(format!("bundle_{}", tier.bundle_id));
+        let rel = rel_dir.join(format!("{sanitized}.parquet"));
+        let abs = self.root.join(&rel);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        Ok((abs, rel.to_string_lossy().into_owned()))
+    }
+
+    fn guard_no_existing_derived_signal(&self, tier: &Tier) -> Result<()> {
+        if self.derived_signal(tier.id)?.is_some() {
+            return Err(EngineError::Corpus(format!(
+                "tier {} already has a derived_signal sidecar; rewrites land in a follow-up slice",
+                tier.id
+            )));
+        }
+        Ok(())
+    }
+
+    fn insert_derived_signal_row(
+        &self,
+        tier: &Tier,
+        relative_path: &str,
+        n_frames: i64,
+        n_dims: i64,
+        sample_rate_hz: f64,
+        dtype: &str,
+    ) -> Result<i64> {
+        let id: i64 = self.conn.query_row(
+            "INSERT INTO derived_signal \
+                (tier_id, relative_path, n_frames, n_dims, sample_rate_hz, dtype) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id",
+            rusqlite::params![
+                tier.id,
+                relative_path,
+                n_frames,
+                n_dims,
+                sample_rate_hz,
+                dtype
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    fn expect_derived_signal(&self, tier_id: i64, expected: TierType) -> Result<DerivedSignal> {
+        let tier = self.get_tier(tier_id)?;
+        if tier.r#type != expected {
+            return Err(EngineError::Corpus(format!(
+                "tier {} is type {:?}; expected {expected:?}",
+                tier.id, tier.r#type
+            )));
+        }
+        self.derived_signal(tier_id)?.ok_or_else(|| {
+            EngineError::Corpus(format!(
+                "no derived_signal sidecar for tier {tier_id}; call write_* first"
+            ))
+        })
+    }
+
     fn enforce_cardinality(
         &self,
         child_tier: &Tier,
@@ -1073,6 +1287,27 @@ fn backup_corpus_db(conn: &Connection, db_path: &Path, from_version: i64) -> Res
     let backup_path = db_path.with_file_name(format!("corpus.db.bak.{from_version}"));
     std::fs::copy(db_path, &backup_path)?;
     Ok(())
+}
+
+/// Replaces any character that isn't ASCII alphanumeric / `_` / `.` / `-`
+/// with `_`. Keeps a tier's name recognizable on disk while preventing path
+/// traversal or filesystem-unfriendly characters. Tier-name uniqueness within
+/// a bundle is enforced by V3's `UNIQUE (bundle_id, name)`; the V5
+/// `derived_signal.tier_id UNIQUE` constraint additionally rules out
+/// sidecar-path collisions even if two sanitized names somehow coincide.
+fn sanitize_filename(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '-' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
+    out
 }
 
 #[cfg(test)]

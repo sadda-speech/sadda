@@ -10,6 +10,7 @@ import typing
 __all__ = [
     "Audio",
     "Bundle",
+    "DerivedSignal",
     "Interval",
     "Point",
     "Project",
@@ -115,6 +116,60 @@ class Bundle:
     def extra(self) -> typing.Optional[builtins.str]:
         r"""
         Freeform JSON payload (stored as text).
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class DerivedSignal:
+    r"""
+    Registration row for a Parquet sidecar holding a dense tier's data.
+    Created automatically by the `Project.write_continuous_numeric` /
+    `write_continuous_vector` / `write_categorical_sampled` methods.
+    """
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        DerivedSignal id (primary key).
+        """
+    @property
+    def tier_id(self) -> builtins.int:
+        r"""
+        Tier this sidecar belongs to.
+        """
+    @property
+    def relative_path(self) -> builtins.str:
+        r"""
+        Path to the Parquet sidecar, relative to the project root.
+        """
+    @property
+    def n_frames(self) -> builtins.int:
+        r"""
+        Number of frames in the sidecar.
+        """
+    @property
+    def n_dims(self) -> builtins.int:
+        r"""
+        Number of dimensions per frame.
+        """
+    @property
+    def sample_rate_hz(self) -> typing.Optional[builtins.float]:
+        r"""
+        Sample rate in Hz; `None` for non-sampled / variable-rate signals.
+        """
+    @property
+    def dtype(self) -> builtins.str:
+        r"""
+        Dtype label: `f64`, `f32`, `utf8`.
+        """
+    @property
+    def extra(self) -> typing.Optional[builtins.str]:
+        r"""
+        Freeform JSON payload.
+        """
+    @property
+    def created_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC creation timestamp.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -312,6 +367,48 @@ class Project:
         Lists references for a tier in id order. Named `references_for`
         rather than `references` (which collides with Rust's `ref` family
         of grep targets).
+        """
+    def write_continuous_numeric(self, tier_id: builtins.int, samples: numpy.typing.NDArray[numpy.float64], sample_rate_hz: builtins.float) -> builtins.int:
+        r"""
+        Writes a `continuous_numeric` Parquet sidecar from a 1-D float64
+        NumPy array and inserts the matching `DerivedSignal` row. Returns
+        the new DerivedSignal id. Errors with TypeError-style messages if
+        the tier isn't `continuous_numeric` or already has a sidecar.
+        """
+    def read_continuous_numeric(self, tier_id: builtins.int) -> numpy.typing.NDArray[numpy.float64]:
+        r"""
+        Reads a `continuous_numeric` sidecar back into a 1-D float64 NumPy
+        array.
+        """
+    def write_continuous_vector(self, tier_id: builtins.int, frames: numpy.typing.NDArray[numpy.float64], sample_rate_hz: builtins.float) -> builtins.int:
+        r"""
+        Writes a `continuous_vector` Parquet sidecar from a 2-D float64
+        NumPy array of shape `[n_frames, n_dims]`.
+        """
+    def read_continuous_vector(self, tier_id: builtins.int) -> numpy.typing.NDArray[numpy.float64]:
+        r"""
+        Reads a `continuous_vector` sidecar back into a 2-D float64 NumPy
+        array.
+        """
+    def write_categorical_sampled(self, tier_id: builtins.int, labels: typing.Sequence[builtins.str], sample_rate_hz: builtins.float) -> builtins.int:
+        r"""
+        Writes a `categorical_sampled` Parquet sidecar from a list of
+        strings.
+        """
+    def read_categorical_sampled(self, tier_id: builtins.int) -> builtins.list[builtins.str]:
+        r"""
+        Reads a `categorical_sampled` sidecar back into a list of strings.
+        """
+    def derived_signal(self, tier_id: builtins.int) -> typing.Optional[DerivedSignal]:
+        r"""
+        Returns the DerivedSignal row for a tier, or None if no sidecar
+        has been written yet.
+        """
+    def dense_path(self, tier_id: builtins.int) -> typing.Optional[builtins.str]:
+        r"""
+        Returns the absolute filesystem path of a dense tier's Parquet
+        sidecar (as a string), or None if no sidecar has been written yet.
+        Use with `polars.scan_parquet(path)` for zero-engine-API reads.
         """
     def __repr__(self) -> builtins.str: ...
 

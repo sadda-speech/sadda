@@ -10,7 +10,8 @@
 
 use std::path::PathBuf;
 
-use numpy::{IntoPyArray, PyArray1};
+use ndarray::Array2;
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
@@ -533,6 +534,77 @@ impl PyReference {
     }
 }
 
+/// Registration row for a Parquet sidecar holding a dense tier's data.
+/// Created automatically by the `Project.write_continuous_numeric` /
+/// `write_continuous_vector` / `write_categorical_sampled` methods.
+#[gen_stub_pyclass]
+#[pyclass(name = "DerivedSignal", frozen)]
+struct PyDerivedSignal {
+    inner: sadda_engine::DerivedSignal,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyDerivedSignal {
+    /// DerivedSignal id (primary key).
+    #[getter]
+    fn id(&self) -> i64 {
+        self.inner.id
+    }
+    /// Tier this sidecar belongs to.
+    #[getter]
+    fn tier_id(&self) -> i64 {
+        self.inner.tier_id
+    }
+    /// Path to the Parquet sidecar, relative to the project root.
+    #[getter]
+    fn relative_path(&self) -> String {
+        self.inner.relative_path.clone()
+    }
+    /// Number of frames in the sidecar.
+    #[getter]
+    fn n_frames(&self) -> i64 {
+        self.inner.n_frames
+    }
+    /// Number of dimensions per frame.
+    #[getter]
+    fn n_dims(&self) -> i64 {
+        self.inner.n_dims
+    }
+    /// Sample rate in Hz; `None` for non-sampled / variable-rate signals.
+    #[getter]
+    fn sample_rate_hz(&self) -> Option<f64> {
+        self.inner.sample_rate_hz
+    }
+    /// Dtype label: `f64`, `f32`, `utf8`.
+    #[getter]
+    fn dtype(&self) -> String {
+        self.inner.dtype.clone()
+    }
+    /// Freeform JSON payload.
+    #[getter]
+    fn extra(&self) -> Option<String> {
+        self.inner.extra.clone()
+    }
+    /// ISO 8601 UTC creation timestamp.
+    #[getter]
+    fn created_at(&self) -> String {
+        self.inner.created_at.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DerivedSignal(id={}, tier_id={}, relative_path={:?}, n_frames={}, n_dims={}, dtype={:?})",
+            self.inner.id,
+            self.inner.tier_id,
+            self.inner.relative_path,
+            self.inner.n_frames,
+            self.inner.n_dims,
+            self.inner.dtype,
+        )
+    }
+}
+
 /// A sadda project: a directory holding audio, derived signals, attachments,
 /// and a SQLite-backed corpus database. Construct via `sadda.new_project(...)`
 /// or `sadda.open_project(...)`.
@@ -849,6 +921,103 @@ impl PyProject {
             .map_err(engine_err_to_py)
     }
 
+    /// Writes a `continuous_numeric` Parquet sidecar from a 1-D float64
+    /// NumPy array and inserts the matching `DerivedSignal` row. Returns
+    /// the new DerivedSignal id. Errors with TypeError-style messages if
+    /// the tier isn't `continuous_numeric` or already has a sidecar.
+    fn write_continuous_numeric(
+        &self,
+        tier_id: i64,
+        samples: PyReadonlyArray1<'_, f64>,
+        sample_rate_hz: f64,
+    ) -> PyResult<i64> {
+        let slice = samples
+            .as_slice()
+            .map_err(|e| PyValueError::new_err(format!("samples must be contiguous: {e}")))?;
+        self.inner
+            .write_continuous_numeric(tier_id, slice, sample_rate_hz)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Reads a `continuous_numeric` sidecar back into a 1-D float64 NumPy
+    /// array.
+    fn read_continuous_numeric<'py>(
+        &self,
+        py: Python<'py>,
+        tier_id: i64,
+    ) -> PyResult<Bound<'py, PyArray1<f64>>> {
+        let vec = self
+            .inner
+            .read_continuous_numeric(tier_id)
+            .map_err(engine_err_to_py)?;
+        Ok(vec.into_pyarray(py))
+    }
+
+    /// Writes a `continuous_vector` Parquet sidecar from a 2-D float64
+    /// NumPy array of shape `[n_frames, n_dims]`.
+    fn write_continuous_vector(
+        &self,
+        tier_id: i64,
+        frames: PyReadonlyArray2<'_, f64>,
+        sample_rate_hz: f64,
+    ) -> PyResult<i64> {
+        let view = frames.as_array();
+        self.inner
+            .write_continuous_vector(tier_id, view, sample_rate_hz)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Reads a `continuous_vector` sidecar back into a 2-D float64 NumPy
+    /// array.
+    fn read_continuous_vector<'py>(
+        &self,
+        py: Python<'py>,
+        tier_id: i64,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let arr: Array2<f64> = self
+            .inner
+            .read_continuous_vector(tier_id)
+            .map_err(engine_err_to_py)?;
+        Ok(arr.into_pyarray(py))
+    }
+
+    /// Writes a `categorical_sampled` Parquet sidecar from a list of
+    /// strings.
+    fn write_categorical_sampled(
+        &self,
+        tier_id: i64,
+        labels: Vec<String>,
+        sample_rate_hz: f64,
+    ) -> PyResult<i64> {
+        self.inner
+            .write_categorical_sampled(tier_id, &labels, sample_rate_hz)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Reads a `categorical_sampled` sidecar back into a list of strings.
+    fn read_categorical_sampled(&self, tier_id: i64) -> PyResult<Vec<String>> {
+        self.inner
+            .read_categorical_sampled(tier_id)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Returns the DerivedSignal row for a tier, or None if no sidecar
+    /// has been written yet.
+    fn derived_signal(&self, tier_id: i64) -> PyResult<Option<PyDerivedSignal>> {
+        self.inner
+            .derived_signal(tier_id)
+            .map(|opt| opt.map(|inner| PyDerivedSignal { inner }))
+            .map_err(engine_err_to_py)
+    }
+
+    /// Returns the absolute filesystem path of a dense tier's Parquet
+    /// sidecar (as a string), or None if no sidecar has been written yet.
+    /// Use with `polars.scan_parquet(path)` for zero-engine-API reads.
+    fn dense_path(&self, tier_id: i64) -> PyResult<Option<String>> {
+        let opt = self.inner.dense_path(tier_id).map_err(engine_err_to_py)?;
+        Ok(opt.map(|p| p.to_string_lossy().into_owned()))
+    }
+
     fn __repr__(&self) -> String {
         format!("Project(root={:?})", self.root())
     }
@@ -943,6 +1112,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyInterval>()?;
     m.add_class::<PyPoint>()?;
     m.add_class::<PyReference>()?;
+    m.add_class::<PyDerivedSignal>()?;
     m.add_class::<PyProject>()?;
     Ok(())
 }

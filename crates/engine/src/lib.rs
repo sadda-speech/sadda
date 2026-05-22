@@ -7,11 +7,13 @@ pub mod audio;
 pub mod corpus;
 pub mod error;
 pub mod pitch;
+pub mod storage;
 
 pub use audio::Audio;
 pub use corpus::{
-    Bundle, BundleSpec, Interval, IntervalSpec, Point, PointSpec, Project, Reference,
-    ReferenceSpec, Session, SessionSpec, Speaker, SpeakerSpec, Tier, TierRows, TierSpec, TierType,
+    Bundle, BundleSpec, DerivedSignal, Interval, IntervalSpec, Point, PointSpec, Project,
+    Reference, ReferenceSpec, Session, SessionSpec, Speaker, SpeakerSpec, Tier, TierRows, TierSpec,
+    TierType,
 };
 pub use error::{EngineError, Result};
 pub use pitch::{PitchConfig, PitchFrame, autocorrelation};

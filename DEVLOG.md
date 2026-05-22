@@ -6,6 +6,152 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-21 — Dense tier types + Parquet sidecars (B3): apache parquet+arrow, per-bundle layout, NumPy/buffers in, polars out
+
+Goal: settle the fifth Phase 1 slice. B3 lands the three dense tier types' on-disk format (Parquet sidecars under `signals/derived/`), the `DerivedSignal` registration table that ties them back to the corpus, and the read/write paths so AI-engineer users can either ask for a `polars.DataFrame` via `proj.query(tier_id)` or grab the sidecar path and `pl.scan_parquet(path)` directly.
+
+### What B3 must deliver
+
+From the Phase-1 slicing entry: (1) the three dense tier types — `continuous_numeric` / `continuous_vector` / `categorical_sampled`; (2) `DerivedSignal` registration rows; (3) reader/writer in `engine::storage::parquet`; (4) mmap-friendly load path so external readers work.
+
+### Parquet via Apache `parquet` + `arrow` (version 58)
+
+The corpus data-model entry pinned Parquet as the storage format. For Rust, the Apache `parquet` and `arrow` crates (version-locked) are the canonical pair — they're what `polars-rs` uses under the hood, and the resulting files are bit-for-bit consumable by `polars.scan_parquet(...)` / `pyarrow.parquet.read_table(...)` / `pandas.read_parquet(...)`. Verified compatibility with our `edition = "2024"` + `rust-version = "1.85"` workspace (both crates declare exactly those in their workspace package).
+
+Minimal feature set to keep the dep tree from ballooning:
+
+```toml
+parquet = { version = "58", default-features = false, features = ["arrow", "snap"] }
+arrow   = { version = "58", default-features = false }
+```
+
+- `parquet` defaults include `brotli`/`base64`/`simdutf8`/etc. — dropped; we only need Snappy (Parquet's most common codec).
+- `arrow` defaults include `csv`/`ipc`/`json` — dropped; the Float64 / FixedSizeList / Utf8 types live in the always-on core.
+- `ndarray` is added as a separate dep for the `Array2<f64>` ergonomics on the Rust side; arrow has no `ndarray` feature, so we marshal manually via `Float64Array::from(arr.as_standard_layout().as_slice().unwrap().to_vec())`.
+
+### Sidecar layout: per-bundle subdirectories
+
+`signals/derived/bundle_<id>/<tier_name>.parquet`. All sidecars for a bundle group together — easy to `ls` by hand, no branching on whether the bundle has a session, and rename-safe at the file level (renaming a tier renames the file via the engine; external readers reference DerivedSignal.relative_path). The original data-model entry sketched `signals/derived/session_<id>/bundle_<id>.<name>.parquet` but that nesting is awkward when bundles have no session.
+
+### DerivedSignal table (V5)
+
+V5 migration adds:
+
+```sql
+CREATE TABLE derived_signal (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    tier_id         INTEGER NOT NULL UNIQUE REFERENCES tier(id),
+    relative_path   TEXT    NOT NULL,
+    n_frames        INTEGER NOT NULL,
+    n_dims          INTEGER NOT NULL DEFAULT 1,
+    sample_rate_hz  REAL,
+    dtype           TEXT    NOT NULL,
+    extra           TEXT,
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX idx_derived_signal_tier ON derived_signal(tier_id);
+```
+
+- `tier_id` UNIQUE: one sidecar per tier (writes after the first error; rewrites land in a follow-up).
+- `n_dims = 1` for `continuous_numeric` and `categorical_sampled`; `n_dims >= 1` for `continuous_vector`.
+- `sample_rate_hz` NULL for non-sampled / variable-rate signals (none in v1, but the column is forward-compat).
+- `dtype` enum stored as text: `f64`, `f32`, `utf8` for v1.
+- Audited per the B1 trigger-rebuild discipline (3 triggers added in V5).
+
+### Write API: positional buffers in Rust, NumPy in Python
+
+Three options surfaced — positional buffers (Rust `&[f64]` / `Array2<f64>` / `&[String]`), DataFrame-typed inputs (requires `polars-rs` + `pyo3-polars`), or both. Positional buffers won because:
+- No new Rust deps beyond `parquet`+`arrow` (already heavy enough).
+- Clean Rust signatures; no DataFrame ceremony at internal call sites.
+- The read path can still return a DataFrame; symmetry isn't required.
+- DataFrame inputs land in a later ergonomic-pass slice if real users want bulk writes from polars.
+
+Rust signatures:
+
+```rust
+impl Project {
+    pub fn write_continuous_numeric(
+        &self, tier_id: i64,
+        samples: &[f64], sample_rate_hz: f64,
+    ) -> Result<i64>; // returns derived_signal.id
+
+    pub fn write_continuous_vector(
+        &self, tier_id: i64,
+        frames: ndarray::ArrayView2<'_, f64>, sample_rate_hz: f64,
+    ) -> Result<i64>;
+
+    pub fn write_categorical_sampled(
+        &self, tier_id: i64,
+        labels: &[String], sample_rate_hz: f64,
+    ) -> Result<i64>;
+
+    pub fn read_continuous_numeric(&self, tier_id: i64) -> Result<Vec<f64>>;
+    pub fn read_continuous_vector(&self, tier_id: i64) -> Result<ndarray::Array2<f64>>;
+    pub fn read_categorical_sampled(&self, tier_id: i64) -> Result<Vec<String>>;
+
+    pub fn derived_signal(&self, tier_id: i64) -> Result<Option<DerivedSignal>>;
+    pub fn dense_path(&self, tier_id: i64) -> Result<Option<PathBuf>>;
+}
+```
+
+The write methods reject if the tier's type doesn't match, if a `derived_signal` row already exists for the tier (no overwrite in v1), and if the input buffer is empty.
+
+### Python: NumPy in, polars out
+
+- `proj.write_continuous_numeric(tier_id, np.ndarray[float64], sample_rate_hz)`
+- `proj.write_continuous_vector(tier_id, np.ndarray[float64, ndim=2], sample_rate_hz)`
+- `proj.write_categorical_sampled(tier_id, list[str], sample_rate_hz)`
+- `proj.read_continuous_numeric(tier_id) → np.ndarray[float64]`
+- `proj.read_continuous_vector(tier_id) → np.ndarray[float64, ndim=2]`
+- `proj.read_categorical_sampled(tier_id) → list[str]`
+- `proj.dense_path(tier_id) → str | None` — for `pl.scan_parquet(path)` external reads
+- `proj.derived_signal(tier_id) → DerivedSignal | None` — the registration row
+- `proj.query(tier_id)` (the B2 monkey-patch) extended: for dense tiers, calls `pl.read_parquet(proj.dense_path(tier_id))` and returns the resulting DataFrame; for sparse, the B2 dispatch.
+
+### `categorical_sampled` encoding
+
+Plain UTF8 column for v1; Parquet dictionary encoding is an optimization for later. Reasoning: dictionary encoding shrinks VAD/voicing-class files ~3× but adds slightly more arrow-rs API surface and has marginal compatibility risk with older Parquet readers; v1 corpora are small enough that the disk delta doesn't matter. The polars `.cast(pl.Categorical)` escape hatch handles in-memory categorization on read.
+
+### Confirmed B3 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Parquet library | **Apache `parquet` + `arrow` 58 (minimal features)** | Canonical Rust→Parquet path; bit-for-bit compatible with polars/pyarrow consumers; only viable choice without forking `polars-rs` |
+| Sidecar layout | **`signals/derived/bundle_<id>/<tier_name>.parquet`** | All sidecars for a bundle grouped; no session-presence branching; rename-safe at the file level |
+| `DerivedSignal` shape | **`tier_id UNIQUE` + path + n_frames/n_dims/sample_rate_hz/dtype + extra** | One sidecar per tier in v1; extension columns cover the queries the read path needs without parsing Parquet metadata |
+| Write API | **Positional buffers (Rust slices/ndarray; NumPy in Python)** | No `polars-rs` dep; clean signatures; symmetric read path can still return DataFrames |
+| `categorical_sampled` encoding | **Plain UTF8; dictionary as a later optimization** | Simpler write path; broad compatibility; size delta acceptable at v1 corpus scale |
+| `proj.query(tier_id)` for dense tiers | **`pl.read_parquet(path)`** | Reuses the B2 monkey-patch; matches AI-engineer expectations; LazyFrame variant can layer in later |
+
+### Layout
+
+- `crates/engine/migrations/V5__derived_signal.sql` — table + index + 3 audit triggers.
+- `crates/engine/src/storage/mod.rs` + `crates/engine/src/storage/parquet.rs` — new module owning `arrow`/`parquet` boilerplate; pure Rust, no `Project` dep, so it's unit-testable in isolation.
+- `crates/engine/src/corpus.rs` — `DerivedSignal` struct; `Project::write_*` / `read_*` / `derived_signal` / `dense_path` methods.
+- `crates/python/src/lib.rs` — PyDerivedSignal class; numpy-bridging write/read methods on PyProject; `dense_path` returning Option<str>.
+- `python/sadda/__init__.py` — extend the B2 `proj.query` monkey-patch to dispatch on dense tier types via `pl.read_parquet(...)`.
+- `crates/engine/tests/dense_tiers.rs` + `python/tests/test_dense_tiers.py` — round-trip + interop tests.
+
+### What this entry doesn't decide
+
+- **Rewrite / append to existing sidecars.** v1: one-shot write per tier; rewrites error. A follow-up slice may add `proj.replace_dense(...)` once a clear use case appears.
+- **Streaming writes (chunk-by-chunk).** v1 writes the whole buffer in one call. Streaming arrives with live recording (E1) if needed for long sessions.
+- **LazyFrame from `proj.query`.** Materializing the DataFrame is fine at v1 scale (≤ ~1 GB sidecars for the typical user). A `proj.scan(tier_id) → pl.LazyFrame` can layer in later for the ML / large-embedding case.
+- **Mixed-type vector columns.** All `continuous_vector` columns are Float64 at v1; Float32 + Int variants land when a real consumer needs them.
+- **Audit log of Parquet contents.** The DerivedSignal row is audited; the Parquet *file contents* are not — they're write-once column blobs and the audit trail lives at the registration boundary.
+- **Symlink / cache eviction policy.** Sidecars stay until the bundle is deleted (cascade from `bundle` to `tier` to `derived_signal` is a future migration if we add `ON DELETE CASCADE` — not in V5).
+
+### Sources / references
+
+- 2026-05-18 corpus data-model entry (Parquet pinning, sparse/dense split)
+- 2026-05-21 Phase 1 slicing entry (B3 row)
+- 2026-05-21 B2 entry (sparse tier types this entry parallels)
+- Apache arrow-rs: https://github.com/apache/arrow-rs (parquet 58, arrow 58)
+- `parquet::arrow::ArrowWriter`: https://docs.rs/parquet/58.3.0/parquet/arrow/index.html
+- `FixedSizeListArray`: https://docs.rs/arrow-array/58.3.0/arrow_array/array/struct.FixedSizeListArray.html
+
+---
+
 ## 2026-05-21 — Sparse tier types (B2): three annotation tables, Rust-level cardinality, polars wrap in Python
 
 Goal: settle the fourth Phase 1 slice. B2 puts annotation rows into the three sparse-tier tables, wires tier-header + annotation CRUD into the Project API, enforces parent-child cardinality at insert time, and ships the first cut of `proj.query(...) → polars.DataFrame`.
