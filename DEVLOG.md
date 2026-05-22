@@ -6,6 +6,128 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-22 — EAF round-trip (D2): quick-xml, EAF 2.8 target, tier hierarchy via PARENT_REF, points as degenerate alignables
+
+Goal: settle the ninth Phase 1 slice. D2 lands ELAN .eaf import + export — the second-tier interop after Praat TextGrid. The crucial difference from D1: **tier hierarchy survives the round-trip** (EAF natively models `PARENT_REF`).
+
+### What D2 must deliver
+
+From the Phase-1 slicing entry: (1) ALIGNABLE_ANNOTATION, TIME_SUBDIVISION, SYMBOLIC_ASSOCIATION tier types; (2) `parent_tier_ref` preserved; (3) XML round-trip stable enough that ELAN can re-open exports without warnings.
+
+### Library: quick-xml
+
+EAF is XML-based and substantially richer than TextGrid. `quick-xml` 0.40 is the canonical Rust XML reader/writer pair (MSRV 1.56 — fine for our 1.85). Pure Rust, ~5 transitive deps, both pull-parser (events) and builder writer in one crate. Used across the Rust XML ecosystem.
+
+### EAF 2.8 target on write; permissive on read
+
+Write emits `FORMAT="2.8"`; this is the widely-supported version (ELAN 5.0+ reads it transparently and is still common in field linguistics). EAF 3.0 added external CV references we don't use. The parser is permissive on FORMAT — accepts 2.7, 2.8, 3.0.
+
+### Tier-type mapping
+
+The headline feature: tier hierarchy round-trips losslessly via EAF's `PARENT_REF`. Mapping:
+
+| Our tier type | EAF mapping |
+|---|---|
+| `interval` (no parent) | `ALIGNABLE_ANNOTATION` tier; `LINGUISTIC_TYPE` with no CONSTRAINTS |
+| `interval` (parent = interval) | `ALIGNABLE_ANNOTATION` tier; `LINGUISTIC_TYPE` constraint = `Included_In`; `PARENT_REF` set |
+| `point` (no parent) | `ALIGNABLE_ANNOTATION` tier; each point becomes a degenerate `[t, t + 1ms]` annotation. On import: a tier where every annotation has `end - start ≤ 2ms` is recovered as a `point` tier |
+| `point` (with parent) | Same degenerate-alignable convention; `PARENT_REF` preserved |
+| `reference` (with parent) | `REF_ANNOTATION` tier; `LINGUISTIC_TYPE` constraint = `Symbolic_Association`. Sentinel-encoded `(target_kind, target_id)` lives in the value |
+| `continuous_*` | **Skipped silently** on export (no EAF analogue beyond heavy EXTERNAL_REFs) |
+
+The ≤2ms heuristic on import is the standard way to recover point semantics from EAF — annotators don't naturally make sub-millisecond intervals, and the `1ms` width on export is small enough that ELAN renders the annotation visually as a vertical line.
+
+### JSON sentinel
+
+Reused from D1: `<label> {json:<inline-json>}` suffix. Plain EAFs without sentinels round-trip cleanly. ELAN displays the sentinel as part of the annotation value; users see and don't manually edit it.
+
+### Drop ELAN-specific metadata
+
+ELAN files often carry `CONTROLLED_VOCABULARY`, `LANGUAGE`, `LICENSE`, `EXTERNAL_REF`, `LEXICON_REF`, `REF_LINK_SET`, `LOCALES`. These don't fit our model. **D2 drops them on round-trip** and documents the loss. Re-importing an exported EAF won't have the user's CV definitions, language tags, or license metadata.
+
+Preserving them opaquely would need a per-tier `extra_xml` column (schema migration), opaque-XML retention logic, and substantially more parser complexity. That's a future enhancement; tracking task TBD if real users request it.
+
+### Project API
+
+```rust
+impl Project {
+    pub fn import_eaf(&self, path: impl AsRef<Path>, bundle_id: i64) -> Result<Vec<i64>>;
+    pub fn export_eaf(
+        &self,
+        bundle_id: i64,
+        path: impl AsRef<Path>,
+        tier_ids: Option<&[i64]>,
+    ) -> Result<()>;
+}
+```
+
+Mirror D1's TextGrid API exactly. Import records a `processing_run` row of kind `dsp_algorithm` with `processor_id = "sadda.io.eaf.import"`.
+
+### Confirmed D2 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| XML library | **`quick-xml` 0.40** | Pure Rust; MSRV 1.56; both reader + writer in one crate; minimal deps |
+| EAF FORMAT on write | **2.8** | Widely supported by ELAN 5.0+; 3.0-only features unused |
+| Point-tier mapping | **Degenerate `[t, t+1ms]` alignable; ≤2ms heuristic on import** | Round-trips losslessly between sadda projects; ELAN displays cleanly |
+| ELAN-specific metadata | **Dropped on round-trip; documented loss** | Preserving opaquely needs schema migration + retention logic; deferred |
+| Tier hierarchy | **Preserved via `PARENT_REF` ↔ `tier.parent_id`** | The headline D2 feature; EAF natively models this |
+| Reference-tier mapping | **`REF_ANNOTATION` + `Symbolic_Association` linguistic type + JSON sentinel for target** | Round-trips through ELAN losslessly; sentinel survives any user edit |
+| API | **Methods on `Project` only** | Mirrors D1; corpus-first |
+| Import provenance | **`processing_run` row of kind `dsp_algorithm`** | Reuses B1 audit infrastructure (same as D1) |
+
+### Layout
+
+- `crates/engine/Cargo.toml` — adds `quick-xml = "0.40"`.
+- `crates/engine/src/io/eaf.rs` — parser + writer + `EafFile` in-memory struct.
+- `crates/engine/src/io/mod.rs` — `pub mod eaf;` added.
+- `crates/engine/src/corpus.rs` — `Project::import_eaf` / `Project::export_eaf` methods.
+- `crates/python/src/lib.rs` — PyO3 method wrappers on `PyProject`.
+- `crates/engine/tests/eaf_round_trip.rs` — integration tests.
+- `python/tests/test_eaf.py` — end-to-end Python tests.
+
+### Lossiness — what EAF drops
+
+Documented in the module + this entry:
+
+- **Controlled vocabularies** (CV_ENTRY, CV_REF on annotations) — not modeled
+- **Languages / locales** (LANGUAGE, LOCALE elements)
+- **Licenses** (LICENSE, AUTHOR, DATE attributes on ANNOTATION_DOCUMENT)
+- **External refs** (EXTERNAL_REF on tier or annotation)
+- **Lexicon refs** (LEXICON_REF in HEADER)
+- **Stereotypes beyond the three named** (Time_Subdivision is mapped, but Symbolic_Subdivision and Included_In with non-trivial constraints are simplified)
+- **Annotation IDs not from our system** — on re-import, we mint fresh `annotation_<n>` IDs; the original IDs are lost
+- **Media file references** in HEADER — we emit a placeholder pointing at the bundle's audio; users editing in ELAN will see our path, not whatever they had before
+
+What's recoverable via the JSON sentinel:
+- Annotation `extra` JSON (any tier type)
+- Reference-tier target `(target_kind, target_id)`
+
+### Implementation notes from the slice
+
+- **`cardinality = "none"` semantics fix.** `Project::enforce_cardinality` previously errored out before checking the cardinality, requiring `parent_annotation_id` whenever the child tier had a `parent_id`. That made `"none"` (which the match arm groups with the "no constraint" branch) effectively dead. Relaxed so `"none"` (or `None`) allows `parent_annotation_id = None` — this is the mechanism `import_eaf` uses to reconstruct tier-level hierarchy without recovering annotation-level parentage. The existing `cardinality_requires_parent_annotation_id_when_parent_tier_set` test (which uses `"one_to_many"`) still passes; the change is scoped to `"none"`.
+- **XML entity-ref stitching in the parser.** `quick-xml` 0.40 fires `Event::GeneralRef` for `&quot;` / `&amp;` / `&lt;` / `&gt;` / `&apos;` / `&#N;` as a *separate* event from the surrounding `Event::Text` chunks. The writer's `BytesText::new` escapes inner `"` characters inside JSON sentinels, so the parser has to handle the entity-ref events explicitly — resolving the predefined names inline and using `BytesRef::resolve_char_ref` for numeric refs — and concatenate the resolved chars into the in-progress annotation value. Without this stitching, `{"v":1}` round-trips as `{v:1}` (quotes silently dropped).
+
+### What this entry doesn't decide
+
+- **Opaque preservation of ELAN-specific metadata** — deferred until a real workflow needs it. Would add `tier.extra_xml` column.
+- **CONTROLLED_VOCABULARY round-trip** — same; CV semantics tie into our annotation-value validation story which doesn't exist yet.
+- **`Time_Subdivision` and `Symbolic_Subdivision` stereotypes** — mapped to our flat hierarchy without preserving the subdivision constraint. A future slice could add a tier-stereotype field.
+- **Free `sadda.io.eaf.read/write` functions** — same scope cut as D1.
+- **Pympi-style mutation API** (`Eaf.add_tier(...)`) — not in v1; mutations happen via `Project`.
+
+### Sources / references
+
+- 2026-05-21 Phase 1 slicing entry (D2 row)
+- 2026-05-18 corpus data-model entry (interop section, EAF row)
+- 2026-05-22 D1 entry (TextGrid; mirrors the API shape)
+- ELAN EAF format documentation: <https://www.mpi.nl/tools/elan/EAF_Annotation_Format_3.0_and_ELAN.pdf>
+- ELAN tier stereotypes reference: <https://www.mpi.nl/corpus/html/elan/ch02s02s05.html>
+- `quick-xml`: <https://github.com/tafia/quick-xml>
+- `pympi` (API-shape precedent): <https://github.com/dopefishh/pympi>
+
+---
+
 ## 2026-05-22 — TextGrid round-trip (D1): hand-rolled parser, long+short read, long-text write, JSON-sentinel suffix
 
 Goal: settle the eighth Phase 1 slice. D1 lands Praat TextGrid import + export — the adoption hinge for users coming from Praat. Per the 2026-05-18 corpus data-model entry, TextGrid is "deliberately lossy"; what D1 commits to is which losses are explicit, which are recoverable via a JSON sentinel, and which trigger errors.

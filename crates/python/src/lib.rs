@@ -1048,6 +1048,38 @@ impl PyProject {
             .map_err(engine_err_to_py)
     }
 
+    /// Imports an ELAN .eaf into `bundle_id`. Tier hierarchy is preserved
+    /// via EAF's `PARENT_REF` ↔ `tier.parent_id`. Point tiers are
+    /// recovered from degenerate `[t, t+1ms]` alignable annotations via
+    /// a ≤2ms heuristic. Reference tiers (`Symbolic_Association`
+    /// linguistic type) come back as `reference` tiers. Returns the new
+    /// tier IDs in import order (parents first per topological sort).
+    /// Records a `processing_run` row for audit provenance.
+    fn import_eaf(&self, path: PathBuf, bundle_id: i64) -> PyResult<Vec<i64>> {
+        self.inner
+            .import_eaf(path, bundle_id)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Writes an ELAN .eaf (EAF 2.8) for `bundle_id`'s sparse tiers to
+    /// `path`. If `tier_ids` is given, only those tiers are exported.
+    /// Dense tiers (continuous_numeric / vector / categorical_sampled)
+    /// are skipped. Interval tiers with parents use the `Included_In`
+    /// stereotype; reference tiers become `REF_ANNOTATION` tiers with
+    /// the `Symbolic_Association` stereotype + a JSON sentinel encoding
+    /// `(target_kind, target_id)`.
+    #[pyo3(signature = (bundle_id, path, *, tier_ids=None))]
+    fn export_eaf(
+        &self,
+        bundle_id: i64,
+        path: PathBuf,
+        tier_ids: Option<Vec<i64>>,
+    ) -> PyResult<()> {
+        self.inner
+            .export_eaf(bundle_id, path, tier_ids.as_deref())
+            .map_err(engine_err_to_py)
+    }
+
     fn __repr__(&self) -> String {
         format!("Project(root={:?})", self.root())
     }
