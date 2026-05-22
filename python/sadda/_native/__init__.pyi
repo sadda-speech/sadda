@@ -18,11 +18,19 @@ __all__ = [
     "Session",
     "Speaker",
     "Tier",
+    "blackman",
     "f0",
+    "gaussian",
+    "hamming",
+    "hann",
+    "intensity",
+    "kaiser",
     "load_wav",
     "new_project",
     "open_project",
     "schema_version",
+    "spectrogram",
+    "stft",
     "version",
 ]
 
@@ -614,12 +622,47 @@ class Tier:
         """
     def __repr__(self) -> builtins.str: ...
 
+def blackman(n: builtins.int) -> numpy.typing.NDArray[numpy.float32]:
+    r"""
+    Blackman window:
+    `0.42 - 0.5*cos(2π n / (N-1)) + 0.08*cos(4π n / (N-1))`.
+    """
+
 def f0(audio: Audio, *, frame_size_seconds: builtins.float = 0.029999999329447746, hop_size_seconds: builtins.float = 0.009999999776482582, min_freq_hz: builtins.float = 75.0, max_freq_hz: builtins.float = 500.0) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float32]]:
     r"""
     Estimates f0 over an Audio via time-domain autocorrelation.
     
     Returns `(times, frequencies)` as a 2-tuple of NumPy arrays:
     `times` is float64 in seconds, `frequencies` is float32 in Hz.
+    """
+
+def gaussian(n: builtins.int, sigma: builtins.float) -> numpy.typing.NDArray[numpy.float32]:
+    r"""
+    Gaussian window of length `n` with standard deviation `sigma` (in samples).
+    """
+
+def hamming(n: builtins.int) -> numpy.typing.NDArray[numpy.float32]:
+    r"""
+    Hamming window: `0.54 - 0.46 * cos(2π n / (N-1))`.
+    """
+
+def hann(n: builtins.int) -> numpy.typing.NDArray[numpy.float32]:
+    r"""
+    Hann window: `0.5 * (1 - cos(2π n / (N-1)))`.
+    """
+
+def intensity(audio: Audio, *, frame_size_seconds: builtins.float = 0.029999999329447746, hop_seconds: builtins.float = 0.009999999776482582) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float32], numpy.typing.NDArray[numpy.float32]]:
+    r"""
+    Per-frame intensity over an [`Audio`]: returns `(times, rms, db_fs)` as
+    three NumPy arrays. `times` is float64 seconds at frame centres; `rms` is
+    float32 linear amplitude; `db_fs` is float32 dB relative to digital
+    full-scale (clamped to -200 dB on silence). dB-SPL (Praat convention)
+    arrives in a later slice once microphone calibration is wired through.
+    """
+
+def kaiser(n: builtins.int, beta: builtins.float) -> numpy.typing.NDArray[numpy.float32]:
+    r"""
+    Kaiser window of length `n` with shape parameter `beta`.
     """
 
 def load_wav(path: builtins.str | os.PathLike | pathlib.Path) -> Audio:
@@ -643,6 +686,23 @@ def open_project(path: builtins.str | os.PathLike | pathlib.Path) -> Project:
 def schema_version() -> builtins.int:
     r"""
     Returns the highest corpus-database schema version this engine supports.
+    """
+
+def spectrogram(samples: numpy.typing.NDArray[numpy.float32], frame_size: builtins.int, hop_size: builtins.int, *, window: typing.Optional[numpy.typing.NDArray[numpy.float32]] = None) -> numpy.typing.NDArray[numpy.float32]:
+    r"""
+    Power spectrogram of a real-valued signal: `|X|²` of the STFT, in shape
+    `(n_freq_bins, n_frames)`. If `window` is omitted, a Hann window of
+    length `frame_size` is used.
+    """
+
+def stft(samples: numpy.typing.NDArray[numpy.float32], frame_size: builtins.int, hop_size: builtins.int, *, window: typing.Optional[numpy.typing.NDArray[numpy.float32]] = None) -> numpy.typing.NDArray[numpy.complex64]:
+    r"""
+    Short-time Fourier transform of a real-valued 1-D float32 signal.
+    
+    Returns the complex spectrogram with shape `(n_frames, n_freq_bins)` where
+    `n_freq_bins = frame_size / 2 + 1` (the unique half of the spectrum for
+    real input). If `window` is omitted, a Hann window of length `frame_size`
+    is used (matches `scipy.signal.stft`'s default).
     """
 
 def version() -> builtins.str:

@@ -6,6 +6,166 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-21 — Foundational DSP (C1): sadda.dsp namespace introduced, rustfft+realfft, intensity = RMS + dB-FS
+
+Goal: settle the sixth Phase 1 slice. C1 introduces the `sadda.dsp.*` namespace and lands the foundational DSP toolkit — windowing functions, STFT, spectrogram, intensity — as pure functions over `&[f32]` with no corpus coupling. The slice's exports become the first STABLE-tier members of `sadda.dsp.*` per the 2026-05-18 Python API surface entry.
+
+### What C1 must deliver
+
+From the Phase-1 slicing entry: (1) windowing functions (Hann, Hamming, Blackman, Gaussian, Kaiser); (2) STFT; (3) spectrogram; (4) intensity; (5) pure functions over `&[f32]`, no corpus dependency; (6) Polars-friendly outputs.
+
+### Namespace: introduce `sadda.dsp.*` now; move `sadda.f0` → `sadda.dsp.f0`
+
+The 2026-05-18 API surface entry pinned `sadda.dsp` as a STABLE namespace. C1 adds 8+ new public symbols — keeping them at the top level would clutter `sadda.*` for every future caller. So C1 is the natural slice to introduce the namespace.
+
+The Phase-0 `sadda.f0(...)` moves to `sadda.dsp.f0(...)` to live alongside the rest of the DSP toolkit. A top-level `sadda.f0` alias stays in place for back-compat — both call paths reach the same underlying function. The alias is documented as a Phase-0 convenience and is part of the STABLE contract (not deprecated; users won't see a warning).
+
+`sadda.Audio`, `sadda.new_project`, `sadda.open_project`, the tier types, etc. stay at the top level; only DSP gets a sub-module in C1.
+
+### FFT: `rustfft` + `realfft`
+
+`rustfft` 6.4 is the canonical Rust FFT crate — pure Rust, no_std-capable, MSRV 1.61 (fine for our 1.85). `realfft` 3.5 wraps it for real-only input (saves roughly half the work for audio, which is always real-valued). Both have minimal feature footprints; default features turn on SIMD intrinsics (AVX/SSE/NEON) that no-op on platforms without them.
+
+### Module layout (Rust)
+
+New `engine::dsp` module, split into focused sub-modules:
+
+```
+crates/engine/src/dsp/
+├── mod.rs             — re-exports + module docs
+├── windowing.rs       — hann, hamming, blackman, gaussian(n, sigma), kaiser(n, beta)
+├── stft.rs            — stft(samples, window, hop) → (Vec<Complex<f32>>, Shape)
+├── spectrogram.rs     — power_spectrogram(stft, shape) → Vec<f32> (n_freq_bins * n_frames)
+└── intensity.rs       — intensity(samples, sample_rate, frame_size_seconds, hop_seconds) → Vec<IntensityFrame>
+```
+
+Pure functions over `&[f32]`; no `Project` coupling — unit-testable in isolation just like `engine::storage::dense`. The existing `engine::pitch` (autocorrelation f0) is logically a DSP module too, but stays where it is to keep C1's diff focused on the new surfaces; a follow-up may move it under `engine::dsp::pitch`.
+
+### Window functions
+
+All five return `Vec<f32>` of the requested length. Parameterized windows take their parameter explicitly:
+
+```rust
+pub fn hann(n: usize)     -> Vec<f32>;
+pub fn hamming(n: usize)  -> Vec<f32>;
+pub fn blackman(n: usize) -> Vec<f32>;
+pub fn gaussian(n: usize, sigma: f32) -> Vec<f32>;
+pub fn kaiser(n: usize, beta: f32)    -> Vec<f32>;
+```
+
+Forces callers to declare params (matches `scipy.signal.windows` convention); avoids hiding strong opinions like "Praat-default Kaiser β = 8.6" in the API. Callers compose via:
+
+```rust
+let win = sadda_engine::dsp::hann(frame_size);
+let windowed: Vec<f32> = samples.iter().zip(win.iter()).map(|(x, w)| x * w).collect();
+```
+
+### STFT signature
+
+```rust
+pub struct Shape { pub n_frames: usize, pub n_freq_bins: usize }
+
+pub fn stft(samples: &[f32], window: &[f32], hop_size: usize)
+    -> (Vec<Complex<f32>>, Shape);
+```
+
+Returns the row-major flattened matrix shape `(n_frames, n_freq_bins)`. The companion `Shape` is the cheap structural metadata. Real-input optimized via `realfft::RealFftPlanner::plan_fft_forward(window.len())`. `n_freq_bins = window.len() / 2 + 1` (the unique part of the spectrum for real input).
+
+### Spectrogram
+
+Magnitude-squared (power) of the STFT, real-valued. Shape `(n_freq_bins, n_frames)` matches the API surface entry's documented convention; this is row-major-transposed relative to STFT's internal `(n_frames, n_freq_bins)` to be polars-friendly when each frequency bin becomes a column-like axis.
+
+```rust
+pub fn power_spectrogram(stft_out: &[Complex<f32>], shape: Shape)
+    -> Vec<f32>;  // length n_freq_bins * n_frames, row-major (n_freq_bins, n_frames)
+```
+
+A `magnitude_spectrogram(...)` follow-up can layer in later if a user wants the `|X|` form instead of `|X|²`.
+
+### Intensity: RMS + dB-FS per frame
+
+```rust
+pub struct IntensityFrame {
+    pub time_seconds: f64,
+    pub rms: f32,        // linear amplitude, root-mean-square over the frame
+    pub db_fs: f32,      // 20 * log10(rms / 1.0); dB relative to full-scale [-1.0, 1.0]
+}
+
+pub fn intensity(
+    samples: &[f32], sample_rate: u32,
+    frame_size_seconds: f32, hop_seconds: f32,
+) -> Vec<IntensityFrame>;
+```
+
+Both forms in one frame struct: linear RMS for raw analysis, dB-FS as the calibration-free dB form (relative to digital full-scale at amplitude 1.0). dB-SPL (relative to 2·10⁻⁵ Pa, the Praat convention) is deferred to a later slice that plumbs microphone calibration through the `Instrument` table.
+
+Edge case: silent frames (RMS = 0) produce `db_fs = -∞`. The Rust implementation clamps at a small floor (e.g. `-200.0` dB) to keep downstream callers from having to special-case `NEG_INFINITY`.
+
+### Python surface
+
+`python/sadda/dsp/__init__.py` becomes the public entry point:
+
+```
+sadda.dsp.hann(n)               → np.ndarray[float32]
+sadda.dsp.hamming(n)            → np.ndarray[float32]
+sadda.dsp.blackman(n)           → np.ndarray[float32]
+sadda.dsp.gaussian(n, sigma)    → np.ndarray[float32]
+sadda.dsp.kaiser(n, beta)       → np.ndarray[float32]
+sadda.dsp.stft(samples, frame_size, hop_size, *, window=None)
+                                → tuple[np.ndarray[complex64, 2], (n_frames, n_freq_bins)]
+sadda.dsp.spectrogram(samples, frame_size, hop_size, *, window=None)
+                                → np.ndarray[float32, 2]   # shape (n_freq_bins, n_frames)
+sadda.dsp.intensity(audio, *, frame_size_seconds=0.030, hop_seconds=0.010)
+                                → tuple[np.ndarray[float64], np.ndarray[float32], np.ndarray[float32]]
+                                  # (times, rms, db_fs)
+sadda.dsp.f0(audio, ...)         # the existing Phase-0 function, relocated
+```
+
+Top-level `sadda.f0` stays as a back-compat alias pointing at the same function. All `sadda.dsp.*` symbols are `@stable`.
+
+The DSP submodule is implemented in pure Python (`python/sadda/dsp/__init__.py`) re-exporting from `_native`; no PyO3 submodule machinery (which would complicate the stub layout). The Rust extension exposes all DSP functions flat in `sadda._native` (e.g. `_native.hann`, `_native.stft`, …); the Python wrapper does the namespacing.
+
+### Confirmed C1 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Namespace | **Introduce `sadda.dsp.*` now; move `sadda.f0` → `sadda.dsp.f0` with top-level alias** | Cleanest namespace from day one; 8+ DSP symbols would clutter top-level; API-surface entry already pinned the namespace; alias keeps existing users working |
+| FFT library | **`rustfft` 6 + `realfft` 3** | Canonical Rust FFT pair; pure Rust; MSRV 1.61; SIMD by default; minimal extra deps |
+| Window API | **Return `Vec<f32>`; explicit per-param args** | Composable; no hidden defaults; matches scipy convention; testable per param |
+| Intensity form | **`IntensityFrame { rms, db_fs, time_seconds }`** | Both calibration-free forms in one struct; dB-SPL deferred until Instrument calibration lands |
+| Spectrogram orientation | **`(n_freq_bins, n_frames)`** | Matches the 2026-05-18 API-surface entry's documented convention; polars-friendly |
+| Polars integration | **Returns NumPy; Python wraps with polars if desired** | Same pattern as B2/B3 — no polars-rs in the Rust tree |
+
+### Layout
+
+- `crates/engine/Cargo.toml` — adds `rustfft = "6"` and `realfft = "3"`.
+- `crates/engine/src/dsp/{mod,windowing,stft,spectrogram,intensity}.rs` — new module with focused submodules.
+- `crates/engine/src/lib.rs` — `pub mod dsp;` + re-exports.
+- `crates/python/src/lib.rs` — new PyO3 functions for windowing/stft/spectrogram/intensity (the f0 binding already exists).
+- `python/sadda/dsp/__init__.py` — re-exports + `@stable` decoration; pulls `f0` from `_native` too.
+- `python/sadda/__init__.py` — keeps `f0` as the back-compat alias.
+- `crates/engine/tests/dsp.rs` — round-trips and analytical-truth tests (sine → peak in spectrogram, RMS of known signal matches).
+- `python/tests/test_dsp.py` — NumPy-side smoke tests + namespace presence + alias equality.
+
+### What this entry doesn't decide
+
+- **Mel-filterbank / MFCC.** C2.
+- **Calibrated dB-SPL via Instrument.** Future slice once a real use case appears (clinical AVQI, voice training).
+- **Magnitude (vs power) spectrogram.** `power_spectrogram` only in C1; `magnitude_spectrogram` is trivial to add later.
+- **LazyFrame-style streaming STFT for long recordings.** Whole-buffer for now; live-recording (E1) will revisit.
+- **Move `engine::pitch` under `engine::dsp::pitch`.** Out of scope for C1; the C1 diff stays additive. A follow-up can do the Rust-side reorganization with no user-visible Python change (since `sadda.dsp.f0` already routes through PyO3 wherever the Rust function lives).
+
+### Sources / references
+
+- 2026-05-18 Python API surface entry (`sadda.dsp` namespace, spectrogram shape convention)
+- 2026-05-21 Phase 1 slicing entry (C1 row)
+- `rustfft`: https://github.com/ejmahler/RustFFT (6.4.1, MSRV 1.61)
+- `realfft`: https://github.com/HEnquist/realfft (3.5.0)
+- scipy.signal.windows reference: https://docs.scipy.org/doc/scipy/reference/signal.windows.html
+- librosa STFT/spectrogram reference: https://librosa.org/doc/latest/generated/librosa.stft.html
+
+---
+
 ## 2026-05-21 — Dense tier types + Parquet sidecars (B3): apache parquet+arrow, per-bundle layout, NumPy/buffers in, polars out
 
 Goal: settle the fifth Phase 1 slice. B3 lands the three dense tier types' on-disk format (Parquet sidecars under `signals/derived/`), the `DerivedSignal` registration table that ties them back to the corpus, and the read/write paths so AI-engineer users can either ask for a `polars.DataFrame` via `proj.query(tier_id)` or grab the sidecar path and `pl.scan_parquet(path)` directly.

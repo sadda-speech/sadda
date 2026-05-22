@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use ndarray::Array2;
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{Complex32, IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
@@ -1093,6 +1093,180 @@ fn f0<'py>(
     (times.into_pyarray(py), freqs.into_pyarray(py))
 }
 
+/// Hann window: `0.5 * (1 - cos(2π n / (N-1)))`.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn hann<'py>(py: Python<'py>, n: usize) -> Bound<'py, PyArray1<f32>> {
+    sadda_engine::dsp::hann(n).into_pyarray(py)
+}
+
+/// Hamming window: `0.54 - 0.46 * cos(2π n / (N-1))`.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn hamming<'py>(py: Python<'py>, n: usize) -> Bound<'py, PyArray1<f32>> {
+    sadda_engine::dsp::hamming(n).into_pyarray(py)
+}
+
+/// Blackman window:
+/// `0.42 - 0.5*cos(2π n / (N-1)) + 0.08*cos(4π n / (N-1))`.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn blackman<'py>(py: Python<'py>, n: usize) -> Bound<'py, PyArray1<f32>> {
+    sadda_engine::dsp::blackman(n).into_pyarray(py)
+}
+
+/// Gaussian window of length `n` with standard deviation `sigma` (in samples).
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn gaussian<'py>(py: Python<'py>, n: usize, sigma: f32) -> Bound<'py, PyArray1<f32>> {
+    sadda_engine::dsp::gaussian(n, sigma).into_pyarray(py)
+}
+
+/// Kaiser window of length `n` with shape parameter `beta`.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn kaiser<'py>(py: Python<'py>, n: usize, beta: f32) -> Bound<'py, PyArray1<f32>> {
+    sadda_engine::dsp::kaiser(n, beta).into_pyarray(py)
+}
+
+/// Short-time Fourier transform of a real-valued 1-D float32 signal.
+///
+/// Returns the complex spectrogram with shape `(n_frames, n_freq_bins)` where
+/// `n_freq_bins = frame_size / 2 + 1` (the unique half of the spectrum for
+/// real input). If `window` is omitted, a Hann window of length `frame_size`
+/// is used (matches `scipy.signal.stft`'s default).
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (samples, frame_size, hop_size, *, window=None))]
+fn stft<'py>(
+    py: Python<'py>,
+    samples: PyReadonlyArray1<'_, f32>,
+    frame_size: usize,
+    hop_size: usize,
+    window: Option<PyReadonlyArray1<'_, f32>>,
+) -> PyResult<Bound<'py, PyArray2<Complex32>>> {
+    if frame_size == 0 {
+        return Err(PyValueError::new_err("frame_size must be > 0"));
+    }
+    if hop_size == 0 {
+        return Err(PyValueError::new_err("hop_size must be > 0"));
+    }
+    let samples_slice = samples
+        .as_slice()
+        .map_err(|e| PyValueError::new_err(format!("samples must be contiguous: {e}")))?;
+    let owned_window: Vec<f32>;
+    let window_slice: &[f32] = match window {
+        Some(w) => {
+            let w_slice = w
+                .as_slice()
+                .map_err(|e| PyValueError::new_err(format!("window must be contiguous: {e}")))?;
+            if w_slice.len() != frame_size {
+                return Err(PyValueError::new_err(format!(
+                    "window length {} does not match frame_size {frame_size}",
+                    w_slice.len()
+                )));
+            }
+            // Borrowed copy — the readonly array's slice is short-lived.
+            owned_window = w_slice.to_vec();
+            owned_window.as_slice()
+        }
+        None => {
+            owned_window = sadda_engine::dsp::hann(frame_size);
+            owned_window.as_slice()
+        }
+    };
+    let (data, shape) = sadda_engine::dsp::stft(samples_slice, window_slice, hop_size);
+    // `data` is row-major (n_frames, n_freq_bins).
+    let arr = Array2::from_shape_vec((shape.n_frames, shape.n_freq_bins), data)
+        .map_err(|e| PyRuntimeError::new_err(format!("STFT reshape failed: {e}")))?;
+    Ok(arr.into_pyarray(py))
+}
+
+/// Power spectrogram of a real-valued signal: `|X|²` of the STFT, in shape
+/// `(n_freq_bins, n_frames)`. If `window` is omitted, a Hann window of
+/// length `frame_size` is used.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (samples, frame_size, hop_size, *, window=None))]
+fn spectrogram<'py>(
+    py: Python<'py>,
+    samples: PyReadonlyArray1<'_, f32>,
+    frame_size: usize,
+    hop_size: usize,
+    window: Option<PyReadonlyArray1<'_, f32>>,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    if frame_size == 0 {
+        return Err(PyValueError::new_err("frame_size must be > 0"));
+    }
+    if hop_size == 0 {
+        return Err(PyValueError::new_err("hop_size must be > 0"));
+    }
+    let samples_slice = samples
+        .as_slice()
+        .map_err(|e| PyValueError::new_err(format!("samples must be contiguous: {e}")))?;
+    let owned_window: Vec<f32>;
+    let window_slice: &[f32] = match window {
+        Some(w) => {
+            let w_slice = w
+                .as_slice()
+                .map_err(|e| PyValueError::new_err(format!("window must be contiguous: {e}")))?;
+            if w_slice.len() != frame_size {
+                return Err(PyValueError::new_err(format!(
+                    "window length {} does not match frame_size {frame_size}",
+                    w_slice.len()
+                )));
+            }
+            owned_window = w_slice.to_vec();
+            owned_window.as_slice()
+        }
+        None => {
+            owned_window = sadda_engine::dsp::hann(frame_size);
+            owned_window.as_slice()
+        }
+    };
+    let (data, shape) = sadda_engine::dsp::stft(samples_slice, window_slice, hop_size);
+    let p = sadda_engine::dsp::power_spectrogram(&data, shape);
+    let arr = Array2::from_shape_vec((shape.n_freq_bins, shape.n_frames), p)
+        .map_err(|e| PyRuntimeError::new_err(format!("spectrogram reshape failed: {e}")))?;
+    Ok(arr.into_pyarray(py))
+}
+
+/// Per-frame intensity over an [`Audio`]: returns `(times, rms, db_fs)` as
+/// three NumPy arrays. `times` is float64 seconds at frame centres; `rms` is
+/// float32 linear amplitude; `db_fs` is float32 dB relative to digital
+/// full-scale (clamped to -200 dB on silence). dB-SPL (Praat convention)
+/// arrives in a later slice once microphone calibration is wired through.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (audio, *, frame_size_seconds=0.030, hop_seconds=0.010))]
+#[allow(clippy::type_complexity)]
+fn intensity<'py>(
+    py: Python<'py>,
+    audio: &PyAudio,
+    frame_size_seconds: f32,
+    hop_seconds: f32,
+) -> (
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f32>>,
+    Bound<'py, PyArray1<f32>>,
+) {
+    let mono: Vec<f32> = audio.inner.mono_samples().collect();
+    let frames = sadda_engine::dsp::intensity(
+        &mono,
+        audio.inner.sample_rate,
+        frame_size_seconds,
+        hop_seconds,
+    );
+    let times: Vec<f64> = frames.iter().map(|f| f.time_seconds).collect();
+    let rms: Vec<f32> = frames.iter().map(|f| f.rms).collect();
+    let db_fs: Vec<f32> = frames.iter().map(|f| f.db_fs).collect();
+    (
+        times.into_pyarray(py),
+        rms.into_pyarray(py),
+        db_fs.into_pyarray(py),
+    )
+}
+
 /// sadda._native — Rust extension submodule. End users should `import sadda`
 /// and use the decorated re-exports in `sadda.__init__` rather than reaching
 /// in here directly.
@@ -1102,6 +1276,14 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(load_wav, m)?)?;
     m.add_function(wrap_pyfunction!(f0, m)?)?;
+    m.add_function(wrap_pyfunction!(hann, m)?)?;
+    m.add_function(wrap_pyfunction!(hamming, m)?)?;
+    m.add_function(wrap_pyfunction!(blackman, m)?)?;
+    m.add_function(wrap_pyfunction!(gaussian, m)?)?;
+    m.add_function(wrap_pyfunction!(kaiser, m)?)?;
+    m.add_function(wrap_pyfunction!(stft, m)?)?;
+    m.add_function(wrap_pyfunction!(spectrogram, m)?)?;
+    m.add_function(wrap_pyfunction!(intensity, m)?)?;
     m.add_function(wrap_pyfunction!(new_project, m)?)?;
     m.add_function(wrap_pyfunction!(open_project, m)?)?;
     m.add_class::<PyAudio>()?;
