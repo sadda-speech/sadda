@@ -7,6 +7,7 @@ pub mod audio;
 pub mod corpus;
 pub mod dsp;
 pub mod error;
+pub mod io;
 pub mod pitch;
 pub mod storage;
 
