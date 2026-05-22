@@ -1673,6 +1673,108 @@ impl Project {
         Ok(new_tier_ids)
     }
 
+    /// Atomically commits a stopped [`crate::live::StoppedSession`] into the
+    /// project: renames `.in_progress/<uuid>/audio.wav` into
+    /// `signals/original/<sanitized_name>.wav`, inserts a `bundle` row, and
+    /// records a `processing_run` row of kind `'live_recording'` with the
+    /// capture parameters. Returns the new bundle id.
+    ///
+    /// `params_json` is recorded verbatim in `processing_run.parameters`.
+    /// Recommended shape: `{"device": "...", "sample_rate": 44100,
+    /// "channels": 1, "duration_s": 4.2, "analysis_window_ms": 30,
+    /// "analysis_hop_ms": 10, "dropped_samples": 0}` — the PyO3 wrapper
+    /// builds this from `LiveConfig` + `StoppedSession` for free.
+    ///
+    /// On any failure between the rename and the SQL inserts, the file is
+    /// renamed back into the `.in_progress/` directory if possible; if the
+    /// rename-back fails too, the error reports both paths so the operator
+    /// can recover manually.
+    pub fn commit_recording(
+        &self,
+        stopped: crate::live::StoppedSession,
+        name: &str,
+        params_json: &str,
+    ) -> Result<i64> {
+        if stopped.frames_written == 0 {
+            return Err(EngineError::Corpus(
+                "commit_recording: no audio captured (frames_written = 0)".into(),
+            ));
+        }
+        let src_wav = stopped.in_progress_dir.join("audio.wav");
+        if !src_wav.exists() {
+            return Err(EngineError::Corpus(format!(
+                "commit_recording: source WAV not found: {}",
+                src_wav.display()
+            )));
+        }
+        // Validate by reading; this also gives us sample_rate / channels /
+        // n_frames straight from the file rather than trusting the caller.
+        let audio = Audio::from_wav_path(&src_wav)?;
+
+        let sanitized = sanitize_filename(name);
+        let dest_rel = Path::new("signals").join("original").join(format!(
+            "{sanitized}.wav"
+        ));
+        let dest_abs = self.root.join(&dest_rel);
+        if dest_abs.exists() {
+            return Err(EngineError::Corpus(format!(
+                "commit_recording: destination already exists: {}",
+                dest_abs.display()
+            )));
+        }
+
+        // Atomic move first; on the same filesystem this is a single
+        // rename(2) and either fully succeeds or leaves the source intact.
+        std::fs::rename(&src_wav, &dest_abs)?;
+
+        // Insert bundle + processing_run. If either fails, rename back.
+        let result = (|| -> Result<i64> {
+            let bundle_id: i64 = self.conn.query_row(
+                "INSERT INTO bundle \
+                    (name, audio_relative_path, sample_rate, channels, n_frames, \
+                     session_id, speaker_id, extra) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, NULL) RETURNING id",
+                rusqlite::params![
+                    name,
+                    dest_rel.to_string_lossy().as_ref(),
+                    audio.sample_rate as i64,
+                    audio.channels as i64,
+                    audio.frame_count() as i64,
+                ],
+                |row| row.get(0),
+            )?;
+            self.conn.execute(
+                "INSERT INTO processing_run \
+                    (bundle_id, kind, processor_id, processor_version, \
+                     parameters, finished_at, status) \
+                 VALUES (?1, 'live_recording', 'sadda.live', ?2, ?3, \
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'ok')",
+                rusqlite::params![bundle_id, crate::version(), params_json],
+            )?;
+            Ok(bundle_id)
+        })();
+
+        match result {
+            Ok(bundle_id) => {
+                // Best-effort cleanup of the (now-empty) .in_progress dir.
+                let _ = std::fs::remove_dir_all(&stopped.in_progress_dir);
+                Ok(bundle_id)
+            }
+            Err(e) => {
+                // Roll back the rename so the user can retry / inspect.
+                if let Err(rename_err) = std::fs::rename(&dest_abs, &src_wav) {
+                    return Err(EngineError::Corpus(format!(
+                        "commit_recording failed: {e}; \
+                         additionally, rolling back the rename failed: {rename_err}. \
+                         Recording is at {} (db not updated)",
+                        dest_abs.display()
+                    )));
+                }
+                Err(e)
+            }
+        }
+    }
+
     /// Writes an ELAN `.eaf` file for `bundle_id`'s sparse tiers to `path`
     /// in EAF 2.8 format. If `tier_ids` is `Some`, only those tiers are
     /// exported (filtered to the named bundle).

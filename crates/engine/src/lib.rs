@@ -8,6 +8,7 @@ pub mod corpus;
 pub mod dsp;
 pub mod error;
 pub mod io;
+pub mod live;
 pub mod pitch;
 pub mod storage;
 
@@ -18,6 +19,10 @@ pub use corpus::{
     TierType,
 };
 pub use error::{EngineError, Result};
+pub use live::{
+    LiveConfig, LiveFormantsFrame, LiveIntensityFrame, LivePitchFrame, LiveResults, LiveSession,
+    MeterFrame, StoppedSession,
+};
 pub use pitch::{PitchConfig, PitchFrame, autocorrelation};
 
 /// Returns the engine crate's semver string, taken from `Cargo.toml` at build

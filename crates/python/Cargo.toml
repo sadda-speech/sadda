@@ -29,3 +29,8 @@ pyo3 = { version = "0.28" }
 numpy = "0.28"
 ndarray = "0.16"
 pyo3-stub-gen = "0.22"
+# E1 live recording: cpal Stream + rtrb are required here (not in
+# sadda-engine) because engine::live keeps itself free of audio-hardware
+# dependencies so its integration tests can run on a headless CI.
+cpal = "0.17"
+rtrb = "0.3"

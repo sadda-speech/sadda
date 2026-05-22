@@ -19,6 +19,9 @@ const V2_SQL: &str = include_str!("../../migrations/V2__schema_migrations_proven
 const V3_SQL: &str = include_str!("../../migrations/V3__entity_schema.sql");
 const V4_SQL: &str = include_str!("../../migrations/V4__sparse_annotations.sql");
 const V5_SQL: &str = include_str!("../../migrations/V5__derived_signal.sql");
+const V6_SQL: &str = include_str!(
+    "../../migrations/V6__processing_run_kind_live_recording.sql"
+);
 
 /// One forward-only migration step.
 struct Migration {
@@ -70,6 +73,11 @@ static MIGRATIONS: &[Migration] = &[
         version: 5,
         name: "derived_signal",
         kind: Kind::Sql(V5_SQL),
+    },
+    Migration {
+        version: 6,
+        name: "processing_run_kind_live_recording",
+        kind: Kind::Sql(V6_SQL),
     },
 ];
 
@@ -184,7 +192,7 @@ mod tests {
 
     #[test]
     fn engine_max_version_matches_static_table() {
-        assert_eq!(engine_max_version(), 5);
+        assert_eq!(engine_max_version(), 6);
     }
 
     #[test]
