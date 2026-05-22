@@ -16,7 +16,9 @@ use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
-fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
+mod live;
+
+pub(crate) fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
     match e {
         sadda_engine::EngineError::Io(err) => PyIOError::new_err(err.to_string()),
         sadda_engine::EngineError::WavDecode(err) => {
@@ -610,12 +612,12 @@ impl PyDerivedSignal {
 /// or `sadda.open_project(...)`.
 #[gen_stub_pyclass]
 #[pyclass(name = "Project", unsendable)]
-struct PyProject {
+pub(crate) struct PyProject {
     // `unsendable`: rusqlite::Connection is Send but not Sync; the GIL
     // serializes Python-side access, but PyO3 requires Send+Sync by default.
     // `unsendable` tells PyO3 to check at runtime that this object isn't
     // shared across threads.
-    inner: sadda_engine::Project,
+    pub(crate) inner: sadda_engine::Project,
 }
 
 #[gen_stub_pymethods]
@@ -1569,6 +1571,17 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDerivedSignal>()?;
     m.add_class::<PyFormantFrame>()?;
     m.add_class::<PyProject>()?;
+
+    // Live recording: sadda.live.* surface. We register it as a Python
+    // submodule (`sadda._native.live`) and the Python-side
+    // `sadda/live/__init__.py` re-exports the symbols under the
+    // user-facing `sadda.live.*` path.
+    let live_mod = PyModule::new(m.py(), "live")?;
+    live_mod.add_function(wrap_pyfunction!(live::start_session, &live_mod)?)?;
+    live_mod.add_function(wrap_pyfunction!(live::list_input_devices, &live_mod)?)?;
+    live_mod.add_function(wrap_pyfunction!(live::default_input_device, &live_mod)?)?;
+    live_mod.add_class::<live::PyLiveSession>()?;
+    m.add_submodule(&live_mod)?;
     Ok(())
 }
 

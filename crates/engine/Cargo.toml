@@ -10,12 +10,15 @@ rust-version.workspace = true
 
 [dependencies]
 arrow = { version = "58", default-features = false }
+cpal = "0.17"
 hound = "3.5"
 ndarray = "0.16"
 parquet = { version = "58", default-features = false, features = ["arrow", "snap"] }
 quick-xml = "0.40"
 realfft = "3"
+rtrb = "0.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustfft = "6"
 sha2 = "0.10"
 thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
