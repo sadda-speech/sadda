@@ -1266,6 +1266,321 @@ impl Project {
             ))),
         }
     }
+
+    /// Imports a Praat TextGrid into `bundle_id`. Each Praat tier becomes a
+    /// new [`Tier`] row (interval or point); each annotation becomes an
+    /// `annotation_interval` / `annotation_point` row with any JSON
+    /// sentinel decoded back into the `extra` field. Returns the new tier
+    /// IDs in import order.
+    ///
+    /// Records a [`ProcessingRun`]-style row in `processing_run` for audit
+    /// provenance (`processor_id = "sadda.io.textgrid.import"`).
+    ///
+    /// Lossiness: tier hierarchy, parent_annotation_id links, and
+    /// tier-level `schema` JSON are not in TextGrid and aren't recovered.
+    /// Reference tiers exported via the round-trip mechanism come back as
+    /// interval tiers (recovering them as reference tiers is a future
+    /// enhancement).
+    pub fn import_textgrid(&self, path: impl AsRef<Path>, bundle_id: i64) -> Result<Vec<i64>> {
+        let path = path.as_ref();
+        let textgrid = crate::io::textgrid::read(path)?;
+        let mut new_tier_ids = Vec::with_capacity(textgrid.tiers.len());
+        for tier in &textgrid.tiers {
+            match tier {
+                crate::io::textgrid::TextGridTier::Interval(it) => {
+                    let tier_id =
+                        self.add_tier(&TierSpec::new(bundle_id, &it.name, TierType::Interval))?;
+                    for entry in &it.intervals {
+                        let (plain, extra) = crate::io::textgrid::decode_label(&entry.text);
+                        self.add_interval(&IntervalSpec {
+                            tier_id,
+                            start_seconds: entry.xmin,
+                            end_seconds: entry.xmax,
+                            label: Some(plain),
+                            extra,
+                            ..Default::default()
+                        })?;
+                    }
+                    new_tier_ids.push(tier_id);
+                }
+                crate::io::textgrid::TextGridTier::Point(pt) => {
+                    let tier_id =
+                        self.add_tier(&TierSpec::new(bundle_id, &pt.name, TierType::Point))?;
+                    for entry in &pt.points {
+                        let (plain, extra) = crate::io::textgrid::decode_label(&entry.mark);
+                        self.add_point(&PointSpec {
+                            tier_id,
+                            time_seconds: entry.time,
+                            label: Some(plain),
+                            extra,
+                            ..Default::default()
+                        })?;
+                    }
+                    new_tier_ids.push(tier_id);
+                }
+            }
+        }
+        // Record the import as a processing_run for audit provenance.
+        let display = path.display().to_string();
+        let params = format!(
+            "{{\"path\":{:?},\"n_tiers\":{}}}",
+            display,
+            textgrid.tiers.len()
+        );
+        let output_tier_ids = format!(
+            "[{}]",
+            new_tier_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        self.conn.execute(
+            "INSERT INTO processing_run \
+                (bundle_id, kind, processor_id, processor_version, \
+                 parameters, output_tier_ids, finished_at, status) \
+             VALUES (?1, 'dsp_algorithm', 'sadda.io.textgrid.import', ?2, ?3, ?4, \
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'ok')",
+            rusqlite::params![bundle_id, crate::version(), params, output_tier_ids,],
+        )?;
+        Ok(new_tier_ids)
+    }
+
+    /// Writes a Praat TextGrid for `bundle_id`'s sparse tiers to `path`.
+    /// If `tier_ids` is `Some`, only those tiers are exported (filtered to
+    /// the named bundle).
+    ///
+    /// Dense tiers (continuous_numeric / vector / categorical_sampled) are
+    /// silently skipped. Reference tiers are exported as IntervalTiers with
+    /// a degenerate `[0.0, 0.001]` time span and the JSON sentinel carrying
+    /// the original `(target_kind, target_id)` payload, so they round-trip
+    /// losslessly through Praat at the file level (re-import recovers the
+    /// data as interval annotations; reconstituting them as reference
+    /// annotations is a future enhancement).
+    ///
+    /// IntervalTiers must be contiguous in Praat; gaps are padded with
+    /// empty `text = ""` intervals. Overlapping intervals are an error.
+    pub fn export_textgrid(
+        &self,
+        bundle_id: i64,
+        path: impl AsRef<Path>,
+        tier_ids: Option<&[i64]>,
+    ) -> Result<()> {
+        let path = path.as_ref();
+        let bundle = self.bundle(bundle_id)?;
+        let audio_duration_seconds = bundle.n_frames as f64 / bundle.sample_rate as f64;
+
+        let all_tiers = self.tiers(Some(bundle_id))?;
+        let selected: Vec<&Tier> = match tier_ids {
+            Some(ids) => all_tiers.iter().filter(|t| ids.contains(&t.id)).collect(),
+            None => all_tiers.iter().collect(),
+        };
+
+        let mut tg_tiers: Vec<crate::io::textgrid::TextGridTier> = Vec::new();
+        let mut file_xmax = audio_duration_seconds;
+
+        for tier in selected {
+            match tier.r#type {
+                TierType::Interval => {
+                    let rows = self.intervals(tier.id)?;
+                    let entries = build_interval_entries(&rows, audio_duration_seconds)?;
+                    let tier_xmax = entries
+                        .last()
+                        .map(|e| e.xmax)
+                        .unwrap_or(audio_duration_seconds);
+                    file_xmax = file_xmax.max(tier_xmax);
+                    tg_tiers.push(crate::io::textgrid::TextGridTier::Interval(
+                        crate::io::textgrid::IntervalTier {
+                            name: tier.name.clone(),
+                            xmin: 0.0,
+                            xmax: tier_xmax,
+                            intervals: entries,
+                        },
+                    ));
+                }
+                TierType::Point => {
+                    let rows = self.points(tier.id)?;
+                    let points: Vec<crate::io::textgrid::PointEntry> = rows
+                        .iter()
+                        .map(|p| crate::io::textgrid::PointEntry {
+                            time: p.time_seconds,
+                            mark: crate::io::textgrid::encode_label(
+                                p.label.as_deref().unwrap_or(""),
+                                p.extra.as_deref(),
+                            ),
+                        })
+                        .collect();
+                    let tier_xmax = points
+                        .iter()
+                        .map(|p| p.time)
+                        .fold(audio_duration_seconds, f64::max);
+                    file_xmax = file_xmax.max(tier_xmax);
+                    tg_tiers.push(crate::io::textgrid::TextGridTier::Point(
+                        crate::io::textgrid::PointTier {
+                            name: tier.name.clone(),
+                            xmin: 0.0,
+                            xmax: tier_xmax,
+                            points,
+                        },
+                    ));
+                }
+                TierType::Reference => {
+                    let rows = self.references_for(tier.id)?;
+                    let entries: Vec<crate::io::textgrid::IntervalEntry> = rows
+                        .iter()
+                        .enumerate()
+                        .map(|(i, r)| {
+                            let start = i as f64 * 0.001;
+                            let end = start + 0.001;
+                            let payload = format!(
+                                "{{\"target_kind\":{:?},\"target_id\":{}{}}}",
+                                r.target_kind,
+                                r.target_id,
+                                r.extra
+                                    .as_deref()
+                                    .map(|e| format!(",\"extra\":{e}"))
+                                    .unwrap_or_default(),
+                            );
+                            let label_text = crate::io::textgrid::encode_label(
+                                r.label.as_deref().unwrap_or(""),
+                                Some(&payload),
+                            );
+                            crate::io::textgrid::IntervalEntry {
+                                xmin: start,
+                                xmax: end,
+                                text: label_text,
+                            }
+                        })
+                        .collect();
+                    let tier_xmax = entries.last().map(|e| e.xmax).unwrap_or(0.001);
+                    file_xmax = file_xmax.max(tier_xmax);
+                    tg_tiers.push(crate::io::textgrid::TextGridTier::Interval(
+                        crate::io::textgrid::IntervalTier {
+                            name: tier.name.clone(),
+                            xmin: 0.0,
+                            xmax: tier_xmax,
+                            intervals: entries,
+                        },
+                    ));
+                }
+                TierType::ContinuousNumeric
+                | TierType::ContinuousVector
+                | TierType::CategoricalSampled => {
+                    // Skip dense tiers silently. A future API may return a
+                    // report of how many were skipped.
+                }
+            }
+        }
+
+        // Normalise every tier's xmax up to the file_xmax (Praat requires
+        // tier ranges to match the file range for IntervalTiers).
+        for tier in tg_tiers.iter_mut() {
+            match tier {
+                crate::io::textgrid::TextGridTier::Interval(it) => {
+                    if let Some(last) = it.intervals.last() {
+                        if last.xmax < file_xmax {
+                            it.intervals.push(crate::io::textgrid::IntervalEntry {
+                                xmin: last.xmax,
+                                xmax: file_xmax,
+                                text: String::new(),
+                            });
+                        }
+                    } else {
+                        it.intervals.push(crate::io::textgrid::IntervalEntry {
+                            xmin: 0.0,
+                            xmax: file_xmax,
+                            text: String::new(),
+                        });
+                    }
+                    it.xmax = file_xmax;
+                }
+                crate::io::textgrid::TextGridTier::Point(pt) => {
+                    pt.xmax = file_xmax;
+                }
+            }
+        }
+
+        let file = crate::io::textgrid::TextGridFile {
+            xmin: 0.0,
+            xmax: file_xmax,
+            tiers: tg_tiers,
+        };
+        crate::io::textgrid::write(&file, path)?;
+        Ok(())
+    }
+
+    /// Internal: fetches a single bundle row.
+    fn bundle(&self, bundle_id: i64) -> Result<Bundle> {
+        let bundle = self.conn.query_row(
+            "SELECT id, name, audio_relative_path, sample_rate, channels, n_frames, \
+                    session_id, speaker_id, extra \
+             FROM bundle WHERE id = ?1",
+            [bundle_id],
+            |row| {
+                Ok(Bundle {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    audio_relative_path: row.get(2)?,
+                    sample_rate: row.get::<_, i64>(3)? as u32,
+                    channels: row.get::<_, i64>(4)? as u16,
+                    n_frames: row.get::<_, i64>(5)? as usize,
+                    session_id: row.get(6)?,
+                    speaker_id: row.get(7)?,
+                    extra: row.get(8)?,
+                })
+            },
+        )?;
+        Ok(bundle)
+    }
+}
+
+/// Convert a list of `Interval` rows into contiguous Praat-style entries.
+/// Sorts by start time, pads gaps with empty `text = ""` intervals, and
+/// errors on overlap. Always starts at `0.0`; the caller pads the trailing
+/// gap up to the file_xmax separately.
+fn build_interval_entries(
+    rows: &[Interval],
+    bundle_duration_seconds: f64,
+) -> Result<Vec<crate::io::textgrid::IntervalEntry>> {
+    let mut sorted: Vec<&Interval> = rows.iter().collect();
+    sorted.sort_by(|a, b| a.start_seconds.partial_cmp(&b.start_seconds).unwrap());
+
+    let mut entries = Vec::new();
+    let mut cursor = 0.0_f64;
+
+    for iv in sorted {
+        if iv.start_seconds < cursor - 1e-9 {
+            return Err(EngineError::Corpus(format!(
+                "TextGrid export: overlapping intervals at tier annotation id {}; \
+                 interval [{}, {}] starts before previous ended at {}",
+                iv.id, iv.start_seconds, iv.end_seconds, cursor
+            )));
+        }
+        // Gap padding.
+        if iv.start_seconds > cursor + 1e-9 {
+            entries.push(crate::io::textgrid::IntervalEntry {
+                xmin: cursor,
+                xmax: iv.start_seconds,
+                text: String::new(),
+            });
+        }
+        let text = crate::io::textgrid::encode_label(
+            iv.label.as_deref().unwrap_or(""),
+            iv.extra.as_deref(),
+        );
+        entries.push(crate::io::textgrid::IntervalEntry {
+            xmin: iv.start_seconds,
+            xmax: iv.end_seconds,
+            text,
+        });
+        cursor = iv.end_seconds;
+    }
+
+    // If the user's intervals don't reach the bundle duration we leave the
+    // final padding to the caller (it does the file-level xmax adjustment).
+    let _ = bundle_duration_seconds;
+
+    Ok(entries)
 }
 
 /// Result of [`Project::tier_rows`]: a typed enum of the three sparse-tier

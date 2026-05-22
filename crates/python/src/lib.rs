@@ -1018,6 +1018,36 @@ impl PyProject {
         Ok(opt.map(|p| p.to_string_lossy().into_owned()))
     }
 
+    /// Imports a Praat TextGrid into `bundle_id`. Each Praat tier becomes a
+    /// new Tier row (interval or point); each annotation becomes an
+    /// `annotation_interval` / `annotation_point` row. JSON sentinels in
+    /// labels are decoded back into the `extra` field. Returns the list of
+    /// new tier IDs in import order. Records a `processing_run` row for
+    /// audit provenance.
+    fn import_textgrid(&self, path: PathBuf, bundle_id: i64) -> PyResult<Vec<i64>> {
+        self.inner
+            .import_textgrid(path, bundle_id)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Writes a Praat TextGrid for `bundle_id`'s sparse tiers to `path`.
+    /// If `tier_ids` is given, only those tiers are exported. Dense tiers
+    /// (continuous_numeric / vector / categorical_sampled) are skipped.
+    /// Reference tiers are exported as IntervalTiers with a degenerate
+    /// `[0.0, 0.001]` time span plus a JSON sentinel carrying their
+    /// `(target_kind, target_id)`.
+    #[pyo3(signature = (bundle_id, path, *, tier_ids=None))]
+    fn export_textgrid(
+        &self,
+        bundle_id: i64,
+        path: PathBuf,
+        tier_ids: Option<Vec<i64>>,
+    ) -> PyResult<()> {
+        self.inner
+            .export_textgrid(bundle_id, path, tier_ids.as_deref())
+            .map_err(engine_err_to_py)
+    }
+
     fn __repr__(&self) -> String {
         format!("Project(root={:?})", self.root())
     }

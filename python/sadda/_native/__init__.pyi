@@ -447,6 +447,24 @@ class Project:
         sidecar (as a string), or None if no sidecar has been written yet.
         Use with `polars.scan_parquet(path)` for zero-engine-API reads.
         """
+    def import_textgrid(self, path: builtins.str | os.PathLike | pathlib.Path, bundle_id: builtins.int) -> builtins.list[builtins.int]:
+        r"""
+        Imports a Praat TextGrid into `bundle_id`. Each Praat tier becomes a
+        new Tier row (interval or point); each annotation becomes an
+        `annotation_interval` / `annotation_point` row. JSON sentinels in
+        labels are decoded back into the `extra` field. Returns the list of
+        new tier IDs in import order. Records a `processing_run` row for
+        audit provenance.
+        """
+    def export_textgrid(self, bundle_id: builtins.int, path: builtins.str | os.PathLike | pathlib.Path, *, tier_ids: typing.Optional[typing.Sequence[builtins.int]] = None) -> None:
+        r"""
+        Writes a Praat TextGrid for `bundle_id`'s sparse tiers to `path`.
+        If `tier_ids` is given, only those tiers are exported. Dense tiers
+        (continuous_numeric / vector / categorical_sampled) are skipped.
+        Reference tiers are exported as IntervalTiers with a degenerate
+        `[0.0, 0.001]` time span plus a JSON sentinel carrying their
+        `(target_kind, target_id)`.
+        """
     def __repr__(self) -> builtins.str: ...
 
 @typing.final

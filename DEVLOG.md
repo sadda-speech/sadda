@@ -6,6 +6,137 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-22 — TextGrid round-trip (D1): hand-rolled parser, long+short read, long-text write, JSON-sentinel suffix
+
+Goal: settle the eighth Phase 1 slice. D1 lands Praat TextGrid import + export — the adoption hinge for users coming from Praat. Per the 2026-05-18 corpus data-model entry, TextGrid is "deliberately lossy"; what D1 commits to is which losses are explicit, which are recoverable via a JSON sentinel, and which trigger errors.
+
+### What D1 must deliver
+
+From the Phase-1 slicing entry: (1) IntervalTier + TextTier import + export; (2) JSON sentinel for attribute round-trip; (3) explicit lossiness documentation.
+
+### Format coverage: read long+short text; write long text
+
+Praat writes three TextGrid formats:
+- **long text** (default; verbose, line-by-line, human-readable)
+- **short text** (compact; same structure, fewer keywords)
+- **binary**
+
+Read covers long+short; write produces long text only. Binary is deferred (rare in research workflows; subtler parsing rules). Encoding is UTF-8 only at v1 (UTF-16 deferred).
+
+### Hand-rolled parser
+
+`engine::io::textgrid` is a new module with a tokeniser + line-based state machine — ~250 LOC, no `nom`/`pest` deps. The format is line-oriented and unambiguous; both long and short variants share enough structure that one parser handles both via a "skip optional keywords" pass.
+
+### JSON-sentinel: suffix after a space
+
+Our annotations carry more fields (`extra` JSON; `parent_annotation_id`) than Praat's TextGrid stores. To round-trip the JSON `extra` through Praat, the exporter encodes it as a suffix on the label:
+
+```
+<label> {json:<inline-json>}
+```
+
+Examples:
+- Plain: `"hello"` with no extra → `text = "hello"`
+- With extra: `"hello"` with `extra = {"foo": 1}` → `text = "hello {json:{\"foo\":1}}"`
+- Empty plain text with extra: `""` with `extra = {"k":"v"}` → `text = " {json:{\"k\":\"v\"}}"`
+
+Recovery on re-import is a non-greedy regex against the suffix:
+
+```regex
+^(.*?)(?:\s\{json:(.*)\})?$
+```
+
+This wins over prefix/replace because:
+- Plain TextGrids with no sentinel round-trip cleanly (no leading whitespace surprises)
+- Users see the sentinel and know data exists they shouldn't edit by hand in Praat
+- The opening `{json:` and trailing `}` make it grep-friendly
+
+### Mapping to our tier model
+
+| Our tier type | TextGrid mapping |
+|---|---|
+| `interval` | `IntervalTier` (direct) |
+| `point` | `TextTier` (Praat's name for point tier; `points` keyword) |
+| `reference` | `IntervalTier` with degenerate `[0.0, 0.001]` time span and the JSON sentinel carrying `(target_kind, target_id)`. Round-trips losslessly through Praat |
+| `continuous_numeric` / `continuous_vector` / `categorical_sampled` | **Skipped** on export (no TextGrid analogue). A future API may report the skipped tier count |
+
+Praat's empty-label convention (`text = ""`) imports as `label = ""` (preserves verbatim). On export, our `label = None` writes as `text = ""`.
+
+### Project API
+
+```rust
+impl Project {
+    /// Reads `path`, creates new Tier rows attached to `bundle_id`, inserts
+    /// annotation_interval / annotation_point / annotation_reference rows.
+    /// Returns the new tier IDs.
+    pub fn import_textgrid(&self, path: impl AsRef<Path>, bundle_id: i64) -> Result<Vec<i64>>;
+
+    /// Writes all sparse tiers of `bundle_id` (or the subset in `tier_ids`)
+    /// to `path` as long-text TextGrid. Dense tiers are skipped.
+    pub fn export_textgrid(
+        &self,
+        bundle_id: i64,
+        path: impl AsRef<Path>,
+        tier_ids: Option<&[i64]>,
+    ) -> Result<()>;
+}
+```
+
+Import records a `processing_run` row of kind `dsp_algorithm` with `processor_id = "sadda.io.textgrid.import"` for audit trail / provenance — re-using B1's audit infrastructure. (Export does not log a processing_run; it's a read-only snapshot of existing tier data and the corpus state is unchanged.)
+
+### Confirmed D1 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Format support | **Read long+short text; write long text** | Matches Praat's defaults; covers ~99% of real-world files; binary deferred |
+| Parser | **Hand-rolled (~250 LOC), UTF-8 only** | No `nom`/`pest` dep; format is line-oriented and unambiguous |
+| JSON-sentinel placement | **Suffix: `<label> {json:<inline-json>}`** | Plain TextGrids round-trip cleanly; visible to users; grep-friendly |
+| `text = ""` ↔ `label = ""` | **Preserve verbatim both directions** | Round-trip fidelity; no silent null↔empty conversion |
+| Reference-tier export | **IntervalTier at `[0.0, 0.001]` with JSON sentinel** | Round-trips losslessly through Praat without losing the reference target |
+| Dense tier export | **Skipped silently** | No TextGrid analogue; explicit skip-count reporting deferred |
+| API | **Methods on `Project` only** | Corpus-first; pure-file `sadda.io.textgrid.read/write` deferred unless real users need it |
+| Import provenance | **`processing_run` row of kind `dsp_algorithm`** | Re-uses B1's audit infrastructure; pins what produced these tiers in the corpus |
+
+### Layout
+
+- `crates/engine/src/io/mod.rs` — new `engine::io` module.
+- `crates/engine/src/io/textgrid.rs` — parser + writer + `TextGridFile` in-memory struct + JSON-sentinel codec.
+- `crates/engine/src/corpus.rs` — `Project::import_textgrid` / `Project::export_textgrid` methods.
+- `crates/python/src/lib.rs` — PyO3 method wrappers on `PyProject`.
+- `crates/engine/tests/textgrid_round_trip.rs` — integration tests covering fixture parsing, round-trip stability, JSON sentinel, reference-tier round-trip.
+- `python/tests/test_textgrid.py` — end-to-end Project-level tests.
+
+### Lossiness — what TextGrid drops
+
+Documented in the module + this entry so users see the warnings before they bake export → external-edit → import into their workflow:
+
+- **Tier hierarchy** (`Tier.parent_id`, `Tier.cardinality`) — Praat has no parent-tier concept; lost on export, re-import creates flat tiers.
+- **Per-annotation parent links** (`annotation.parent_annotation_id`) — lost.
+- **Tier `schema` JSON** — lost; tier-level metadata Praat doesn't model.
+- **Dense tier sidecars** — skipped entirely.
+- **Audit history of the source bundle** — TextGrid carries no provenance; the import creates a fresh `processing_run` row but does not preserve the original `audit_log` chain.
+
+What's recoverable via the JSON sentinel:
+- Annotation `extra` JSON
+- Reference-tier target (`target_kind`, `target_id`) — when re-imported, the reference is reconstructed in our model
+
+### What this entry doesn't decide
+
+- **Binary TextGrid format** — deferred. Add when a real user needs it.
+- **UTF-16 encoding** — deferred. Most modern TextGrids are UTF-8; some old ones aren't. Decode on demand later.
+- **Pure-file `sadda.io.textgrid.read/write`** — deferred until real users need a corpus-less workflow.
+- **Lossy report on export** (number of skipped dense tiers, lost hierarchy edges) — would be a return value `ExportReport { skipped_dense, lost_parents }` ; out of scope for D1.
+- **Diff-mode import** (merge with existing tiers rather than create new ones) — explicitly rejected by the corpus-model entry's "export is a snapshot, not a sync" boundary.
+
+### Sources / references
+
+- 2026-05-21 Phase 1 slicing entry (D1 row)
+- 2026-05-18 corpus data-model entry (interop section, "deliberately lossy" framing)
+- Praat TextGrid format manual: <https://www.fon.hum.uva.nl/praat/manual/TextGrid_file_formats.html>
+- praatio (Python TextGrid library, API-shape precedent): <https://github.com/timmahrt/praatIO>
+
+---
+
 ## 2026-05-21 — DSP method diversity (project design principle)
 
 Goal: codify a project-wide commitment for the DSP namespace. Raised mid-C2 as a course correction; this entry captures it as a durable design principle.
