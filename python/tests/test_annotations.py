@@ -171,13 +171,15 @@ def test_many_to_one_is_deferred() -> None:
         assert "many_to_one" in str(excinfo.value)
 
 
-def test_query_on_dense_tier_errors_with_b3_hint() -> None:
+def test_query_on_dense_tier_without_sidecar_points_at_write_method() -> None:
     with tempfile.TemporaryDirectory() as td:
         proj, bundle_id = _project_with_bundle(Path(td))
         tier = proj.add_tier(bundle_id, "f0", "continuous_numeric")
         with pytest.raises(ValueError) as excinfo:
             proj.query(tier)
-        assert "B3" in str(excinfo.value)
+        # B3 landed the dense-tier query dispatch; with no sidecar yet, the
+        # error tells the caller which write_* method to call.
+        assert "write_continuous_numeric" in str(excinfo.value)
 
 
 def test_b2_surface_is_stable() -> None:

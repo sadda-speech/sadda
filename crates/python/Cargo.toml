@@ -27,4 +27,5 @@ sadda-engine = { path = "../engine" }
 # auto-initialize embedding mode).
 pyo3 = { version = "0.28" }
 numpy = "0.28"
+ndarray = "0.16"
 pyo3-stub-gen = "0.22"

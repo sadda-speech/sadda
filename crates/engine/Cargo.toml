@@ -9,7 +9,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+arrow = { version = "58", default-features = false }
 hound = "3.5"
+ndarray = "0.16"
+parquet = { version = "58", default-features = false, features = ["arrow", "snap"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 thiserror = "2"

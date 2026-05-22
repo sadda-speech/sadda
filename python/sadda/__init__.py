@@ -25,6 +25,7 @@ from sadda._stability import (
 __all__ = [
     "Audio",
     "Bundle",
+    "DerivedSignal",
     "ExperimentalAPIWarning",
     "Interval",
     "Point",
@@ -66,6 +67,9 @@ Tier = stable(_native.Tier)
 Interval = stable(_native.Interval)
 Point = stable(_native.Point)
 Reference = stable(_native.Reference)
+
+# B3 surface — dense-tier Parquet sidecar registration.
+DerivedSignal = stable(_native.DerivedSignal)
 
 
 def _project_query(self, tier_id):
@@ -149,9 +153,15 @@ def _project_query(self, tier_id):
                 "extra": pl.Utf8,
             },
         )
-    raise ValueError(
-        f"tier {tier_id} has dense type {kind!r}; dense-tier query lands in B3"
-    )
+    if kind in ("continuous_numeric", "continuous_vector", "categorical_sampled"):
+        path = self.dense_path(tier_id)
+        if path is None:
+            raise ValueError(
+                f"tier {tier_id} has no derived_signal sidecar yet; "
+                f"call write_{kind}(...) first"
+            )
+        return pl.read_parquet(path)
+    raise ValueError(f"tier {tier_id} has unknown type {kind!r}")
 
 
 # Monkey-patch query onto the PyO3 class so callers can write

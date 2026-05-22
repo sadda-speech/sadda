@@ -18,6 +18,7 @@ const V1_SQL: &str = include_str!("../../migrations/V1__phase0_baseline.sql");
 const V2_SQL: &str = include_str!("../../migrations/V2__schema_migrations_provenance.sql");
 const V3_SQL: &str = include_str!("../../migrations/V3__entity_schema.sql");
 const V4_SQL: &str = include_str!("../../migrations/V4__sparse_annotations.sql");
+const V5_SQL: &str = include_str!("../../migrations/V5__derived_signal.sql");
 
 /// One forward-only migration step.
 struct Migration {
@@ -64,6 +65,11 @@ static MIGRATIONS: &[Migration] = &[
         version: 4,
         name: "sparse_annotations",
         kind: Kind::Sql(V4_SQL),
+    },
+    Migration {
+        version: 5,
+        name: "derived_signal",
+        kind: Kind::Sql(V5_SQL),
     },
 ];
 
@@ -178,7 +184,7 @@ mod tests {
 
     #[test]
     fn engine_max_version_matches_static_table() {
-        assert_eq!(engine_max_version(), 4);
+        assert_eq!(engine_max_version(), 5);
     }
 
     #[test]
@@ -217,6 +223,9 @@ mod tests {
         assert_eq!(rows[3].0, 4);
         assert_eq!(rows[3].1.as_deref(), Some("sparse_annotations"));
         assert_eq!(rows[3].2.as_deref(), Some(checksum_of(V4_SQL).as_str()));
+        assert_eq!(rows[4].0, 5);
+        assert_eq!(rows[4].1.as_deref(), Some("derived_signal"));
+        assert_eq!(rows[4].2.as_deref(), Some(checksum_of(V5_SQL).as_str()));
     }
 
     #[test]
