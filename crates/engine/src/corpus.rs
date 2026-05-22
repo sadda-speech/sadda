@@ -1205,12 +1205,21 @@ impl Project {
             }
             Some(p) => p,
         };
-        let parent_annotation_id = parent_annotation_id.ok_or_else(|| {
-            EngineError::Cardinality(format!(
-                "tier {} has parent tier {}; parent_annotation_id is required",
-                child_tier.id, parent_tier_id
-            ))
-        })?;
+        // `cardinality = "none"` (or `None`) means tier-level hierarchy
+        // is recorded but no annotation-level link is required. Importers
+        // that recover only tier hierarchy (e.g. EAF) rely on this.
+        let parent_annotation_id = match parent_annotation_id {
+            Some(id) => id,
+            None => {
+                return match child_tier.cardinality.as_deref() {
+                    Some("none") | None => Ok(()),
+                    _ => Err(EngineError::Cardinality(format!(
+                        "tier {} has parent tier {}; parent_annotation_id is required",
+                        child_tier.id, parent_tier_id
+                    ))),
+                };
+            }
+        };
 
         // Verify the parent annotation exists in the right table for the
         // parent tier's type.
@@ -1509,6 +1518,347 @@ impl Project {
         Ok(())
     }
 
+    /// Imports an ELAN `.eaf` into `bundle_id`. Each EAF tier becomes a
+    /// new [`Tier`] (interval / point / reference based on stereotype and
+    /// annotation shape); each annotation becomes an `annotation_*` row
+    /// with any JSON sentinel decoded back into the `extra` field.
+    ///
+    /// Tier hierarchy survives the round-trip via EAF's `PARENT_REF`
+    /// (resolved to `tier.parent_id`). Parent tiers are imported before
+    /// their children regardless of the order they appear in the file.
+    ///
+    /// Annotation-to-annotation parentage (`ANNOTATION_REF` on
+    /// `REF_ANNOTATION` / `parent_annotation_id` on alignable annotations
+    /// of a child tier) is not reconstructed in v1 — recovering it
+    /// requires a second pass that resolves EAF annotation IDs to our
+    /// freshly-minted row IDs, which the schema's `parent_annotation_id`
+    /// constraint can't enforce inline.
+    ///
+    /// Point-tier recovery heuristic: a tier whose every annotation has
+    /// `end_ms - start_ms <= 2` is recovered as a `point` tier.
+    ///
+    /// Records a `processing_run` row with
+    /// `processor_id = "sadda.io.eaf.import"` for audit provenance.
+    pub fn import_eaf(&self, path: impl AsRef<Path>, bundle_id: i64) -> Result<Vec<i64>> {
+        let path = path.as_ref();
+        let eaf = crate::io::eaf::read(path)?;
+
+        // Topo-sort tiers so parents come before children. EAF allows any
+        // order; SQLite's `tier.parent_id` FK requires the parent row to
+        // exist already.
+        let order = topo_sort_eaf_tiers(&eaf.tiers)?;
+
+        // tier_id_str → row id (for resolving PARENT_REF when inserting
+        // child tiers).
+        let mut id_map: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
+        let mut new_tier_ids: Vec<i64> = Vec::with_capacity(eaf.tiers.len());
+
+        for idx in order {
+            let tier = &eaf.tiers[idx];
+            let parent_row_id = match &tier.parent_ref {
+                Some(pref) => Some(*id_map.get(pref).ok_or_else(|| {
+                    EngineError::Corpus(format!(
+                        "EAF import: tier {:?} references unknown PARENT_REF {:?}",
+                        tier.tier_id, pref,
+                    ))
+                })?),
+                None => None,
+            };
+
+            let tier_type = classify_eaf_tier(tier);
+            let mut spec = TierSpec::new(bundle_id, &tier.tier_id, tier_type);
+            spec.parent_id = parent_row_id;
+            if parent_row_id.is_some() {
+                // Annotation-level parentage isn't reconstructed in v1 (see
+                // the doc comment on `import_eaf`), so child annotations
+                // are inserted without `parent_annotation_id`. The tier
+                // cardinality must allow that — `"none"` does.
+                spec.cardinality = Some("none".into());
+            }
+            let row_id = self.add_tier(&spec)?;
+            id_map.insert(tier.tier_id.clone(), row_id);
+            new_tier_ids.push(row_id);
+
+            match tier_type {
+                TierType::Point => {
+                    for ann in &tier.annotations {
+                        if let crate::io::eaf::EafAnnotation::Alignable {
+                            start_ms, value, ..
+                        } = ann
+                        {
+                            let (plain, extra) = crate::io::eaf::decode_label(value);
+                            self.add_point(&PointSpec {
+                                tier_id: row_id,
+                                time_seconds: *start_ms as f64 / 1000.0,
+                                label: Some(plain),
+                                extra,
+                                ..Default::default()
+                            })?;
+                        }
+                    }
+                }
+                TierType::Reference => {
+                    for ann in &tier.annotations {
+                        // REF_ANNOTATION values may carry the sentinel
+                        // payload that encodes (target_kind, target_id);
+                        // alignable values shouldn't appear under a
+                        // reference tier but we handle them gracefully.
+                        let value = ann.value();
+                        let (plain, extra) = crate::io::eaf::decode_label(value);
+                        let (target_kind, target_id, extra_rest) =
+                            parse_reference_sentinel(extra.as_deref());
+                        self.add_reference(&ReferenceSpec {
+                            tier_id: row_id,
+                            target_kind,
+                            target_id,
+                            label: Some(plain),
+                            extra: extra_rest,
+                            ..Default::default()
+                        })?;
+                    }
+                }
+                _ => {
+                    // TierType::Interval — the default for everything else
+                    // produced by `classify_eaf_tier`.
+                    for ann in &tier.annotations {
+                        if let crate::io::eaf::EafAnnotation::Alignable {
+                            start_ms,
+                            end_ms,
+                            value,
+                            ..
+                        } = ann
+                        {
+                            let (plain, extra) = crate::io::eaf::decode_label(value);
+                            self.add_interval(&IntervalSpec {
+                                tier_id: row_id,
+                                start_seconds: *start_ms as f64 / 1000.0,
+                                end_seconds: *end_ms as f64 / 1000.0,
+                                label: Some(plain),
+                                extra,
+                                ..Default::default()
+                            })?;
+                        }
+                        // REF_ANNOTATION under an interval tier: skipped
+                        // in v1 (the data model can't represent symbolic
+                        // children of an interval without a typed child
+                        // tier of its own).
+                    }
+                }
+            }
+        }
+
+        let display = path.display().to_string();
+        let params = format!(
+            "{{\"path\":{:?},\"n_tiers\":{}}}",
+            display,
+            eaf.tiers.len()
+        );
+        let output_tier_ids = format!(
+            "[{}]",
+            new_tier_ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        self.conn.execute(
+            "INSERT INTO processing_run \
+                (bundle_id, kind, processor_id, processor_version, \
+                 parameters, output_tier_ids, finished_at, status) \
+             VALUES (?1, 'dsp_algorithm', 'sadda.io.eaf.import', ?2, ?3, ?4, \
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'ok')",
+            rusqlite::params![bundle_id, crate::version(), params, output_tier_ids,],
+        )?;
+        Ok(new_tier_ids)
+    }
+
+    /// Writes an ELAN `.eaf` file for `bundle_id`'s sparse tiers to `path`
+    /// in EAF 2.8 format. If `tier_ids` is `Some`, only those tiers are
+    /// exported (filtered to the named bundle).
+    ///
+    /// - Interval tiers → `ALIGNABLE_ANNOTATION`. Top-level tiers use the
+    ///   `sadda_alignable` linguistic type (no stereotype); tiers with a
+    ///   `parent_id` use `sadda_included` with the `Included_In`
+    ///   stereotype.
+    /// - Point tiers → `ALIGNABLE_ANNOTATION` with a degenerate
+    ///   `[t, t + 1ms]` interval. Re-import recovers them as points via
+    ///   the ≤2ms heuristic.
+    /// - Reference tiers → `REF_ANNOTATION` under the `sadda_symbolic`
+    ///   linguistic type (`Symbolic_Association`). The sentinel encodes
+    ///   `(target_kind, target_id)` so re-import is lossless.
+    /// - Dense tiers are silently skipped.
+    ///
+    /// Annotation IDs and PARENT_REF resolution: each exported annotation
+    /// gets a fresh `aN` ID; reference annotations under a parent tier
+    /// link to the *parent tier's first annotation* as a placeholder
+    /// (annotation-level parentage isn't tracked in v1 — re-import
+    /// recovers tier hierarchy but not annotation-level links).
+    pub fn export_eaf(
+        &self,
+        bundle_id: i64,
+        path: impl AsRef<Path>,
+        tier_ids: Option<&[i64]>,
+    ) -> Result<()> {
+        let path = path.as_ref();
+        let bundle = self.bundle(bundle_id)?;
+        let _ = bundle; // currently used only to validate bundle_id
+
+        let all_tiers = self.tiers(Some(bundle_id))?;
+        let selected: Vec<&Tier> = match tier_ids {
+            Some(ids) => all_tiers.iter().filter(|t| ids.contains(&t.id)).collect(),
+            None => all_tiers.iter().collect(),
+        };
+
+        // tier_row_id → exported tier_id_str (for PARENT_REF resolution).
+        let mut tier_name_by_id: std::collections::HashMap<i64, String> =
+            std::collections::HashMap::new();
+        for t in &selected {
+            tier_name_by_id.insert(t.id, t.name.clone());
+        }
+
+        let mut next_ann_id: u64 = 1;
+        let mut mint_id = || {
+            let s = format!("a{next_ann_id}");
+            next_ann_id += 1;
+            s
+        };
+        // For REF_ANNOTATION export we need a "parent annotation ID" to
+        // point at. We track the first annotation ID minted per tier and
+        // reuse it as the placeholder target for all symbolic children.
+        let mut first_ann_id_by_tier: std::collections::HashMap<i64, String> =
+            std::collections::HashMap::new();
+
+        let mut eaf_tiers: Vec<crate::io::eaf::EafTier> = Vec::new();
+
+        for tier in &selected {
+            let parent_ref = tier
+                .parent_id
+                .and_then(|pid| tier_name_by_id.get(&pid).cloned());
+
+            match tier.r#type {
+                TierType::Interval => {
+                    let rows = self.intervals(tier.id)?;
+                    let mut annotations = Vec::with_capacity(rows.len());
+                    for iv in &rows {
+                        let id = mint_id();
+                        first_ann_id_by_tier
+                            .entry(tier.id)
+                            .or_insert_with(|| id.clone());
+                        annotations.push(crate::io::eaf::EafAnnotation::Alignable {
+                            id,
+                            start_ms: (iv.start_seconds * 1000.0).round() as i64,
+                            end_ms: (iv.end_seconds * 1000.0).round() as i64,
+                            value: crate::io::eaf::encode_label(
+                                iv.label.as_deref().unwrap_or(""),
+                                iv.extra.as_deref(),
+                            ),
+                        });
+                    }
+                    let (lt, stereotype) = if parent_ref.is_some() {
+                        (
+                            crate::io::eaf::LT_INCLUDED.to_string(),
+                            Some("Included_In".to_string()),
+                        )
+                    } else {
+                        (crate::io::eaf::LT_ALIGNABLE.to_string(), None)
+                    };
+                    eaf_tiers.push(crate::io::eaf::EafTier {
+                        tier_id: tier.name.clone(),
+                        linguistic_type_ref: lt,
+                        stereotype,
+                        parent_ref,
+                        annotations,
+                    });
+                }
+                TierType::Point => {
+                    let rows = self.points(tier.id)?;
+                    let mut annotations = Vec::with_capacity(rows.len());
+                    for p in &rows {
+                        let id = mint_id();
+                        first_ann_id_by_tier
+                            .entry(tier.id)
+                            .or_insert_with(|| id.clone());
+                        let t_ms = (p.time_seconds * 1000.0).round() as i64;
+                        annotations.push(crate::io::eaf::EafAnnotation::Alignable {
+                            id,
+                            start_ms: t_ms,
+                            end_ms: t_ms + 1,
+                            value: crate::io::eaf::encode_label(
+                                p.label.as_deref().unwrap_or(""),
+                                p.extra.as_deref(),
+                            ),
+                        });
+                    }
+                    let (lt, stereotype) = if parent_ref.is_some() {
+                        (
+                            crate::io::eaf::LT_INCLUDED.to_string(),
+                            Some("Included_In".to_string()),
+                        )
+                    } else {
+                        (crate::io::eaf::LT_ALIGNABLE.to_string(), None)
+                    };
+                    eaf_tiers.push(crate::io::eaf::EafTier {
+                        tier_id: tier.name.clone(),
+                        linguistic_type_ref: lt,
+                        stereotype,
+                        parent_ref,
+                        annotations,
+                    });
+                }
+                TierType::Reference => {
+                    let rows = self.references_for(tier.id)?;
+                    let placeholder_parent = tier
+                        .parent_id
+                        .and_then(|pid| first_ann_id_by_tier.get(&pid).cloned());
+                    let mut annotations = Vec::with_capacity(rows.len());
+                    for r in &rows {
+                        let id = mint_id();
+                        let payload = format!(
+                            "{{\"target_kind\":{:?},\"target_id\":{}{}}}",
+                            r.target_kind,
+                            r.target_id,
+                            r.extra
+                                .as_deref()
+                                .map(|e| format!(",\"extra\":{e}"))
+                                .unwrap_or_default(),
+                        );
+                        let value = crate::io::eaf::encode_label(
+                            r.label.as_deref().unwrap_or(""),
+                            Some(&payload),
+                        );
+                        let ann_ref = placeholder_parent.clone().unwrap_or_else(|| "".into());
+                        annotations.push(crate::io::eaf::EafAnnotation::Ref {
+                            id,
+                            annotation_ref: ann_ref,
+                            value,
+                        });
+                    }
+                    eaf_tiers.push(crate::io::eaf::EafTier {
+                        tier_id: tier.name.clone(),
+                        linguistic_type_ref: crate::io::eaf::LT_SYMBOLIC.to_string(),
+                        stereotype: Some("Symbolic_Association".into()),
+                        parent_ref,
+                        annotations,
+                    });
+                }
+                TierType::ContinuousNumeric
+                | TierType::ContinuousVector
+                | TierType::CategoricalSampled => {
+                    // Skip dense tiers silently (no EAF analogue).
+                }
+            }
+        }
+
+        let file = crate::io::eaf::EafFile {
+            format: "2.8".to_string(),
+            media_url: Some(format!("file:{}", bundle.audio_relative_path)),
+            tiers: eaf_tiers,
+        };
+        crate::io::eaf::write(&file, path)?;
+        Ok(())
+    }
+
     /// Internal: fetches a single bundle row.
     fn bundle(&self, bundle_id: i64) -> Result<Bundle> {
         let bundle = self.conn.query_row(
@@ -1581,6 +1931,161 @@ fn build_interval_entries(
     let _ = bundle_duration_seconds;
 
     Ok(entries)
+}
+
+/// EAF-import helper: classify a parsed EAF tier as one of our tier types.
+/// Default is `Interval`. Heuristics:
+///
+/// - `Symbolic_Association` stereotype → `Reference`.
+/// - Every alignable annotation has `end_ms - start_ms <= 2` (and the tier
+///   has at least one annotation) → `Point`.
+/// - Otherwise → `Interval`.
+fn classify_eaf_tier(tier: &crate::io::eaf::EafTier) -> TierType {
+    if matches!(tier.stereotype.as_deref(), Some("Symbolic_Association")) {
+        return TierType::Reference;
+    }
+    let mut saw_alignable = false;
+    let mut all_short = true;
+    for ann in &tier.annotations {
+        if let crate::io::eaf::EafAnnotation::Alignable {
+            start_ms, end_ms, ..
+        } = ann
+        {
+            saw_alignable = true;
+            if end_ms - start_ms > 2 {
+                all_short = false;
+                break;
+            }
+        }
+    }
+    if saw_alignable && all_short {
+        TierType::Point
+    } else {
+        TierType::Interval
+    }
+}
+
+/// EAF-import helper: topological sort of tier indices so that any tier
+/// with a `PARENT_REF` appears after its parent. Returns indices into
+/// `tiers`. Errors on cycles or unresolved parent references.
+fn topo_sort_eaf_tiers(tiers: &[crate::io::eaf::EafTier]) -> Result<Vec<usize>> {
+    use std::collections::HashMap;
+    let index_by_id: HashMap<&str, usize> = tiers
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.tier_id.as_str(), i))
+        .collect();
+    let mut order = Vec::with_capacity(tiers.len());
+    let mut visited = vec![false; tiers.len()];
+    let mut on_stack = vec![false; tiers.len()];
+
+    fn visit(
+        i: usize,
+        tiers: &[crate::io::eaf::EafTier],
+        index_by_id: &std::collections::HashMap<&str, usize>,
+        visited: &mut [bool],
+        on_stack: &mut [bool],
+        order: &mut Vec<usize>,
+    ) -> Result<()> {
+        if visited[i] {
+            return Ok(());
+        }
+        if on_stack[i] {
+            return Err(EngineError::Corpus(format!(
+                "EAF import: cycle in tier PARENT_REFs at tier {:?}",
+                tiers[i].tier_id,
+            )));
+        }
+        on_stack[i] = true;
+        if let Some(pref) = &tiers[i].parent_ref {
+            let parent_idx = *index_by_id.get(pref.as_str()).ok_or_else(|| {
+                EngineError::Corpus(format!(
+                    "EAF import: tier {:?} references unknown PARENT_REF {:?}",
+                    tiers[i].tier_id, pref,
+                ))
+            })?;
+            visit(parent_idx, tiers, index_by_id, visited, on_stack, order)?;
+        }
+        on_stack[i] = false;
+        visited[i] = true;
+        order.push(i);
+        Ok(())
+    }
+
+    for i in 0..tiers.len() {
+        visit(i, tiers, &index_by_id, &mut visited, &mut on_stack, &mut order)?;
+    }
+    Ok(order)
+}
+
+/// EAF-import helper: extract `(target_kind, target_id, extra_json)` from
+/// the JSON sentinel payload attached to a reference annotation. Falls
+/// back to `("annotation", 0, None)` if the sentinel is absent or
+/// malformed; the synthetic target lets the import succeed but signals
+/// to the caller that re-importing externally-authored EAFs as reference
+/// tiers is a best-effort affair.
+fn parse_reference_sentinel(json: Option<&str>) -> (String, i64, Option<String>) {
+    let Some(raw) = json else {
+        return ("annotation".to_string(), 0, None);
+    };
+    // Minimal hand-rolled extractor avoiding a serde_json dependency on
+    // this hot path. Looks for the literal substrings emitted by
+    // `export_eaf` above.
+    let target_kind = extract_json_string(raw, "\"target_kind\":")
+        .unwrap_or_else(|| "annotation".to_string());
+    let target_id = extract_json_i64(raw, "\"target_id\":").unwrap_or(0);
+    let extra_rest = extract_json_object(raw, "\"extra\":");
+    (target_kind, target_id, extra_rest)
+}
+
+/// Finds `key` (e.g. `"target_kind":`) and returns the following
+/// double-quoted string value, if present.
+fn extract_json_string(raw: &str, key: &str) -> Option<String> {
+    let i = raw.find(key)?;
+    let rest = &raw[i + key.len()..];
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// Finds `key` (e.g. `"target_id":`) and returns the following integer
+/// value, if present.
+fn extract_json_i64(raw: &str, key: &str) -> Option<i64> {
+    let i = raw.find(key)?;
+    let rest = &raw[i + key.len()..];
+    let rest = rest.trim_start();
+    let end = rest
+        .find(|c: char| c != '-' && !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// Finds `key` (e.g. `"extra":`) and returns the following raw JSON
+/// object value (`{...}`) as a string, balancing nested braces. Returns
+/// `None` if the key isn't present or the value isn't an object.
+fn extract_json_object(raw: &str, key: &str) -> Option<String> {
+    let i = raw.find(key)?;
+    let rest = &raw[i + key.len()..];
+    let rest = rest.trim_start();
+    if !rest.starts_with('{') {
+        return None;
+    }
+    let mut depth = 0i32;
+    let bytes = rest.as_bytes();
+    for (idx, &b) in bytes.iter().enumerate() {
+        match b {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(rest[..=idx].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Result of [`Project::tier_rows`]: a typed enum of the three sparse-tier

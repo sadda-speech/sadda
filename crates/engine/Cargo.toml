@@ -13,6 +13,7 @@ arrow = { version = "58", default-features = false }
 hound = "3.5"
 ndarray = "0.16"
 parquet = { version = "58", default-features = false, features = ["arrow", "snap"] }
+quick-xml = "0.40"
 realfft = "3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 rustfft = "6"
