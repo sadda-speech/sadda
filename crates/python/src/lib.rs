@@ -1086,6 +1086,7 @@ fn f0<'py>(
         hop_size_seconds,
         min_freq_hz,
         max_freq_hz,
+        ..Default::default()
     };
     let frames = sadda_engine::autocorrelation(&audio.inner, &config);
     let times: Vec<f64> = frames.iter().map(|f| f.time_seconds).collect();
@@ -1267,6 +1268,212 @@ fn intensity<'py>(
     )
 }
 
+/// One frame of formant output. Variable-length `frequencies` /
+/// `bandwidths` per frame — frames where the LPC root-finder didn't return
+/// enough valid roots in the formant range are honestly empty rather than
+/// NaN-padded.
+#[gen_stub_pyclass]
+#[pyclass(name = "FormantFrame", frozen)]
+struct PyFormantFrame {
+    inner: sadda_engine::dsp::FormantFrame,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyFormantFrame {
+    /// Time at the centre of the analysis frame, in seconds.
+    #[getter]
+    fn time_seconds(&self) -> f64 {
+        self.inner.time_seconds
+    }
+    /// Formant frequencies in Hz, ascending.
+    #[getter]
+    fn frequencies<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        self.inner.frequencies.clone().into_pyarray(py)
+    }
+    /// Bandwidths in Hz, co-indexed with `frequencies`.
+    #[getter]
+    fn bandwidths<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        self.inner.bandwidths.clone().into_pyarray(py)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "FormantFrame(t={:.3}s, n_formants={}, frequencies={:?})",
+            self.inner.time_seconds,
+            self.inner.frequencies.len(),
+            self.inner.frequencies,
+        )
+    }
+}
+
+fn parse_pitch_method(s: &str) -> PyResult<sadda_engine::pitch::PitchMethod> {
+    match s {
+        "autocorrelation" => Ok(sadda_engine::pitch::PitchMethod::Autocorrelation),
+        "windowed_autocorrelation" | "boersma" => {
+            Ok(sadda_engine::pitch::PitchMethod::WindowedAutocorrelation)
+        }
+        other => Err(PyValueError::new_err(format!(
+            "unknown pitch method {other:?}; expected 'autocorrelation' or 'windowed_autocorrelation'"
+        ))),
+    }
+}
+
+fn parse_lpc_method(s: &str) -> PyResult<sadda_engine::dsp::LpcMethod> {
+    match s {
+        "autocorrelation" => Ok(sadda_engine::dsp::LpcMethod::Autocorrelation),
+        "burg" => Ok(sadda_engine::dsp::LpcMethod::Burg),
+        other => Err(PyValueError::new_err(format!(
+            "unknown LPC method {other:?}; expected 'autocorrelation' or 'burg'"
+        ))),
+    }
+}
+
+/// Estimates f0 with a voicing decision and returns `(times, frequencies,
+/// voicing)` as three NumPy arrays. `times` is float64 seconds at frame
+/// centres; `frequencies` is float32 Hz; `voicing` is float32 in `[0, 1]`.
+///
+/// `method` selects the pitch tracker:
+/// - `"windowed_autocorrelation"` (default) — adopts Boersma 1993's
+///   window-correction idea (divides windowed-signal autocorrelation by
+///   window autocorrelation); not a full Boersma implementation. Strict
+///   improvement on `"autocorrelation"`.
+/// - `"autocorrelation"` — naive time-domain autocorrelation (Phase-0
+///   tracker; what `sadda.dsp.f0(...)` calls).
+///
+/// `voicing_threshold` is informational here: the function returns voicing
+/// values for every frame so callers can apply their own threshold.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (
+    audio, *,
+    frame_size_seconds=0.030, hop_size_seconds=0.010,
+    min_freq_hz=75.0, max_freq_hz=500.0,
+    method="windowed_autocorrelation",
+    voicing_threshold=0.45,
+))]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+fn voiced_pitch<'py>(
+    py: Python<'py>,
+    audio: &PyAudio,
+    frame_size_seconds: f32,
+    hop_size_seconds: f32,
+    min_freq_hz: f32,
+    max_freq_hz: f32,
+    method: &str,
+    voicing_threshold: f32,
+) -> PyResult<(
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f32>>,
+    Bound<'py, PyArray1<f32>>,
+)> {
+    let pitch_method = parse_pitch_method(method)?;
+    let config = sadda_engine::pitch::PitchConfig {
+        frame_size_seconds,
+        hop_size_seconds,
+        min_freq_hz,
+        max_freq_hz,
+        voicing_threshold,
+    };
+    let frames = sadda_engine::pitch::pitch(&audio.inner, &config, pitch_method);
+    let times: Vec<f64> = frames.iter().map(|f| f.time_seconds).collect();
+    let freqs: Vec<f32> = frames.iter().map(|f| f.frequency_hz).collect();
+    let voicing: Vec<f32> = frames.iter().map(|f| f.voicing).collect();
+    Ok((
+        times.into_pyarray(py),
+        freqs.into_pyarray(py),
+        voicing.into_pyarray(py),
+    ))
+}
+
+/// Computes per-frame formants over an [`Audio`] via LPC + polynomial
+/// root-finding. Returns a list of `FormantFrame`s; each frame has
+/// variable-length `frequencies` / `bandwidths` (honestly empty for frames
+/// where the root-finder didn't return enough valid roots).
+///
+/// `method` selects the LPC estimator: `"burg"` (default; Praat
+/// convention) or `"autocorrelation"`. `n_formants` is the maximum kept per
+/// frame after filtering; `lpc_order = 2 · n_formants + 2` by default.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (
+    audio, *,
+    frame_size_seconds=0.025, hop_seconds=0.010,
+    n_formants=5, pre_emphasis=0.97, lpc_order=None,
+    method="burg",
+    max_bandwidth_hz=1000.0, min_frequency_hz=50.0,
+))]
+#[allow(clippy::too_many_arguments)]
+fn formants(
+    audio: &PyAudio,
+    frame_size_seconds: f32,
+    hop_seconds: f32,
+    n_formants: usize,
+    pre_emphasis: f32,
+    lpc_order: Option<usize>,
+    method: &str,
+    max_bandwidth_hz: f32,
+    min_frequency_hz: f32,
+) -> PyResult<Vec<PyFormantFrame>> {
+    let lpc_method = parse_lpc_method(method)?;
+    let config = sadda_engine::dsp::FormantsConfig {
+        frame_size_seconds,
+        hop_seconds,
+        n_formants,
+        pre_emphasis,
+        lpc_order,
+        lpc_method,
+        max_bandwidth_hz,
+        min_frequency_hz,
+    };
+    let mono: Vec<f32> = audio.inner.mono_samples().collect();
+    let frames = sadda_engine::dsp::formants(&mono, audio.inner.sample_rate, &config);
+    Ok(frames
+        .into_iter()
+        .map(|inner| PyFormantFrame { inner })
+        .collect())
+}
+
+/// Computes Mel-Frequency Cepstral Coefficients over an [`Audio`]. Returns
+/// a 2-D float32 NumPy array of shape `(n_frames, n_mfcc)`, frames-first.
+///
+/// Defaults match `librosa.feature.mfcc`: Slaney mel scale, `n_mels=40`,
+/// `n_mfcc=13`, `f_min=0`, `f_max=sr/2`, 25 ms frame, 10 ms hop.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (
+    audio, *,
+    frame_size_seconds=0.025, hop_seconds=0.010,
+    n_mels=40, n_mfcc=13,
+    f_min=0.0, f_max=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn mfcc<'py>(
+    py: Python<'py>,
+    audio: &PyAudio,
+    frame_size_seconds: f32,
+    hop_seconds: f32,
+    n_mels: usize,
+    n_mfcc: usize,
+    f_min: f32,
+    f_max: Option<f32>,
+) -> Bound<'py, PyArray2<f32>> {
+    let mono: Vec<f32> = audio.inner.mono_samples().collect();
+    let f_max = f_max.unwrap_or(audio.inner.sample_rate as f32 / 2.0);
+    let arr = sadda_engine::dsp::mfcc(
+        &mono,
+        audio.inner.sample_rate,
+        frame_size_seconds,
+        hop_seconds,
+        n_mels,
+        n_mfcc,
+        f_min,
+        f_max,
+    );
+    arr.into_pyarray(py)
+}
+
 /// sadda._native — Rust extension submodule. End users should `import sadda`
 /// and use the decorated re-exports in `sadda.__init__` rather than reaching
 /// in here directly.
@@ -1284,6 +1491,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(stft, m)?)?;
     m.add_function(wrap_pyfunction!(spectrogram, m)?)?;
     m.add_function(wrap_pyfunction!(intensity, m)?)?;
+    m.add_function(wrap_pyfunction!(voiced_pitch, m)?)?;
+    m.add_function(wrap_pyfunction!(formants, m)?)?;
+    m.add_function(wrap_pyfunction!(mfcc, m)?)?;
     m.add_function(wrap_pyfunction!(new_project, m)?)?;
     m.add_function(wrap_pyfunction!(open_project, m)?)?;
     m.add_class::<PyAudio>()?;
@@ -1295,6 +1505,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPoint>()?;
     m.add_class::<PyReference>()?;
     m.add_class::<PyDerivedSignal>()?;
+    m.add_class::<PyFormantFrame>()?;
     m.add_class::<PyProject>()?;
     Ok(())
 }

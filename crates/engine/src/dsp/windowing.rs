@@ -3,6 +3,20 @@
 //! All five return a `Vec<f32>` of the requested length, computed against
 //! the standard `scipy.signal.windows` symmetric formulas (so values match
 //! scipy reference to within float precision).
+//!
+//! ## References
+//! - Harris, F.J. (1978), "On the use of windows for harmonic analysis with
+//!   the discrete Fourier transform." *Proc. IEEE* 66(1).
+//!   <https://doi.org/10.1109/PROC.1978.10837>
+//! - Kaiser, J.F. (1980), "Some useful properties of Teager's energy
+//!   operators." (companion treatment of Kaiser window.)
+//!   <https://doi.org/10.1109/ICASSP.1980.1170960>
+//! - `scipy.signal.windows` source:
+//!   <https://docs.scipy.org/doc/scipy/reference/signal.windows.html>
+//!
+//! Periodic-window variant (the `sym=False` librosa convention used by STFTs
+//! for perfect-reconstruction overlap-add) is a deferred alternate per the
+//! 2026-05-21 DSP method diversity entry.
 
 use std::f32::consts::PI;
 

@@ -1,6 +1,15 @@
 //! Per-frame intensity: linear RMS amplitude + dB-FS (dB relative to digital
-//! full-scale at amplitude 1.0). dB-SPL (Praat convention) is a later slice
-//! that needs microphone calibration plumbed through `Instrument`.
+//! full-scale at amplitude 1.0). dB-SPL (Praat convention) is a deferred
+//! alternate that needs microphone calibration plumbed through
+//! `Instrument`.
+//!
+//! ## References
+//! - Praat manual, "Intensity" object — dB-SPL convention with 2·10⁻⁵ Pa
+//!   reference: <https://www.fon.hum.uva.nl/praat/manual/Intensity.html>
+//! - `librosa.feature.rms` (linear RMS reference):
+//!   <https://librosa.org/doc/latest/generated/librosa.feature.rms.html>
+//! - IEC 61672-1:2013 (sound-level meter standard; dB-SPL definition).
+//!   <https://www.iec.ch/publications/iec-61672-1-2013>
 
 /// One frame of intensity output: linear RMS amplitude, its dB-FS conversion,
 /// and the time at the center of the frame.
