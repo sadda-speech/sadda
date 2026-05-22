@@ -1,6 +1,20 @@
 //! Short-time Fourier transform over real-valued audio. Real-input
 //! optimized via `realfft`; output is the unique half of the spectrum
 //! (`n_freq_bins = window.len() / 2 + 1`).
+//!
+//! ## References
+//! - Allen, J.B. (1977), "Short term spectral analysis, synthesis, and
+//!   modification by discrete Fourier transform." *IEEE TASSP* 25(3).
+//!   <https://doi.org/10.1109/TASSP.1977.1162950>
+//! - Oppenheim, A.V. & Schafer, R.W. (2010), *Discrete-Time Signal
+//!   Processing*, 3rd ed., §10.3 (Short-Time Fourier Analysis).
+//!   ISBN 978-0-13-198842-2
+//! - `scipy.signal.stft`:
+//!   <https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.stft.html>
+//!
+//! C1's STFT uses leading-edge framing (no centered zero-padding) and the
+//! symmetric window variant. Centered framing (the librosa default
+//! `center=True`) is a deferred alternate.
 
 use realfft::RealFftPlanner;
 use rustfft::num_complex::Complex;

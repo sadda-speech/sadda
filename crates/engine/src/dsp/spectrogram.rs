@@ -1,6 +1,17 @@
 //! Power spectrogram: magnitude-squared of an STFT, transposed to the
 //! canonical `(n_freq_bins, n_frames)` shape from the 2026-05-18 API
 //! surface entry.
+//!
+//! ## References
+//! - Oppenheim, A.V. & Schafer, R.W. (2010), *Discrete-Time Signal
+//!   Processing*, 3rd ed., §10.3.4 (Spectrogram).
+//!   ISBN 978-0-13-198842-2
+//! - `scipy.signal.spectrogram`:
+//!   <https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.spectrogram.html>
+//!
+//! C1 ships **power** (`|X|²`) only; magnitude (`|X|`) and log-power
+//! (`10·log10(|X|²)`) are deferred alternates per the DSP method-diversity
+//! entry.
 
 use rustfft::num_complex::Complex;
 

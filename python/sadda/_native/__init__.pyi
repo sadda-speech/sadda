@@ -11,6 +11,7 @@ __all__ = [
     "Audio",
     "Bundle",
     "DerivedSignal",
+    "FormantFrame",
     "Interval",
     "Point",
     "Project",
@@ -20,18 +21,21 @@ __all__ = [
     "Tier",
     "blackman",
     "f0",
+    "formants",
     "gaussian",
     "hamming",
     "hann",
     "intensity",
     "kaiser",
     "load_wav",
+    "mfcc",
     "new_project",
     "open_project",
     "schema_version",
     "spectrogram",
     "stft",
     "version",
+    "voiced_pitch",
 ]
 
 @typing.final
@@ -178,6 +182,31 @@ class DerivedSignal:
     def created_at(self) -> builtins.str:
         r"""
         ISO 8601 UTC creation timestamp.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class FormantFrame:
+    r"""
+    One frame of formant output. Variable-length `frequencies` /
+    `bandwidths` per frame — frames where the LPC root-finder didn't return
+    enough valid roots in the formant range are honestly empty rather than
+    NaN-padded.
+    """
+    @property
+    def time_seconds(self) -> builtins.float:
+        r"""
+        Time at the centre of the analysis frame, in seconds.
+        """
+    @property
+    def frequencies(self) -> numpy.typing.NDArray[numpy.float32]:
+        r"""
+        Formant frequencies in Hz, ascending.
+        """
+    @property
+    def bandwidths(self) -> numpy.typing.NDArray[numpy.float32]:
+        r"""
+        Bandwidths in Hz, co-indexed with `frequencies`.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -636,6 +665,18 @@ def f0(audio: Audio, *, frame_size_seconds: builtins.float = 0.02999999932944774
     `times` is float64 in seconds, `frequencies` is float32 in Hz.
     """
 
+def formants(audio: Audio, *, frame_size_seconds: builtins.float = 0.02500000037252903, hop_seconds: builtins.float = 0.009999999776482582, n_formants: builtins.int = 5, pre_emphasis: builtins.float = 0.9700000286102295, lpc_order: typing.Optional[builtins.int] = None, method: builtins.str = 'burg', max_bandwidth_hz: builtins.float = 1000.0, min_frequency_hz: builtins.float = 50.0) -> builtins.list[FormantFrame]:
+    r"""
+    Computes per-frame formants over an [`Audio`] via LPC + polynomial
+    root-finding. Returns a list of `FormantFrame`s; each frame has
+    variable-length `frequencies` / `bandwidths` (honestly empty for frames
+    where the root-finder didn't return enough valid roots).
+    
+    `method` selects the LPC estimator: `"burg"` (default; Praat
+    convention) or `"autocorrelation"`. `n_formants` is the maximum kept per
+    frame after filtering; `lpc_order = 2 · n_formants + 2` by default.
+    """
+
 def gaussian(n: builtins.int, sigma: builtins.float) -> numpy.typing.NDArray[numpy.float32]:
     r"""
     Gaussian window of length `n` with standard deviation `sigma` (in samples).
@@ -668,6 +709,15 @@ def kaiser(n: builtins.int, beta: builtins.float) -> numpy.typing.NDArray[numpy.
 def load_wav(path: builtins.str | os.PathLike | pathlib.Path) -> Audio:
     r"""
     Loads a WAV file from disk. Returns a sadda.Audio.
+    """
+
+def mfcc(audio: Audio, *, frame_size_seconds: builtins.float = 0.02500000037252903, hop_seconds: builtins.float = 0.009999999776482582, n_mels: builtins.int = 40, n_mfcc: builtins.int = 13, f_min: builtins.float = 0.0, f_max: typing.Optional[builtins.float] = None) -> numpy.typing.NDArray[numpy.float32]:
+    r"""
+    Computes Mel-Frequency Cepstral Coefficients over an [`Audio`]. Returns
+    a 2-D float32 NumPy array of shape `(n_frames, n_mfcc)`, frames-first.
+    
+    Defaults match `librosa.feature.mfcc`: Slaney mel scale, `n_mels=40`,
+    `n_mfcc=13`, `f_min=0`, `f_max=sr/2`, 25 ms frame, 10 ms hop.
     """
 
 def new_project(path: builtins.str | os.PathLike | pathlib.Path, name: builtins.str) -> Project:
@@ -708,5 +758,23 @@ def stft(samples: numpy.typing.NDArray[numpy.float32], frame_size: builtins.int,
 def version() -> builtins.str:
     r"""
     Returns the underlying engine version string.
+    """
+
+def voiced_pitch(audio: Audio, *, frame_size_seconds: builtins.float = 0.029999999329447746, hop_size_seconds: builtins.float = 0.009999999776482582, min_freq_hz: builtins.float = 75.0, max_freq_hz: builtins.float = 500.0, method: builtins.str = 'windowed_autocorrelation', voicing_threshold: builtins.float = 0.44999998807907104) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float32], numpy.typing.NDArray[numpy.float32]]:
+    r"""
+    Estimates f0 with a voicing decision and returns `(times, frequencies,
+    voicing)` as three NumPy arrays. `times` is float64 seconds at frame
+    centres; `frequencies` is float32 Hz; `voicing` is float32 in `[0, 1]`.
+    
+    `method` selects the pitch tracker:
+    - `"windowed_autocorrelation"` (default) — adopts Boersma 1993's
+      window-correction idea (divides windowed-signal autocorrelation by
+      window autocorrelation); not a full Boersma implementation. Strict
+      improvement on `"autocorrelation"`.
+    - `"autocorrelation"` — naive time-domain autocorrelation (Phase-0
+      tracker; what `sadda.dsp.f0(...)` calls).
+    
+    `voicing_threshold` is informational here: the function returns voicing
+    values for every frame so callers can apply their own threshold.
     """
 

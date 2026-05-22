@@ -6,6 +6,251 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-21 — DSP method diversity (project design principle)
+
+Goal: codify a project-wide commitment for the DSP namespace. Raised mid-C2 as a course correction; this entry captures it as a durable design principle.
+
+### The principle
+
+Two coupled commitments for every member of `sadda.dsp.*` (and the underlying `engine::dsp` / `engine::pitch` modules):
+
+1. **Cite the canonical source.** Every public DSP function carries at least one bibliographic reference in its doc comment — typically a paper, textbook section, or canonical implementation (Praat manual / `scipy.signal` / `librosa` source code all count).
+2. **Provide multiple non-equivalent methods where they exist.** Domain-norm in speech research is that "the formant tracker" or "the pitch tracker" is shorthand for one of several non-equivalent methods, each with known strengths. Providing alternates lets users compare methods on their own data; defaulting to one without naming alternatives obscures algorithmic choice.
+
+### Why this matters here
+
+- **Phoneticians know the alternates by name.** Praat's `Sound.to_formant_burg` vs `Sound.to_formant_burg_robust` vs autocorrelation-LPC formants are *different* methods producing measurably different tracks — not a numerical-precision difference. Users coming from Praat will look for both.
+- **AI/ML users expect citations to be discoverable from API docs.** `help(sadda.dsp.mfcc)` should answer "what mel scale? — Davis & Mermelstein (1980), HTK convention; Slaney (1998) deferred" without context-switching to external references.
+- **Forensic / clinical use cases need auditable algorithmic choices.** Citation + method name is the minimum to defend a measurement in court or in a clinical decision.
+- **Multiple methods make the namespace honest about what it is.** Pitch tracking is a research area, not a solved problem. Naming the method (`autocorrelation_pitch`, `yin_pitch`, …) instead of `pitch` keeps the API honest.
+
+### What "non-equivalent" means
+
+Two methods are non-equivalent if they can produce *measurably different outputs* on the same input under reasonable parameter choices. Examples:
+
+| Family | Method A | Method B | Difference |
+|---|---|---|---|
+| LPC | Autocorrelation | Burg | Stability on short frames; Burg is Praat's formant-tracking default |
+| Pitch | Autocorrelation | YIN | YIN handles octave errors better; cited in millions of papers |
+| Pitch | Heuristic (autocorrelation, YIN, RAPT, SWIPE) | Neural (CREPE) | Substantially different cost & accuracy profiles |
+| Mel scale | HTK | Slaney | Different filter-bank cutoff conventions; ~5% energy-distribution shift |
+| Window | Symmetric | Periodic | Symmetric for filter design; periodic for STFT (librosa's `sym` flag) |
+| Spectrogram | Magnitude | Power | `|X|` vs `|X|²`; users from MATLAB world expect both |
+
+If two methods only differ by floating-point precision or implementation detail, they are *not* non-equivalent and don't need separate functions.
+
+### How to apply (operational rules)
+
+- **Doc-comment citations are required** on every public DSP function. Format: short author/year + a publication link whenever one exists (DOI preferred; arXiv / JSTOR / publisher URL / archived tech-report URL otherwise). Older textbooks / book chapters without a stable URL get cited by ISBN and chapter section. The Praat manual, `scipy.signal` source, and `librosa` source code count as canonical references for well-known methods, with their stable doc URLs included.
+- **Multi-method exposure scope:**
+  - **Cheap flag (`power=True/False`, `sym=True/False`)**: ship alongside the sibling in the same slice.
+  - **Substantial implementation (YIN tracker, Slaney mel scale with full filter recomputation)**: a new function in a later slice; tracked in a `### Deferred alternates` section of the slice's DEVLOG entry.
+- **Document the chosen variant when not multi-method.** If C2's MFCC uses HTK mel + pre-emphasis + log (not dB), the doc comment says so + cites Davis & Mermelstein (1980) and notes Slaney (1998) as a known alternative.
+- **DEVLOG slice entries for DSP work include a `### Deferred alternates` section** enumerating known non-equivalent methods not shipped yet. This is the running development-target list.
+- **Function naming when multi-method**: prefer method-suffixed names (`autocorrelation_pitch`, `yin_pitch`) over polymorphic flags (`pitch(method="yin")`) when each method has substantial code behind it. Flags are fine when the method choice is a small algorithmic variant of a shared implementation.
+
+### Application to C2 and back to C1
+
+- **C2 ships both autocorrelation LPC and Burg's method** (`engine::dsp::lpc::autocorr_lpc` and `engine::dsp::lpc::burg_lpc`), selectable via an `LpcMethod` enum at the formant-tracker boundary. Burg is the default for formants (Praat convention).
+- **C2 ships citations on every new DSP function**: LPC (Markel & Gray 1976), formants (Markel 1972; McCandless 1974), MFCC (Davis & Mermelstein 1980), Aberth roots (Aberth 1973; Bini 1996), voicing (Boersma 1993 for the autocorrelation-peak ratio).
+- **C1 citations are backfilled** in the same slice: windows (Harris 1978; Kaiser 1980; scipy.signal.windows source), STFT (Oppenheim & Schafer §11), intensity (RMS basics; Boersma & Weenink Praat manual for intensity-object conventions).
+- **Deferred alternates list** (tracked across slices; not blockers for v1):
+  - YIN pitch (de Cheveigné & Kawahara 2002)
+  - RAPT pitch (Talkin 1995)
+  - SWIPE / SWIPE' pitch (Camacho & Harris 2008)
+  - CREPE pitch (Kim et al. 2018; neural)
+  - pyin pitch (Mauch & Dixon 2014)
+  - Slaney mel scale (Slaney 1998)
+  - Magnitude spectrogram (alongside the current power-only)
+  - Symmetric/periodic window toggle
+  - Burg-robust LPC (Praat's Robust variant)
+  - dB-SPL intensity (needs Instrument calibration)
+
+### Sources / references
+
+- Davis, S.B. & Mermelstein, P. (1980), "Comparison of parametric representations for monosyllabic word recognition…" *IEEE TASSP* 28(4). https://doi.org/10.1109/TASSP.1980.1163420
+- de Cheveigné, A. & Kawahara, H. (2002), "YIN, a fundamental frequency estimator for speech and music." *J. Acoust. Soc. Am.* 111(4). https://doi.org/10.1121/1.1458024
+- Talkin, D. (1995), "A robust algorithm for pitch tracking (RAPT)." Ch. 14 of *Speech Coding and Synthesis* (Kleijn & Paliwal, eds.), Elsevier. ISBN 978-0-444-82169-1
+- Camacho, A. & Harris, J.G. (2008), "A sawtooth waveform inspired pitch estimator for speech and music." *J. Acoust. Soc. Am.* 124(3). https://doi.org/10.1121/1.2951592
+- Mauch, M. & Dixon, S. (2014), "pYIN: A fundamental frequency estimator using probabilistic threshold distributions." *Proc. ICASSP*. https://doi.org/10.1109/ICASSP.2014.6853678
+- Kim, J.W., Salamon, J., Li, P., Bello, J.P. (2018), "CREPE: A convolutional representation for pitch estimation." *Proc. ICASSP*. https://arxiv.org/abs/1802.06182
+- Slaney, M. (1998), "Auditory toolbox v2." Interval Research Tech. Report 1998-010. https://engineering.purdue.edu/~malcolm/interval/1998-010/
+- librosa method-diversity precedent: https://librosa.org/doc/latest/feature.html
+- Praat formant methods: https://www.fon.hum.uva.nl/praat/manual/Sound__To_Formant__burg____.html
+
+---
+
+## 2026-05-21 — Advanced DSP (C2): LPC + hand-rolled Aberth roots → formants, mel→DCT MFCC, voicing on PitchFrame
+
+Goal: settle the seventh Phase 1 slice. C2 lands the three advanced DSP families on top of C1's foundation: **formants** via LPC + polynomial root-finding, **MFCC** via mel-filterbank + DCT-II, and a **voicing decision** added to the existing autocorrelation pitch tracker. All three live inside `engine::dsp` and surface through `sadda.dsp.*`.
+
+C2 also marks the first slice to land under the 2026-05-21 **DSP method-diversity principle** (see the entry directly above): every public DSP function carries a doc-comment citation with a publication link, and LPC ships both the autocorrelation method and Burg's method side-by-side.
+
+### What C2 must deliver
+
+From the Phase-1 slicing entry: (1) formants via LPC + root-solver; (2) MFCC (mel-filterbank → DCT); (3) refined pitch with voicing decision (extends Phase 0's autocorrelation tracker).
+
+### Polynomial root-finding: hand-rolled Aberth-Ehrlich
+
+For formants we need to find the complex roots of the LPC predictor polynomial (typically degree ~12 for 5 formants). Three options surfaced — hand-rolled Aberth-Ehrlich, `nalgebra` companion-matrix eigenvalues, a third-party root-finder crate. Hand-rolled won because:
+
+- `nalgebra` would add ~50 transitive deps for one polynomial root-find per frame.
+- Aberth-Ehrlich is well-known (parallel-Newton method with deflation correction), converges quadratically, and is ~80 LOC.
+- We control numerical tolerance and behavior on ill-conditioned polynomials.
+
+The algorithm:
+1. Initialize `degree` complex roots evenly spaced on a circle of radius `(max|coeff|)^(1/degree)`.
+2. Iteratively update each root `z_j ← z_j - p(z_j) / (p'(z_j) - p(z_j) · Σ_{k≠j} 1/(z_j - z_k))`.
+3. Stop when `max|correction| < 1e-7` or 100 iterations.
+
+LPC polynomials from speech are typically well-conditioned, and degree-12 roots converge in ~20 iterations. The module is `engine::dsp::roots`, fully unit-tested against analytical-truth polynomials.
+
+### LPC: autocorrelation method AND Burg's method
+
+Per the method-diversity principle, C2 ships both standard LPC estimators side-by-side:
+
+- `engine::dsp::lpc::autocorr_lpc` — autocorrelation + Levinson-Durbin. Always produces a stable predictor (`|k_i| < 1` for all reflection coefficients) but tapers signal energy at frame edges (effectively assumes zero-extension outside the frame), biasing formant estimates on short frames.
+- `engine::dsp::lpc::burg_lpc` — Burg's method. Estimates reflection coefficients directly from forward/backward prediction errors; avoids the autocorrelation method's implicit windowing. Praat's `Sound.to_formant_burg` default.
+
+Dispatcher `lpc(samples, order, LpcMethod)` selects between them. **The formant tracker defaults to `LpcMethod::Burg`** to match Praat's convention; callers can override.
+
+Citations: Makhoul (1975); Markel & Gray (1976); Burg (1975); Levinson (1947); Durbin (1960). Full links in the LPC module docs and in the C2 references list below.
+
+### Formants
+
+Pipeline per frame:
+1. Apply pre-emphasis filter `y[n] = x[n] - α·x[n-1]` with `α = 0.97` (standard speech-DSP convention; caller can pass `0.0` to skip).
+2. Window the frame (Hann by default).
+3. Compute LPC coefficients via the chosen method (Burg by default; autocorrelation available).
+5. Find roots of the predictor polynomial `1 + a_1·z⁻¹ + ... + a_p·z⁻ᵖ` (or equivalently `z^p + a_1·z^(p-1) + ... + a_p`).
+6. For each root `z = r·e^(jθ)` with `r < 1` (inside unit circle) and `θ > 0` (upper half — complex conjugate pairs):
+   - `frequency = θ · sample_rate / (2π)` Hz
+   - `bandwidth = -ln(r) · sample_rate / π` Hz
+7. Filter to `freq ∈ [50, sample_rate/2 - 50]` Hz and `bandwidth < 1000` Hz.
+8. Sort by frequency.
+
+**Default LPC order**: `2 · n_formants + 2`. For `n_formants = 5` (Praat default) → `p = 12`. Caller can override.
+
+**Output shape: variable-length per frame**, not fixed-N. `FormantFrame { time_seconds, frequencies: Vec<f32>, bandwidths: Vec<f32> }`. Honest about frames where the root-finder didn't return enough valid roots in the F1–F<n_formants> range (silence, noise bursts, etc.). A future helper can pad to a `(n_frames, n_formants)` NumPy array with NaN, but C2 ships the list-of-frames form only.
+
+### MFCC
+
+Pipeline:
+1. STFT magnitude → power spectrogram (reuse C1's `engine::dsp::stft` + `power_spectrogram`).
+2. Apply mel filterbank: `n_mels` triangular filters between `f_min` and `f_max`, spaced uniformly on the mel scale (`m = 2595 · log10(1 + f/700)`).
+3. Log of filterbank energies.
+4. DCT-II to decorrelate → cepstral coefficients.
+5. Keep the first `n_mfcc` coefficients.
+
+DCT-II via direct matrix multiply (precompute the `n_mels × n_mfcc` cosine matrix once per call — trivially small at v1 defaults).
+
+**Defaults** (matching librosa's defaults exactly so users porting code don't see surprises):
+
+| Param | Default | Notes |
+|---|---|---|
+| Mel scale | **Slaney** | librosa's default (piecewise linear-then-log); HTK toggle deferred to task #55 |
+| `n_mfcc` | 13 | Speech-recognition standard |
+| `n_mels` | 40 | Phoneme-level resolution |
+| `f_min` | 0.0 Hz | |
+| `f_max` | `sample_rate / 2` | Nyquist |
+| `frame_size_seconds` | 0.025 | 25 ms — standard speech analysis frame |
+| `hop_seconds` | 0.010 | 10 ms |
+
+**No** sinusoidal liftering or Δ/Δ² stacking in C2 — those are layered on top later if a real use case appears.
+
+Output shape: `Array2<f32>` in Rust, `np.ndarray[float32, ndim=2]` in Python, shape `(n_frames, n_coeffs)` (frames-first to match librosa).
+
+### Refined pitch: voicing decision on PitchFrame
+
+Phase 0's `engine::pitch::autocorrelation` already computes the autocorrelation peak when finding the lag. Voicing is essentially free:
+
+```
+voicing = peak_autocorr_at_period / R(0)
+```
+
+`voicing ∈ [0, 1]` — close to 1 for clean voiced speech, near 0 for noise/silence. Threshold at 0.45 (typical literature value) to get a binary voiced flag.
+
+`PitchFrame` grows a `voicing: f32` field. `PitchConfig` grows `voicing_threshold: f32` (default 0.45). Callers can read voicing directly or filter on the threshold.
+
+**Python API**: keep `sadda.dsp.f0(audio, ...) → (times, freqs)` exactly as in Phase 0 (STABLE contract — no breakage). Add a new `sadda.dsp.voiced_pitch(audio, ...) → (times, freqs, voicing)` that returns the same three columns the Rust `PitchFrame` now has. Both functions call the same underlying autocorrelation tracker; they just project different fields.
+
+### Confirmed C2 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| LPC methods | **Both autocorrelation (Levinson-Durbin) and Burg shipped side-by-side** | Method-diversity principle; Burg = Praat default for formants; autocorrelation = textbook default; each addresses a different stability/edge-bias trade-off |
+| Default LPC method for formants | **Burg** | Praat's `Sound.to_formant_burg` convention; better short-frame behaviour |
+| Polynomial root-solver | **Hand-rolled Aberth-Ehrlich (~80 LOC)** | Avoids ~50 `nalgebra` deps; well-known parallel-Newton method; numerical tolerance under our control |
+| Formant output shape | **Variable-length `FormantFrame { time_seconds, frequencies, bandwidths }` per frame** | Honest about frames where the root-finder didn't return enough valid roots; Python wrapper can pad to fixed-N later if needed |
+| Voicing API | **Add `sadda.dsp.voiced_pitch(...)` returning `(times, freqs, voicing)`; keep `sadda.dsp.f0(...)` returning `(times, freqs)`** | No Phase-0 surface breakage; new function for callers who want voicing; PitchFrame gains voicing field internally |
+| LPC order default | **`2 · n_formants + 2`** | Standard speech-DSP rule of thumb; matches Praat's `Sound.to_formant_burg` default |
+| Pre-emphasis | **Applied internally with `α = 0.97`** | Standard pipeline; caller can pass `0.0` to skip |
+| MFCC defaults | **`n_mfcc=13`, `n_mels=40`, `f_min=0`, `f_max=sr/2`, 25 ms frame, 10 ms hop, Slaney mel scale** | Matches librosa's defaults exactly so ported code reproduces; HTK mel-scale toggle is a deferred alternate (task #55) |
+| MFCC orientation | **`(n_frames, n_coeffs)`** | Frames-first, matching librosa; symmetric with spectrogram's `(n_freq_bins, n_frames)` only in being row-major |
+| Citations | **Doc-comment citation required on every DSP function** | Per the method-diversity principle entry |
+
+### Layout
+
+- `crates/engine/src/dsp/lpc.rs` — Levinson-Durbin recursion; returns LPC coefficients + reflection coeffs + prediction gain.
+- `crates/engine/src/dsp/roots.rs` — Aberth-Ehrlich polynomial root-solver.
+- `crates/engine/src/dsp/formants.rs` — frame loop, pre-emphasis, root→formant conversion, filtering.
+- `crates/engine/src/dsp/mfcc.rs` — mel-scale conversion, triangular filterbank, DCT-II matrix multiply.
+- `crates/engine/src/pitch.rs` — extends `PitchFrame` with `voicing`; adds `PitchConfig.voicing_threshold`.
+- `crates/python/src/lib.rs` — PyO3 wrappers (`formants`, `mfcc`, `voiced_pitch`); new `PyFormantFrame` data class.
+- `python/sadda/dsp/__init__.py` — re-exports with `@stable`.
+- `crates/engine/tests/advanced_dsp.rs` — analytical-truth tests against synthetic vowels and known polynomials.
+- `python/tests/test_advanced_dsp.py` — end-to-end Python tests.
+
+### Recommended defaults for v1
+
+Per the method-diversity principle:
+
+- **LPC** (general use): **Burg's method** — Praat's formant-tracker convention; better short-frame behaviour. Autocorrelation method available for textbook parity.
+- **Polynomial root-find**: Aberth-Ehrlich. Robust and standalone (no `nalgebra` dep); converges in fewer iterations than companion-matrix QR for the degree-12-ish polynomials LPC produces.
+- **Formant tracker**: LPC-Burg + Aberth-Ehrlich roots + freq/bw conversion. Pre-emphasis α=0.97. Praat-baseline behaviour.
+- **MFCC**: Slaney mel scale (librosa default), n_mels=40, n_mfcc=13, 25 ms frame, 10 ms hop, HTK-style log + DCT-II. (HTK mel-scale toggle is a deferred alternate.)
+- **Pitch**: `windowed_autocorrelation` — the window-corrected method described above. Strict improvement on Phase 0's naive autocorrelation. Naive `autocorrelation` retained for back-compat with `sadda.f0`.
+
+### Deferred alternates
+
+Tracked per the method-diversity principle; each has a corresponding tracking task:
+
+- **Faithful Boersma 1993 pitch** (task #51) — full Praat pipeline: anti-alias upsample + Gaussian-window option + windowed-sinc + Brent's method peak refinement + multi-candidate Viterbi path-finder + octave/voiced-unvoiced cost terms. The renamed `windowed_autocorrelation` in C2 adopts only Boersma's central window-correction insight; this task tracks the rest.
+- **YIN / pYIN / SWIPE' / CREPE pitch trackers** (task #52). pYIN is librosa's modern default; CREPE is the neural SOTA.
+- **DeepFormants + QCP-FB formant tracker** (task #53) — Alku et al. 2023, <https://doi.org/10.1016/j.csl.2023.101515>. Modern accuracy upgrade beyond LPC+roots.
+- **Noise-robust LPC** (task #54): QCP-FB (Airaksinen 2014) and Burg-robust (Praat's `Sound.to_formant_burg_robust`).
+- **PNCC + Slaney mel + HTK toggle for MFCC** (task #55). PNCC (Kim & Stern 2016) is noise-robust; Slaney/HTK toggle for MATLAB/Kaldi parity.
+- **Multitaper + reassigned STFT** (task #56) — Babadi & Brown 2014; Auger et al. 2013.
+- **Magnitude / log-power spectrogram + periodic-window flag** (task #57).
+- **LUFS loudness + calibrated dB-SPL intensity** (task #58).
+- **Formant trajectory smoothing** (Viterbi / DP continuity) — C2 ships per-frame independent root-finding.
+- **Fixed-N dense formant array helper** with NaN padding for missing formants.
+- **MFCC Δ / Δ² stacking and sinusoidal liftering**.
+- **Sub-sample lag interpolation** in the naive autocorrelation pitch tracker (the `windowed_autocorrelation` method already does parabolic interpolation; a future slice can add it to the naive tracker too).
+
+### What this entry doesn't decide
+
+- **Move `engine::pitch` under `engine::dsp::pitch`.** Still deferred (same rationale as C1: keep the slice diff additive).
+
+### Sources / references
+
+- 2026-05-21 DSP method-diversity principle entry (above this one)
+- 2026-05-21 C1 entry (foundational DSP this builds on)
+- 2026-05-21 Phase 1 slicing entry (C2 row)
+- **LPC, autocorrelation method**: Makhoul, J. (1975), "Linear prediction: A tutorial review." *Proc. IEEE* 63(4). https://doi.org/10.1109/PROC.1975.9792
+- **LPC, Burg's method**: Burg, J.P. (1975), *Maximum Entropy Spectral Analysis*. PhD thesis, Stanford. https://sepwww.stanford.edu/data/media/public/oldreports/sep06/
+- **Levinson-Durbin**: Levinson, N. (1947), https://doi.org/10.1002/sapm1946251261 ; Durbin, J. (1960), https://doi.org/10.2307/1401322
+- **Markel & Gray** (1976), *Linear Prediction of Speech*, Springer. ISBN 978-3-642-66288-1
+- **Formant tracker (Praat-like, autocorrelation + roots)**: McCandless, S.S. (1974), "An algorithm for automatic formant extraction using linear prediction spectra." *IEEE TASSP* 22(2). https://doi.org/10.1109/TASSP.1974.1162572
+- **Aberth's method**: Aberth, O. (1973), "Iteration methods for finding all zeros of a polynomial simultaneously." *Math. Comp.* 27(122). https://doi.org/10.1090/S0025-5718-1973-0329236-7
+- **Aberth/Ehrlich numerical analysis**: Bini, D.A. (1996), "Numerical computation of polynomial zeros by means of Aberth's method." *Numerical Algorithms* 13. https://doi.org/10.1007/BF02207694
+- **MFCC**: Davis, S.B. & Mermelstein, P. (1980), "Comparison of parametric representations for monosyllabic word recognition." *IEEE TASSP* 28(4). https://doi.org/10.1109/TASSP.1980.1163420
+- **Voicing via autocorrelation peak ratio**: Boersma, P. (1993), "Accurate short-term analysis of the fundamental frequency and the harmonics-to-noise ratio of a sampled sound." *Proc. Inst. Phonetic Sciences* 17. https://www.fon.hum.uva.nl/paul/papers/Proceedings_1993.pdf
+- Praat formant defaults: https://www.fon.hum.uva.nl/praat/manual/Sound__To_Formant__burg____.html
+- librosa.feature.mfcc: https://librosa.org/doc/latest/generated/librosa.feature.mfcc.html
+
+---
+
 ## 2026-05-21 — Foundational DSP (C1): sadda.dsp namespace introduced, rustfft+realfft, intensity = RMS + dB-FS
 
 Goal: settle the sixth Phase 1 slice. C1 introduces the `sadda.dsp.*` namespace and lands the foundational DSP toolkit — windowing functions, STFT, spectrogram, intensity — as pure functions over `&[f32]` with no corpus coupling. The slice's exports become the first STABLE-tier members of `sadda.dsp.*` per the 2026-05-18 Python API surface entry.
@@ -147,13 +392,27 @@ The DSP submodule is implemented in pure Python (`python/sadda/dsp/__init__.py`)
 - `crates/engine/tests/dsp.rs` — round-trips and analytical-truth tests (sine → peak in spectrogram, RMS of known signal matches).
 - `python/tests/test_dsp.py` — NumPy-side smoke tests + namespace presence + alias equality.
 
-### What this entry doesn't decide
+### Recommended defaults for v1
 
-- **Mel-filterbank / MFCC.** C2.
-- **Calibrated dB-SPL via Instrument.** Future slice once a real use case appears (clinical AVQI, voice training).
-- **Magnitude (vs power) spectrogram.** `power_spectrogram` only in C1; `magnitude_spectrogram` is trivial to add later.
-- **LazyFrame-style streaming STFT for long recordings.** Whole-buffer for now; live-recording (E1) will revisit.
-- **Move `engine::pitch` under `engine::dsp::pitch`.** Out of scope for C1; the C1 diff stays additive. A follow-up can do the Rust-side reorganization with no user-visible Python change (since `sadda.dsp.f0` already routes through PyO3 wherever the Rust function lives).
+Per the 2026-05-21 method-diversity principle entry, each module names its v1 default explicitly:
+
+- **Windowing**: Hann for general use (good main-lobe/side-lobe tradeoff, low scalloping).
+- **STFT**: standard Gabor STFT (Hann window, hop ≤ window/4).
+- **Spectrogram**: power (`|X|²`) for downstream computation; log-power for visualisation. C1 ships power only; log-power lands later (task #57).
+- **Intensity**: linear RMS + dB-FS together per frame, 30 ms Hann frame, 10 ms hop.
+
+### Deferred alternates
+
+Per the method-diversity principle, the running development-target list for C1:
+
+- **Periodic-window flag** (`sym=False`) for COLA-correct STFT overlap-add (task #57).
+- **Multitaper STFT** via DPSS/Slepian tapers — Thomson 1982; review by Babadi & Brown 2014, <https://doi.org/10.1109/TBME.2014.2311996>. Lower-variance estimates, useful for HNR. (task #56)
+- **Reassignment / synchrosqueezing STFT** — Auger et al. 2013, <https://doi.org/10.1109/MSP.2013.2265316>. Sharper time-frequency localization. (task #56)
+- **Magnitude spectrogram** (`|X|`) and **log-power spectrogram** (`10·log10(|X|²)`) variants. (task #57)
+- **LUFS / ITU-R BS.1770 K-weighted loudness** — <https://www.itu.int/rec/R-REC-BS.1770>. Broadcast-standard perceptual loudness. (task #58)
+- **Calibrated dB-SPL** intensity once `Instrument` calibration is plumbed through. (task #58)
+- **LazyFrame-style streaming STFT** for long recordings (live-recording slice E1 will revisit).
+- **Move `engine::pitch` under `engine::dsp::pitch`** (cosmetic; deferred to a future reorganization slice).
 
 ### Sources / references
 

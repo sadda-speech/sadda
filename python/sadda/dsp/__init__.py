@@ -14,15 +14,19 @@ from sadda import _native
 from sadda._stability import stable
 
 __all__ = [
+    "FormantFrame",
     "blackman",
     "f0",
+    "formants",
     "gaussian",
     "hamming",
     "hann",
     "intensity",
     "kaiser",
+    "mfcc",
     "spectrogram",
     "stft",
+    "voiced_pitch",
 ]
 
 hann = stable(_native.hann)
@@ -34,3 +38,9 @@ stft = stable(_native.stft)
 spectrogram = stable(_native.spectrogram)
 intensity = stable(_native.intensity)
 f0 = stable(_native.f0)
+
+# C2 surface.
+voiced_pitch = stable(_native.voiced_pitch)
+formants = stable(_native.formants)
+mfcc = stable(_native.mfcc)
+FormantFrame = stable(_native.FormantFrame)
