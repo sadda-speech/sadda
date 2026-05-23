@@ -492,10 +492,22 @@ impl Project {
     pub fn create(path: impl AsRef<Path>, name: &str) -> Result<Self> {
         let root = path.as_ref().to_path_buf();
         if root.exists() {
-            return Err(EngineError::Corpus(format!(
-                "project path already exists: {}",
-                root.display()
-            )));
+            // Accept an existing *empty* directory — typical for the
+            // GUI workflow where the user picks an already-created
+            // folder via a file dialog. Reject anything with content,
+            // both to avoid scattering project files into an arbitrary
+            // tree and to surface an error if a user tries to "create"
+            // on top of an existing sadda project.
+            let is_empty = match std::fs::read_dir(&root) {
+                Ok(mut entries) => entries.next().is_none(),
+                Err(_) => false,
+            };
+            if !is_empty {
+                return Err(EngineError::Corpus(format!(
+                    "project path already exists and is not empty: {}",
+                    root.display()
+                )));
+            }
         }
 
         std::fs::create_dir_all(root.join("signals").join("original"))?;
@@ -2568,13 +2580,37 @@ mod tests {
     }
 
     #[test]
-    fn create_on_existing_path_errors() {
-        let root = unique_dir("already_exists");
+    fn create_on_existing_empty_path_succeeds() {
+        // Most common GUI workflow: the user picks an already-
+        // existing empty folder via a file dialog. Project::create
+        // should treat that as "use this folder."
+        let root = unique_dir("empty_existing");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 
+        let project = Project::create(&root, "p").unwrap();
+        assert_eq!(project.name().unwrap(), "p");
+        assert!(root.join("project.toml").is_file());
+        assert!(root.join("corpus.db").is_file());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn create_on_existing_non_empty_path_errors() {
+        // The directory exists AND has content (could be a previous
+        // project, could be arbitrary user files). Don't clobber it.
+        let root = unique_dir("non_empty_existing");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("some_file.txt"), b"hi").unwrap();
+
         let err = Project::create(&root, "p").unwrap_err();
-        assert!(matches!(err, EngineError::Corpus(_)));
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("not empty"),
+            "expected 'not empty' in error, got: {msg}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
