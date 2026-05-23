@@ -947,6 +947,65 @@ impl Project {
         Ok(id)
     }
 
+    /// Replace-all update of an interval annotation.
+    ///
+    /// Updates `start_seconds`, `end_seconds`, `label`, `extra`, and
+    /// `parent_annotation_id` to the values in `spec`. The `tier_id`
+    /// field of `spec` must match the existing row's `tier_id`;
+    /// moving an annotation between tiers is a different operation
+    /// and isn't supported here.
+    ///
+    /// Cardinality is re-validated against the (possibly changed)
+    /// `parent_annotation_id`. The V3 audit trigger captures the
+    /// before/after JSON automatically.
+    pub fn update_interval(&self, id: i64, spec: &IntervalSpec) -> Result<()> {
+        let existing_tier_id: i64 = self.conn.query_row(
+            "SELECT tier_id FROM annotation_interval WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        if existing_tier_id != spec.tier_id {
+            return Err(EngineError::Corpus(format!(
+                "update_interval: cannot move annotation {id} between tiers \
+                 (was on tier {existing_tier_id}, asked for {})",
+                spec.tier_id
+            )));
+        }
+        let tier = self.get_tier(spec.tier_id)?;
+        if tier.r#type != TierType::Interval {
+            return Err(EngineError::Corpus(format!(
+                "tier {} is type {:?}; expected Interval",
+                tier.id, tier.r#type
+            )));
+        }
+        self.enforce_cardinality(&tier, "annotation_interval", spec.parent_annotation_id)?;
+        self.conn.execute(
+            "UPDATE annotation_interval \
+                SET start_seconds = ?2, end_seconds = ?3, label = ?4, \
+                    parent_annotation_id = ?5, extra = ?6 \
+              WHERE id = ?1",
+            rusqlite::params![
+                id,
+                spec.start_seconds,
+                spec.end_seconds,
+                spec.label,
+                spec.parent_annotation_id,
+                spec.extra,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Removes an interval annotation by id. Idempotent — returns
+    /// `Ok(())` even when no row matched, matching what users expect
+    /// from a "remove" action. The V3 audit trigger captures the
+    /// before row automatically.
+    pub fn delete_interval(&self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM annotation_interval WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
     /// Lists intervals for a tier in (start_seconds, id) order.
     pub fn intervals(&self, tier_id: i64) -> Result<Vec<Interval>> {
         let mut stmt = self.conn.prepare(

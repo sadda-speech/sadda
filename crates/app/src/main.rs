@@ -90,6 +90,56 @@ struct SaddaApp {
     /// app polls `is_finished()` each frame and drops it on
     /// completion (or on a second spacebar press).
     playback: Option<Playback>,
+    /// In-progress mouse-driven edit on an interval lane. Drag-create
+    /// or drag-resize lives here between mouse-down and mouse-up.
+    draft_edit: DraftEdit,
+    /// In-progress inline label edit triggered by double-clicking an
+    /// interval. Commits on Enter / focus-loss; cancels on Escape.
+    label_edit: Option<LabelEdit>,
+}
+
+/// Mouse-driven edit-in-progress for interval lanes. Idle between
+/// drags; transitions live in `render_interval_lane`.
+#[derive(Debug, Clone)]
+enum DraftEdit {
+    /// No drag in progress.
+    None,
+    /// User is dragging in empty lane space to create a new interval.
+    Creating {
+        tier_id: i64,
+        start_time: f64,
+        current_time: f64,
+    },
+    /// User is dragging an interval's start or end edge to resize it.
+    Resizing {
+        tier_id: i64,
+        annotation_id: i64,
+        edge: BoundaryEdge,
+        /// The *other* edge, held fixed during the resize.
+        fixed_time: f64,
+        current_time: f64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoundaryEdge {
+    Start,
+    End,
+}
+
+/// Inline label-edit state. Created on double-click; drained on
+/// commit / cancel.
+struct LabelEdit {
+    tier_id: i64,
+    annotation_id: i64,
+    text: String,
+    /// Set to `true` for the first frame so the TextEdit grabs
+    /// focus; cleared after.
+    just_started: bool,
+    /// Snapshot of the existing interval used to commit the
+    /// label change via `update_interval` (replace-all
+    /// semantics).
+    base: sadda_engine::Interval,
 }
 
 /// Identifies the currently-selected annotation in the tier strip.
@@ -131,6 +181,8 @@ impl SaddaApp {
             selected_annotation: None,
             timeline: TimelineState::default(),
             playback: None,
+            draft_edit: DraftEdit::None,
+            label_edit: None,
         }
     }
 
@@ -213,6 +265,8 @@ impl SaddaApp {
         self.active_spectrogram = None;
         self.selected_annotation = None;
         self.playback = None;
+        self.draft_edit = DraftEdit::None;
+        self.label_edit = None;
         self.timeline
             .reset_for_bundle(self.active_envelope.as_ref().unwrap().duration_seconds);
     }
@@ -223,7 +277,96 @@ impl SaddaApp {
         self.active_spectrogram = None;
         self.selected_annotation = None;
         self.playback = None;
+        self.draft_edit = DraftEdit::None;
+        self.label_edit = None;
         self.timeline = TimelineState::default();
+    }
+
+    /// Deletes the currently-selected interval annotation. No-op if
+    /// nothing is selected, or if the selection is a point (handled
+    /// in D7).
+    fn delete_selected_annotation(&mut self) {
+        let Some(AnnotationSelection::Interval { annotation_id, .. }) = self.selected_annotation
+        else {
+            return;
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        if let Err(e) = project.delete_interval(annotation_id) {
+            self.set_error(format!("Failed to delete interval: {e}"));
+            return;
+        }
+        self.selected_annotation = None;
+    }
+
+    /// Renders the modal label-edit window when one is active.
+    /// Commits on Enter / Save button; cancels on Escape / Cancel /
+    /// window close. Inline overlay over the interval rect is a
+    /// polish item (see the 2026-05-23 D6 DEVLOG entry).
+    fn label_edit_window(&mut self, ctx: &egui::Context) {
+        let Some(le) = self.label_edit.as_mut() else {
+            return;
+        };
+        let mut commit = false;
+        let mut cancel = false;
+        let mut keep_open = true;
+        egui::Window::new("Edit label")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut keep_open)
+            .show(ctx, |ui| {
+                let resp = ui.text_edit_singleline(&mut le.text);
+                if le.just_started {
+                    resp.request_focus();
+                    le.just_started = false;
+                }
+                if resp.lost_focus() {
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        commit = true;
+                    } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        cancel = true;
+                    }
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        commit = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if !keep_open {
+            cancel = true;
+        }
+        if commit {
+            let le = self.label_edit.take().expect("checked above");
+            let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+                return;
+            };
+            let new_label = if le.text.is_empty() {
+                None
+            } else {
+                Some(le.text)
+            };
+            let result = project.update_interval(
+                le.annotation_id,
+                &sadda_engine::IntervalSpec {
+                    tier_id: le.tier_id,
+                    start_seconds: le.base.start_seconds,
+                    end_seconds: le.base.end_seconds,
+                    label: new_label,
+                    parent_annotation_id: le.base.parent_annotation_id,
+                    extra: le.base.extra,
+                },
+            );
+            if let Err(e) = result {
+                self.set_error(format!("Failed to save label: {e}"));
+            }
+        } else if cancel {
+            self.label_edit = None;
+        }
     }
 
     /// Spacebar toggle: start playback from the current cursor, or
@@ -417,6 +560,12 @@ fn handle_zoom_and_scroll(response: &egui::Response, timeline: &mut TimelineStat
 // Tier-strip lane renderers
 // ---------------------------------------------------------------------------
 
+/// Pixel hit-zone width for grabbing an interval boundary.
+const BOUNDARY_HIT_ZONE_PX: f32 = 6.0;
+/// Minimum drag length (in seconds) before a drag-to-create commits.
+/// Smaller drags are treated as plain clicks (no new interval).
+const MIN_DRAFT_CREATE_SECONDS: f64 = 0.005;
+
 #[allow(clippy::too_many_arguments)]
 fn render_interval_lane(
     painter: &egui::Painter,
@@ -427,17 +576,21 @@ fn render_interval_lane(
     rows: &[sadda_engine::Interval],
     selection: Option<AnnotationSelection>,
     response: &egui::Response,
+    draft: &DraftEdit,
     new_selection: &mut Option<AnnotationSelection>,
     new_cursor: &mut Option<f64>,
+    new_draft_action: &mut Option<DraftAction>,
+    label_edit_request: &mut Option<(i64, sadda_engine::Interval)>,
 ) {
     let view_range = (view_end - view_start).max(1e-6);
     let lane_width = rect.width() as f64;
     let x_per_second = lane_width / view_range;
     let base_fill = egui::Color32::from_rgb(82, 138, 198);
     let selected_fill = egui::Color32::from_rgb(160, 200, 250);
+    let draft_fill = egui::Color32::from_rgba_premultiplied(60, 180, 120, 160);
     let text_color = egui::Color32::WHITE;
-    let click_pos = response.interact_pointer_pos();
 
+    // Draw existing intervals first.
     for r in rows {
         // Cull intervals entirely outside the view.
         if r.end_seconds < view_start || r.start_seconds > view_end {
@@ -482,18 +635,197 @@ fn render_interval_lane(
                 );
             }
         }
-        if let Some(p) = click_pos
-            && item_rect.contains(p)
-            && response.clicked()
-        {
-            *new_selection = Some(AnnotationSelection::Interval {
-                tier_id,
-                annotation_id: r.id,
+    }
+
+    // Draw the live draft preview on top of existing intervals.
+    if let DraftEdit::Creating {
+        tier_id: t,
+        start_time,
+        current_time,
+    } = draft
+        && *t == tier_id
+    {
+        let (lo, hi) = if start_time <= current_time {
+            (*start_time, *current_time)
+        } else {
+            (*current_time, *start_time)
+        };
+        if hi > view_start && lo < view_end {
+            let x0 = rect.left() + ((lo - view_start) * x_per_second) as f32;
+            let x1 = rect.left() + ((hi - view_start) * x_per_second) as f32;
+            let preview = egui::Rect::from_min_max(
+                egui::Pos2::new(x0.max(rect.left()), rect.top() + 2.0),
+                egui::Pos2::new(x1.min(rect.right()), rect.bottom() - 2.0),
+            );
+            painter.rect_filled(preview, 2.0, draft_fill);
+            painter.rect_stroke(
+                preview,
+                2.0,
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 140, 90)),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+    if let DraftEdit::Resizing {
+        tier_id: t,
+        annotation_id,
+        edge,
+        fixed_time,
+        current_time,
+    } = draft
+        && *t == tier_id
+        && let Some(r) = rows.iter().find(|r| r.id == *annotation_id)
+    {
+        let _ = r;
+        let (lo, hi) = match edge {
+            BoundaryEdge::Start => {
+                if current_time <= fixed_time {
+                    (*current_time, *fixed_time)
+                } else {
+                    (*fixed_time, *current_time)
+                }
+            }
+            BoundaryEdge::End => {
+                if fixed_time <= current_time {
+                    (*fixed_time, *current_time)
+                } else {
+                    (*current_time, *fixed_time)
+                }
+            }
+        };
+        if hi > view_start && lo < view_end {
+            let x0 = rect.left() + ((lo - view_start) * x_per_second) as f32;
+            let x1 = rect.left() + ((hi - view_start) * x_per_second) as f32;
+            let preview = egui::Rect::from_min_max(
+                egui::Pos2::new(x0.max(rect.left()), rect.top() + 2.0),
+                egui::Pos2::new(x1.min(rect.right()), rect.bottom() - 2.0),
+            );
+            painter.rect_stroke(
+                preview,
+                2.0,
+                egui::Stroke::new(2.0, egui::Color32::from_rgb(40, 140, 90)),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+
+    // ----- Mouse interaction dispatch ---------------------------------
+
+    // Double-click on an interval body → start label edit.
+    if response.double_clicked() {
+        if let Some(p) = response.interact_pointer_pos() {
+            for r in rows {
+                let x0 = rect.left() + ((r.start_seconds - view_start) * x_per_second) as f32;
+                let x1 = rect.left() + ((r.end_seconds - view_start) * x_per_second) as f32;
+                if p.x >= x0 && p.x <= x1 && rect.y_range().contains(p.y) {
+                    *label_edit_request = Some((tier_id, r.clone()));
+                    return;
+                }
+            }
+        }
+    }
+
+    // Mouse-down begins a drag. Disambiguate via the down position:
+    // near a boundary → resize; in a body → no draft (selection
+    // handled by plain click later); empty → create.
+    if response.drag_started_by(egui::PointerButton::Primary) {
+        if let Some(p) = response.interact_pointer_pos() {
+            let t_at = view_start + ((p.x - rect.left()) as f64) / x_per_second;
+            // Boundary check first — wins over body if both apply.
+            for r in rows {
+                let x0 = rect.left() + ((r.start_seconds - view_start) * x_per_second) as f32;
+                let x1 = rect.left() + ((r.end_seconds - view_start) * x_per_second) as f32;
+                if (p.x - x0).abs() <= BOUNDARY_HIT_ZONE_PX {
+                    *new_draft_action = Some(DraftAction::Start(DraftEdit::Resizing {
+                        tier_id,
+                        annotation_id: r.id,
+                        edge: BoundaryEdge::Start,
+                        fixed_time: r.end_seconds,
+                        current_time: r.start_seconds,
+                    }));
+                    return;
+                }
+                if (p.x - x1).abs() <= BOUNDARY_HIT_ZONE_PX {
+                    *new_draft_action = Some(DraftAction::Start(DraftEdit::Resizing {
+                        tier_id,
+                        annotation_id: r.id,
+                        edge: BoundaryEdge::End,
+                        fixed_time: r.start_seconds,
+                        current_time: r.end_seconds,
+                    }));
+                    return;
+                }
+            }
+            // Not on a boundary — was it on an existing body? If so,
+            // don't start a draft (lets the click semantics win).
+            let on_body = rows.iter().any(|r| {
+                let x0 = rect.left() + ((r.start_seconds - view_start) * x_per_second) as f32;
+                let x1 = rect.left() + ((r.end_seconds - view_start) * x_per_second) as f32;
+                p.x >= x0 && p.x <= x1
             });
-            // Per the C5 design: clicking an annotation also moves
-            // the cursor to its start, so the cluster of panes all
-            // re-centre on the selection.
-            *new_cursor = Some(r.start_seconds);
+            if !on_body {
+                *new_draft_action = Some(DraftAction::Start(DraftEdit::Creating {
+                    tier_id,
+                    start_time: t_at,
+                    current_time: t_at,
+                }));
+                return;
+            }
+        }
+    }
+
+    // Drag-in-progress: update the active draft if it belongs to
+    // this tier. Setting Update overwrites the matching draft only.
+    if response.dragged() && matches_this_tier(draft, tier_id) {
+        if let Some(p) = response.interact_pointer_pos() {
+            let t = view_start + ((p.x - rect.left()) as f64) / x_per_second;
+            *new_draft_action = Some(DraftAction::Update(t));
+        }
+    }
+
+    if response.drag_stopped() && matches_this_tier(draft, tier_id) {
+        *new_draft_action = Some(DraftAction::Commit);
+        return;
+    }
+
+    // Plain click without drag → B4 selection + C5 cursor positioning.
+    // Skip if a drag is in progress (mouse-down → drag → mouse-up).
+    if response.clicked() && !matches!(draft, DraftEdit::None) {
+        return;
+    }
+    if response.clicked() {
+        if let Some(p) = response.interact_pointer_pos() {
+            for r in rows {
+                let x0 = rect.left() + ((r.start_seconds - view_start) * x_per_second) as f32;
+                let x1 = rect.left() + ((r.end_seconds - view_start) * x_per_second) as f32;
+                if p.x >= x0 && p.x <= x1 && rect.y_range().contains(p.y) {
+                    *new_selection = Some(AnnotationSelection::Interval {
+                        tier_id,
+                        annotation_id: r.id,
+                    });
+                    *new_cursor = Some(r.start_seconds);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Cross-frame draft mutation requested by a lane. Translated to
+/// `SaddaApp.draft_edit` mutations by `tier_strip_pane` after the
+/// per-lane render loop.
+#[derive(Debug, Clone)]
+enum DraftAction {
+    Start(DraftEdit),
+    Update(f64),
+    Commit,
+}
+
+fn matches_this_tier(draft: &DraftEdit, tier_id: i64) -> bool {
+    match draft {
+        DraftEdit::None => false,
+        DraftEdit::Creating { tier_id: t, .. } | DraftEdit::Resizing { tier_id: t, .. } => {
+            *t == tier_id
         }
     }
 }
@@ -593,6 +925,23 @@ impl eframe::App for SaddaApp {
         {
             self.toggle_playback();
         }
+
+        // Delete / Backspace removes the selected interval. Skip
+        // when label editing is active — those keys need to reach
+        // the TextEdit instead.
+        if self.label_edit.is_none() {
+            let delete_pressed = ui.ctx().input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+                    || i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
+            });
+            if delete_pressed {
+                self.delete_selected_annotation();
+            }
+        }
+
+        // Inline label-edit modal. Rendered before the menu so it
+        // overlays everything; commit / cancel logic lives inside.
+        self.label_edit_window(ui.ctx());
 
         egui::Panel::top("menu").show_inside(ui, |ui| self.menu_bar(ui));
 
@@ -1087,6 +1436,11 @@ impl SaddaApp {
         // Click on a lane (background or annotation) can also move
         // the playback cursor, kept here so we apply at the end.
         let mut new_cursor: Option<f64> = None;
+        // Draft-mutation requests from interval lanes (one per frame
+        // at most — only the tier the cursor is over fires).
+        let mut new_draft_action: Option<DraftAction> = None;
+        // Label-edit request: double-clicking an interval body.
+        let mut label_edit_request: Option<(i64, sadda_engine::Interval)> = None;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             for tier in &tiers {
@@ -1102,7 +1456,8 @@ impl SaddaApp {
                     // Right: time-positioned lane.
                     let avail = ui.available_size_before_wrap();
                     let lane_size = egui::Vec2::new(avail.x, TIER_LANE_HEIGHT);
-                    let (rect, response) = ui.allocate_exact_size(lane_size, egui::Sense::click());
+                    let (rect, response) =
+                        ui.allocate_exact_size(lane_size, egui::Sense::click_and_drag());
                     let painter = ui.painter_at(rect);
                     let visuals = ui.visuals();
 
@@ -1126,8 +1481,11 @@ impl SaddaApp {
                                 &rows,
                                 self.selected_annotation,
                                 &response,
+                                &self.draft_edit,
                                 &mut new_selection,
                                 &mut new_cursor,
+                                &mut new_draft_action,
+                                &mut label_edit_request,
                             ),
                             Err(e) => {
                                 new_error = Some(format!(
@@ -1232,6 +1590,123 @@ impl SaddaApp {
             self.timeline.set_cursor(t);
         }
         if let Some(msg) = new_error {
+            self.set_error(msg);
+        }
+
+        // ---- Apply draft mutations from the lanes ------------------
+        if let Some(action) = new_draft_action {
+            match action {
+                DraftAction::Start(draft) => {
+                    self.draft_edit = draft;
+                }
+                DraftAction::Update(t) => match &mut self.draft_edit {
+                    DraftEdit::Creating { current_time, .. }
+                    | DraftEdit::Resizing { current_time, .. } => {
+                        *current_time = t;
+                    }
+                    DraftEdit::None => {}
+                },
+                DraftAction::Commit => self.commit_draft_edit(),
+            }
+        }
+
+        // ---- Inline label edit request -----------------------------
+        if let Some((tier_id, base)) = label_edit_request {
+            self.label_edit = Some(LabelEdit {
+                tier_id,
+                annotation_id: base.id,
+                text: base.label.clone().unwrap_or_default(),
+                just_started: true,
+                base,
+            });
+        }
+    }
+
+    /// Resolves the active draft (create or resize) by writing to the
+    /// engine. Clears the draft on success; on error, surfaces in the
+    /// banner and still clears the draft (the user can retry).
+    fn commit_draft_edit(&mut self) {
+        let draft = std::mem::replace(&mut self.draft_edit, DraftEdit::None);
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        let result: Result<(), String> = match draft {
+            DraftEdit::None => Ok(()),
+            DraftEdit::Creating {
+                tier_id,
+                start_time,
+                current_time,
+            } => {
+                let (lo, hi) = if start_time <= current_time {
+                    (start_time, current_time)
+                } else {
+                    (current_time, start_time)
+                };
+                if (hi - lo) < MIN_DRAFT_CREATE_SECONDS {
+                    // Too small a drag: treat as accidental click;
+                    // don't create.
+                    return;
+                }
+                project
+                    .add_interval(&sadda_engine::IntervalSpec {
+                        tier_id,
+                        start_seconds: lo,
+                        end_seconds: hi,
+                        label: None,
+                        extra: None,
+                        ..Default::default()
+                    })
+                    .map(|id| {
+                        self.selected_annotation = Some(AnnotationSelection::Interval {
+                            tier_id,
+                            annotation_id: id,
+                        });
+                        self.timeline.set_cursor(lo);
+                    })
+                    .map_err(|e| format!("Failed to create interval: {e}"))
+            }
+            DraftEdit::Resizing {
+                tier_id,
+                annotation_id,
+                edge: _,
+                fixed_time,
+                current_time,
+            } => {
+                let (lo, hi) = if fixed_time <= current_time {
+                    (fixed_time, current_time)
+                } else {
+                    (current_time, fixed_time)
+                };
+                // Don't write an invalid (zero or reversed) span;
+                // engine CHECK would reject it anyway.
+                if (hi - lo) < MIN_DRAFT_CREATE_SECONDS {
+                    return;
+                }
+                let existing = match project.intervals(tier_id) {
+                    Ok(rows) => rows.into_iter().find(|r| r.id == annotation_id),
+                    Err(e) => {
+                        return self.set_error(format!("Failed to reload interval: {e}"));
+                    }
+                };
+                let Some(existing) = existing else {
+                    return; // Annotation was deleted concurrently
+                };
+                project
+                    .update_interval(
+                        annotation_id,
+                        &sadda_engine::IntervalSpec {
+                            tier_id,
+                            start_seconds: lo,
+                            end_seconds: hi,
+                            label: existing.label,
+                            parent_annotation_id: existing.parent_annotation_id,
+                            extra: existing.extra,
+                        },
+                    )
+                    .map_err(|e| format!("Failed to resize interval: {e}"))
+            }
+        };
+        if let Err(msg) = result {
             self.set_error(msg);
         }
     }
