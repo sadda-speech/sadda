@@ -17,6 +17,7 @@ use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
 mod live;
+mod recipe;
 
 pub(crate) fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
     match e {
@@ -1582,6 +1583,21 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     live_mod.add_function(wrap_pyfunction!(live::default_input_device, &live_mod)?)?;
     live_mod.add_class::<live::PyLiveSession>()?;
     m.add_submodule(&live_mod)?;
+
+    // Recipes: sadda.recipe.* surface (F1). Mirrors the live module
+    // pattern — registered as `sadda._native.recipe`; the Python
+    // `sadda/recipe/__init__.py` wraps `start` / `end` /
+    // `generate_script` inside a context-manager class and decorates
+    // the public surface as `@provisional`.
+    let recipe_mod = PyModule::new(m.py(), "recipe")?;
+    recipe_mod.add_function(wrap_pyfunction!(recipe::start, &recipe_mod)?)?;
+    recipe_mod.add_function(wrap_pyfunction!(recipe::end, &recipe_mod)?)?;
+    recipe_mod.add_function(wrap_pyfunction!(recipe::list_recipes, &recipe_mod)?)?;
+    recipe_mod.add_function(wrap_pyfunction!(recipe::get, &recipe_mod)?)?;
+    recipe_mod.add_function(wrap_pyfunction!(recipe::generate_script, &recipe_mod)?)?;
+    recipe_mod.add_function(wrap_pyfunction!(recipe::script_path, &recipe_mod)?)?;
+    recipe_mod.add_class::<recipe::PyRecipe>()?;
+    m.add_submodule(&recipe_mod)?;
     Ok(())
 }
 
