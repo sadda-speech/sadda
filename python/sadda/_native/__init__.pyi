@@ -465,6 +465,26 @@ class Project:
         `[0.0, 0.001]` time span plus a JSON sentinel carrying their
         `(target_kind, target_id)`.
         """
+    def import_eaf(self, path: builtins.str | os.PathLike | pathlib.Path, bundle_id: builtins.int) -> builtins.list[builtins.int]:
+        r"""
+        Imports an ELAN .eaf into `bundle_id`. Tier hierarchy is preserved
+        via EAF's `PARENT_REF` ↔ `tier.parent_id`. Point tiers are
+        recovered from degenerate `[t, t+1ms]` alignable annotations via
+        a ≤2ms heuristic. Reference tiers (`Symbolic_Association`
+        linguistic type) come back as `reference` tiers. Returns the new
+        tier IDs in import order (parents first per topological sort).
+        Records a `processing_run` row for audit provenance.
+        """
+    def export_eaf(self, bundle_id: builtins.int, path: builtins.str | os.PathLike | pathlib.Path, *, tier_ids: typing.Optional[typing.Sequence[builtins.int]] = None) -> None:
+        r"""
+        Writes an ELAN .eaf (EAF 2.8) for `bundle_id`'s sparse tiers to
+        `path`. If `tier_ids` is given, only those tiers are exported.
+        Dense tiers (continuous_numeric / vector / categorical_sampled)
+        are skipped. Interval tiers with parents use the `Included_In`
+        stereotype; reference tiers become `REF_ANNOTATION` tiers with
+        the `Symbolic_Association` stereotype + a JSON sentinel encoding
+        `(target_kind, target_id)`.
+        """
     def __repr__(self) -> builtins.str: ...
 
 @typing.final

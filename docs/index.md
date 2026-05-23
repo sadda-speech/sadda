@@ -5,7 +5,10 @@ phonetics and speech-science research. It targets the same audience as
 [Praat](https://www.fon.hum.uva.nl/praat/) but with a modern Python API,
 NumPy- and Polars-native data types, and a corpus-first project model.
 
-This is the documentation for **sadda 0.1.0**, the first PyPI release.
+These docs always reflect the latest commit on `main`. For per-release
+notes, see the
+[CHANGELOG](https://github.com/sadda-speech/sadda/blob/main/CHANGELOG.md)
+and [GitHub releases](https://github.com/sadda-speech/sadda/releases).
 
 ## Install
 
