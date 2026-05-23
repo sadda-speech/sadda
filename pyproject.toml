@@ -1,9 +1,14 @@
 [project]
 name = "sadda"
-version = "0.1.0"
+version = "0.1.1"
 description = "Open-source toolkit for phonetics and speech-science research."
 readme = "README.md"
-license = { text = "Apache-2.0 OR MIT" }
+# PEP 639 license expression (SPDX) + explicit license-files list.
+# Both files are listed so maturin's sdist generator includes them in
+# the tarball; previously (0.1.0) it only embedded LICENSE-MIT, which
+# made PyPI reject the sdist on the License-File metadata check.
+license = "Apache-2.0 OR MIT"
+license-files = ["LICENSE-APACHE", "LICENSE-MIT"]
 authors = [{ name = "Daniel Brenner", email = "wobaidan@gmail.com" }]
 keywords = [
     "phonetics",
@@ -22,10 +27,11 @@ dependencies = [
     "polars>=1.0",
 ]
 classifiers = [
+    # PEP 639: the SPDX `license = "..."` field replaces the
+    # "License :: OSI Approved :: ..." classifiers; keeping both
+    # makes PyPI reject the upload.
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
