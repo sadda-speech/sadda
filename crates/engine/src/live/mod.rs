@@ -550,8 +550,7 @@ fn peak_and_rms(window: &std::collections::VecDeque<f32>, n: usize) -> (f32, f32
     let mut peak: f32 = 0.0;
     let mut sum_sq: f32 = 0.0;
     let mut count: usize = 0;
-    for i in start..window.len() {
-        let s = window[i];
+    for &s in window.iter().skip(start) {
         let a = s.abs();
         if a > peak {
             peak = a;
