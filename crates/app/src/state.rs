@@ -442,3 +442,80 @@ mod spectrogram_tests {
         assert_eq!(rgba[4], 0, "image bottom row should be the low-freq cell");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tier strip (B4): label helpers
+// ---------------------------------------------------------------------------
+
+/// Truncates `text` to at most `max_chars`, replacing the trailing
+/// characters with `…` when truncation happens. ASCII-aware: counts
+/// chars (not bytes) so non-ASCII labels truncate cleanly. `max_chars`
+/// of `0` returns an empty string.
+pub fn truncate_label(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
+        return text.to_string();
+    }
+    // Reserve the last char slot for the ellipsis; if max_chars == 1
+    // the result is just "…".
+    let keep = max_chars.saturating_sub(1);
+    let mut out: String = text.chars().take(keep).collect();
+    out.push('…');
+    out
+}
+
+/// Caption text for a reference-tier lane: `"(reference — N
+/// targets)"`. Singularises when `n == 1`.
+pub fn format_reference_lane_caption(n_targets: usize) -> String {
+    if n_targets == 1 {
+        "(reference — 1 target)".to_string()
+    } else {
+        format!("(reference — {n_targets} targets)")
+    }
+}
+
+#[cfg(test)]
+mod tier_strip_tests {
+    use super::*;
+
+    #[test]
+    fn truncate_label_short_string_unchanged() {
+        assert_eq!(truncate_label("hi", 10), "hi");
+    }
+
+    #[test]
+    fn truncate_label_exact_length_unchanged() {
+        assert_eq!(truncate_label("abcdef", 6), "abcdef");
+    }
+
+    #[test]
+    fn truncate_label_long_string_gets_ellipsis() {
+        assert_eq!(truncate_label("abcdefghij", 5), "abcd…");
+    }
+
+    #[test]
+    fn truncate_label_one_char_keeps_only_ellipsis() {
+        assert_eq!(truncate_label("abc", 1), "…");
+    }
+
+    #[test]
+    fn truncate_label_zero_max_returns_empty() {
+        assert_eq!(truncate_label("abc", 0), "");
+    }
+
+    #[test]
+    fn truncate_label_unicode_aware() {
+        // 8 chars; truncate to 5 → "héllo" (5 chars) wait, 4 + ellipsis
+        assert_eq!(truncate_label("héllo world", 6), "héllo…");
+    }
+
+    #[test]
+    fn reference_caption_singular_vs_plural() {
+        assert_eq!(format_reference_lane_caption(0), "(reference — 0 targets)");
+        assert_eq!(format_reference_lane_caption(1), "(reference — 1 target)");
+        assert_eq!(format_reference_lane_caption(3), "(reference — 3 targets)");
+    }
+}
