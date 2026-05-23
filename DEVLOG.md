@@ -6,6 +6,196 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-22 — Recipes (F1): `sadda.recipe.record` context manager, recipe_run SQL table, `.py` export at block exit
+
+Goal: settle the eleventh Phase 1 slice. F1 lands the reproducibility primitive — a `with sadda.recipe.record(project, name="..."):` block that links every `processing_run` row written inside it to a named `recipe_run`, plus a generated `<project>/recipes/<name>.py` script at block exit. The user's runnable artifact is the `.py`; the SQL rows are the audit linkage so anyone inspecting the corpus later can answer "which recipe produced this tier?"
+
+### What F1 must deliver
+
+From the Phase-1 slicing entry: "Context manager that logs every analysis call through `ProcessingRun` + `AuditLog`; serializes a recipe as a Python script the user can re-run on the same project or another." The slicing entry explicitly left the serialization format open ("whether the persistent log is JSON, TOML, or SQL rows is internal"). This entry settles it: **SQL rows in `recipe_run` + a generated `.py` script**.
+
+### Capture scope (scoped down from the literal slicing-entry text)
+
+The B1 schema's `processing_run.recipe_run_id` column already exists; F1's job is to populate it. F1 captures only the **three current `processing_run` writers**:
+
+- `Project::import_textgrid` (slice D1)
+- `Project::import_eaf` (slice D2)
+- `Project::commit_recording` (slice E1)
+
+That covers everything currently writing `processing_run` rows. Pure-DSP calls (`sadda.dsp.f0`, `sadda.dsp.formants`, ...) and corpus mutations that don't currently write `processing_run` rows (tier creates, annotation inserts) are **not captured** in v1. Rationale:
+
+- Pure-DSP work is reproducible from the user's own `.py` script; sadda doesn't need to re-record it.
+- Adding `processing_run` rows to dense-tier sidecar writes (`write_continuous_numeric` etc.) is a reasonable extension and is noted as a 0.1.x follow-up. Doing it inside F1 would expand the slice past the cadence target.
+- "Every analysis call" in the slicing-entry text reads literally, but means "every `processing_run`-shaped call" once you look at the schema: corpus mutations like `add_interval` have no `parameters` / `outputs` to record under the `processing_run` schema.
+
+### Prior art
+
+| Tool | What it does | What we lift |
+|---|---|---|
+| **Praat** | GUI "Record" macro: every menu action appends to a `.praat` script the user can re-run | The user-facing artifact is a script, not a UI replay. We adopt the same model. |
+| **MLflow** | `mlflow.start_run()` context manager logs params/metrics/artifacts to a side store; user re-runs the original notebook for replay | Context-manager shape; side store of provenance. We don't ship the metrics surface — `processing_run` already covers it. |
+| **Jupyter `nbconvert --to script`** | Converts a notebook to a `.py` after the fact | Generation timing: the `.py` is emitted at block exit, not built incrementally. |
+| **scikit-learn `Pipeline`** | Declarative pipeline objects you `.fit()` / `.predict()` | Doesn't fit — we're imperative. |
+
+### Schema (V7 migration)
+
+```sql
+CREATE TABLE recipe_run (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT    NOT NULL,
+    sadda_version TEXT    NOT NULL,
+    parameters    TEXT,        -- JSON; user-supplied kwargs to record()
+    started_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    completed_at  TEXT,        -- set on `__exit__`, NULL if the block panicked
+    status        TEXT    NOT NULL DEFAULT 'in_progress' CHECK (
+        status IN ('in_progress', 'ok', 'error')
+    ),
+    error_message TEXT,
+    UNIQUE (name)
+);
+CREATE INDEX idx_recipe_run_name ON recipe_run(name);
+```
+
+Plus the standard three audit triggers (insert / update / delete) mirroring V3's pattern.
+
+`processing_run.recipe_run_id` (already in V3) is the FK; no schema change there.
+
+### Active-recipe mechanism
+
+`Project` gains a `Cell<Option<i64>>` field carrying the active recipe id. Three methods:
+
+```rust
+impl Project {
+    pub fn start_recipe(&self, name: &str, params_json: Option<&str>) -> Result<i64>;
+    pub fn end_recipe(&self, recipe_run_id: i64, status: &str, error: Option<&str>) -> Result<()>;
+    pub fn current_recipe_id(&self) -> Option<i64>;
+    fn set_current_recipe_id(&self, id: Option<i64>);  // pub(crate) helper
+}
+```
+
+The three existing `processing_run` writers pull from `current_recipe_id()` and include the value in their INSERT. `Cell` works because `Project` is single-threaded by design (`unsendable` on the PyO3 side; the engine `Project` holds a non-Sync `rusqlite::Connection`).
+
+### Python surface
+
+```python
+import sadda
+
+with sadda.recipe.record(proj, name="vowel_analysis_v1") as recipe:
+    proj.import_textgrid("phones.TextGrid", bundle_id)
+    proj.import_eaf("annotations.eaf", bundle_id)
+
+# After the block:
+# - recipe_run row exists with status='ok', completed_at set
+# - the two import processing_run rows have recipe_run_id pointing at it
+# - <project>/recipes/vowel_analysis_v1.py exists
+
+sadda.recipe.list(proj)        # → ["vowel_analysis_v1"]
+sadda.recipe.script_path(proj, "vowel_analysis_v1")  # → Path(.../recipes/vowel_analysis_v1.py)
+```
+
+The context manager:
+
+- `__enter__`: calls `proj.start_recipe(name, params_json)`, returning a recipe id. Stores the id; assigns it as the project's active recipe.
+- `__exit__`: clears the active recipe (idempotent), updates the `recipe_run` row's `completed_at` + `status` ('ok' on clean exit, 'error' with the exception's repr on non-clean), and generates the `.py` script.
+
+Replay: the user runs `python recipes/vowel_analysis_v1.py`. The script imports sadda, opens the project (by path passed in `argv[1]` or hardcoded to the same project), and replays each operation. No programmatic `sadda.recipe.replay(...)` API in v1 — matches Jupyter's "convert and run" model and cuts ~30% of the slice's complexity.
+
+### Generated script shape
+
+```python
+#!/usr/bin/env python3
+# Auto-generated by sadda.recipe at 2026-05-22T15:42:00.123Z.
+# Recipe name: vowel_analysis_v1
+# Sadda version: 0.0.0
+# Source project: /Users/alice/projects/vowels/
+#
+# Run with: python vowel_analysis_v1.py [project_path]
+# Default target is the same project this recipe was recorded from.
+
+from __future__ import annotations
+import sys
+from pathlib import Path
+
+import sadda
+
+
+def main() -> None:
+    project_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
+        "/Users/alice/projects/vowels/"
+    )
+    proj = sadda.open_project(project_path)
+
+    # processing_run #42 — import_textgrid on bundle 17
+    proj.import_textgrid(Path("phones.TextGrid"), 17)
+    # processing_run #43 — import_eaf on bundle 17
+    proj.import_eaf(Path("annotations.eaf"), 17)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+The generator walks `processing_run` rows linked to the recipe, ordered by `started_at`, and emits one call per row. The processor_id (`sadda.io.textgrid.import`, `sadda.io.eaf.import`, `sadda.live`) drives the dispatch table on the generator side — each processor id maps to a Python source template that takes `parameters` JSON + bundle id and emits the right call.
+
+The bundle id is captured verbatim. If the user runs the script against a different project, the bundle ids won't match — the generated script is **most useful for replay on the original project** (re-verifying provenance). For cross-project replay, the user edits the script. Programmatic template-mode replay against a different project is a 0.1.x enhancement.
+
+### Confirmed F1 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Capture scope | **Existing processing_run writers only** | Pure-DSP is reproducible from user's own .py; broader corpus mutations need schema work that doesn't fit this slice |
+| Storage | **SQL rows + .py emitted at block exit** | SQL gives audit linkage; .py is the runnable artifact |
+| Replay surface | **Run the .py yourself** | Jupyter's nbconvert model; cuts dispatch-table complexity |
+| Recipe key | **Name (string), UNIQUE per project** | Simple; user picks the cadence; matches `bundle.name`/`tier.name` UNIQUE pattern |
+| Active-recipe mechanism | **`Cell<Option<i64>>` on `Project`** | Project is single-threaded by design; no global / thread-local needed |
+| Migration | **V7** | Sequential after E1's V6; adds `recipe_run` table + index + audit triggers |
+| Status field values | **`'in_progress'`, `'ok'`, `'error'`** | Mirrors `processing_run.status` (`'ok'`, `'error'`, `'partial'`) without overloading — `in_progress` is meaningful for recipes (the `.py` is generated on transition out of in_progress) |
+| Reentrancy | **One recipe at a time per project** | `start_recipe` while one is already active errors. Nesting is an open question; out of v1 scope |
+| Failure handling | **Block panic → status='error', error_message=repr(exc), .py NOT generated** | Recipe rows persist for forensics; failed runs aren't replayable |
+| Script destination | **`<project>/recipes/<name>.py`** | Inside the project tree; lives with the data it describes |
+
+### Layout
+
+- `crates/engine/migrations/V7__recipe_run.sql` — the new table + indices + audit triggers.
+- `crates/engine/src/corpus/migrations.rs` — register V7; bump `engine_max_version()` to 7.
+- `crates/engine/src/corpus.rs` — add the `recipe_run_id: Cell<Option<i64>>` field to `Project`; new methods `start_recipe`, `end_recipe`, `current_recipe_id`; thread the FK through the three existing INSERTs.
+- `crates/engine/tests/recipes.rs` — engine integration test.
+- `crates/python/src/lib.rs` — PyO3 wrappers (`start_recipe`, `end_recipe`, `list_recipes`); register a new `_native.recipe` submodule.
+- `crates/python/src/recipe.rs` — script generator. Walks the linked `processing_run` rows and emits the `.py`.
+- `python/sadda/recipe/__init__.py` — `record(project, name)` context manager class; `list(project)`, `script_path(project, name)` helpers; `@provisional` decorators.
+- `python/tests/test_recipe.py` — end-to-end Python tests.
+
+### Lossiness / what F1 deliberately doesn't ship
+
+- **Capture of pure-DSP calls** — out; the user's own script is the orchestration. Discoverable as a follow-up if real users want it.
+- **Capture of dense-tier sidecar writes** — out; needs to extend `write_continuous_numeric` etc. to write `processing_run` rows. 0.1.x.
+- **Capture of corpus mutations without `processing_run` shape** — out; needs schema design (parameters JSON for `add_interval`? probably not useful).
+- **Programmatic `sadda.recipe.replay()`** — out; user runs the `.py`.
+- **Cross-project template replay** — out; user edits bundle ids in the `.py` if running elsewhere.
+- **Nested recipes** — out; second `record()` while another is active errors.
+- **Renaming / deleting recipes** — out; user removes the `.py` and DELETEs the row manually if needed. CLI helpers are a 0.1.x follow-up.
+- **Diffing recipes** — out; `.py` files are just files, users can `diff` them.
+
+### What this entry doesn't decide
+
+- **Where to put the `recipes/` directory inside the project tree** — `<project>/recipes/` chosen for visibility; alternative is `<project>/.sadda/recipes/`. The exposed-by-default placement makes the artifacts feel first-class.
+- **JSON shape of `recipe_run.parameters`** — caller-supplied passthrough; not interpreted by sadda. Convention can settle later.
+- **Whether `recipe_run` rows should be exportable across projects** — they're plain SQLite rows; users can already `sqlite3` them out. A real export/import surface is a 0.1.x or 0.2 follow-up.
+- **Per-recipe metadata** (author, notes, tags) — `parameters` JSON is the escape hatch; first-class columns can come later.
+
+### Sources / references
+
+- 2026-05-21 Phase 1 slicing entry (F1 row + the format-open item)
+- 2026-05-18 Python API surface entry (`sadda.recipe.record` shape; PROVISIONAL tier)
+- 2026-05-20 ML-model-registry entry (ProcessingRun → renamed from ModelRun; `recipe_run_id` FK lands in V3)
+- 2026-05-21 B1 entry (audit log + ProcessingRun)
+- 2026-05-22 E1 entry (live recording; second `processing_run` writer)
+- Praat scripting reference: <https://www.fon.hum.uva.nl/praat/manual/Scripting.html>
+- MLflow tracking model: <https://mlflow.org/docs/latest/tracking.html>
+- Jupyter `nbconvert --to script`: <https://nbconvert.readthedocs.io/en/latest/usage.html#convert-script>
+
+---
+
 ## 2026-05-22 — Live recording (E1): cpal capture, rtrb ringbuffer, `.in_progress/` atomic commit, streaming pitch/formants/intensity subscribers
 
 Goal: settle the tenth Phase 1 slice. E1 lands the live-recording surface — the second piece of new functionality after the interop slices, and the most architecturally novel (real-time audio thread + cross-thread plumbing + Python callback dispatch). The 2026-05-18 Python-API-surface entry sketched `sadda.live.start_session(...)` plus subscriber decorators (`@session.on_pitch`, `@session.on_formants`); the 2026-05-21 slicing entry punted the concrete spike "to inside E1." This entry settles it.
