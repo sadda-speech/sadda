@@ -6,6 +6,134 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-22 — Release 0.1.0 (G12): PyPI Python-only, cibuildwheel matrix, mkdocs-material on GitHub Pages
+
+Goal: close Phase 1. G12 puts the Python library on PyPI as `sadda 0.1.0` and stands up the docs site at GitHub Pages. The slicing entry pinned this as "claim the name + first quickstart tutorial + mkdocs-material with mkdocstrings auto-rendering"; the 2026-05-21 docs-strategy entry pinned this as the docs-site start point. This entry settles the cuts.
+
+### What gets published (and what doesn't)
+
+| Surface | 0.1.0 | Rationale |
+|---|---|---|
+| **`sadda` on PyPI** | **Yes** | The Phase 1 deliverable. Python library is what real users will touch first. |
+| `sadda-engine` on crates.io | **No** | Rust API not stable enough to commit. Republishing later under a different name (`sadda-engine` → maybe `sadda-rs`?) is still on the table. |
+| `sadda-python` on crates.io | **No** | Build-only crate; no value in publishing the maturin shim. |
+| Desktop app binaries | **No** | Phase 2 scope. |
+| UniFFI bindings | **No** | Phase 8 scope. |
+| docs.rs Rust API ref | **No** | Auto-published only when a crate is on crates.io; with no crate published, no docs.rs page. The "cargo-doc → markdown bridge" the docs-strategy entry mentioned is **dropped from G12** — `///` docs ship with the source for now; docs.rs comes for free once we publish `sadda-engine`. |
+| **mkdocs-material site on GitHub Pages** | **Yes** | The docs-strategy entry pinned this as the 0.1 release deliverable. |
+
+Cutting the Rust crate publish removes the largest unknown from G12: the engine's `Project` / `LiveSession` / etc. APIs have not had real outside users yet; locking them by SemVer at this stage would force breaking-change pain we can sidestep entirely.
+
+### Wheel matrix
+
+12 wheels via `cibuildwheel` in GitHub Actions:
+
+- **Linux x86_64**: Python 3.10 / 3.11 / 3.12 / 3.13 — `manylinux_2_28`
+- **macOS arm64**: Python 3.10 / 3.11 / 3.12 / 3.13
+- **Windows x86_64**: Python 3.10 / 3.11 / 3.12 / 3.13
+
+Excluded from 0.1.0:
+
+- Linux aarch64 — cibuildwheel can build via QEMU but doubles CI time; deferred to 0.1.x if real ARM-server users surface.
+- macOS x86_64 (Intel) — Apple has discontinued Intel Macs; arm64-only matches what Apple sells today.
+- Python 3.9 — past the practical EOL window; covered by sdist for stragglers.
+- musllinux — Alpine users get sdist.
+
+PyPI also ships an sdist alongside the wheels so any unsupported platform can still `pip install sadda` and compile locally.
+
+### Trusted publishing (no PyPI API token in CI)
+
+PyPI's trusted-publishing flow uses OIDC: a GitHub Actions job authenticates to PyPI by presenting its OIDC token, and PyPI verifies the repo + workflow + environment match a pre-registered trust policy. **No long-lived `PYPI_API_TOKEN` secret in the repo's GitHub settings**, which closes the most common exfil-and-supply-chain vector for OSS Python packages. The user-side setup is one PyPI form fill at <https://pypi.org/manage/account/publishing/>.
+
+### Docs surface for 0.1.0
+
+```
+docs/
+├── index.md                       # Landing page
+├── quickstart.md                  # One end-to-end walk-through
+├── lossiness/
+│   ├── textgrid.md                # D1's lossiness table, surfaced
+│   └── eaf.md                     # D2's lossiness table, surfaced
+└── api/
+    ├── corpus.md                  # ::: sadda.Project / Bundle / Tier / …
+    ├── dsp.md                     # ::: sadda.dsp
+    ├── live.md                    # ::: sadda.live
+    └── recipe.md                  # ::: sadda.recipe
+```
+
+Concept guides per module are deferred to 0.1.x — the API ref is generated for free from the `.pyi` stubs via mkdocstrings, so the "guides" tier is the only place we'd write fresh prose, and the time is better spent in the quickstart for 0.1.0.
+
+DEVLOG.md stays in the repo (not republished as docs) — it's a working log, not user-facing. The handful of design decisions users will care about (lossiness on round-trip, stability tiers, etc.) get pulled into the docs site individually.
+
+### Trusted-publishing handoff
+
+Things only the user can do, listed once in the commit body so the release can actually happen:
+
+1. **Claim `sadda` on PyPI.** Create an account if needed; reserve the project name.
+2. **Configure trusted publishing.** PyPI account settings → "Pending publishers" → add a publisher for `sadda-speech/sadda` / `release.yml` / environment `pypi`. Trust policy enforces that only this exact workflow can publish.
+3. **Activate GitHub Pages.** Repo settings → Pages → source = "GitHub Actions". The `docs.yml` workflow targets the `gh-pages` deployment environment.
+4. **Push the prepared branch to main + tag v0.1.0.** The `release.yml` workflow fires on tag push, builds wheels via cibuildwheel, and uploads to PyPI via trusted publishing.
+5. **Sanity-check the Pages URL** (`https://sadda-speech.github.io/sadda/`) once the docs workflow finishes.
+
+### Confirmed G12 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| What gets published | **Python `sadda` only; no Rust crates** | Lets us iterate on the Rust API without SemVer pressure |
+| Wheel matrix | **Linux + macOS arm64 + Windows × Py 3.10–3.13** | 12 wheels covers ~98% of Python users; sdist catches the rest |
+| Build orchestration | **cibuildwheel inside `actions/setup-python`** | The de-facto cross-platform Python wheel builder; first-class maturin support |
+| PyPI auth | **Trusted publishing (OIDC), no API token** | Closes the most common supply-chain risk for OSS Python; one-form user setup |
+| Docs framework | **mkdocs-material + mkdocstrings (Python handler)** | Pinned in the 2026-05-21 docs-strategy entry; reads `.pyi` stubs we already generate |
+| Docs scope | **Quickstart + auto-API ref + lossiness pages** | Concept guides deferred to 0.1.x — auto-ref + one tutorial is the minimum viable docs site |
+| Docs hosting | **GitHub Pages, deployed from `docs.yml`** | Free; familiar; pinned in the docs-strategy entry |
+| Version bump | **0.0.0 → 0.1.0 in `Cargo.toml` + `pyproject.toml`** | Two version strings; CHANGELOG.md drafted from DEVLOG slice headers |
+| Release notes | **`CHANGELOG.md` in repo root, sectioned by version** | Standard; pulled into GitHub Release body via the workflow |
+| Parselmouth migration guide | **Deferred to 0.1.x or later** | Real artifact for users coming from Praat; needs real content; cut from G12 |
+| docs.rs Rust API ref | **Deferred** | Comes for free when we publish the engine crate; not blocking 0.1.0 |
+
+### Layout
+
+- `Cargo.toml`, `pyproject.toml` — version bumps.
+- `CHANGELOG.md` (new) — sectioned by version, populated from the DEVLOG slice list.
+- `README.md` — refresh status section (drop "pre-alpha", point at `pip install sadda`).
+- `mkdocs.yml` (new) — material theme + mkdocstrings python handler.
+- `docs/` (new) — index, quickstart, lossiness pages, api pages.
+- `.github/workflows/release.yml` (new) — cibuildwheel + trusted publishing on tag push.
+- `.github/workflows/docs.yml` (new) — mkdocs build + Pages deploy on main push.
+- `pyproject.toml` `[project.urls]` — homepage + docs + repo + issues URLs.
+
+### Lossiness / what G12 deliberately doesn't ship
+
+- **Concept guides per module.** Auto-API ref + quickstart only.
+- **Parselmouth migration guide.** Real content needs real Parselmouth-user feedback; defer.
+- **Rust crate publish + docs.rs.** Let the engine API breathe; revisit when there's a downstream user.
+- **Linux aarch64 / macOS Intel wheels.** sdist covers them; revisit if real users ask.
+- **Python 3.9 wheels.** Past practical EOL; sdist covers stragglers.
+- **musllinux (Alpine) wheels.** Same.
+- **GitHub Release auto-publishing of wheels.** Wheels live on PyPI; the GitHub Release body links there. Cuts a moving part.
+- **Versioned docs (multi-version docs site).** mkdocs-material supports it via `mike`; deferred until a real second version ships.
+- **Search-engine optimisation on the docs site.** Out of scope at 0.1.0.
+
+### What this entry doesn't decide
+
+- **Whether to keep `0.0.0` on the unpublished Rust crates** post-release — the workspace bump moves all of them to 0.1.0; if a later slice splits the engine versioning from the Python wrapper, that's a future decision.
+- **CHANGELOG format** — Keep-a-Changelog style is conventional; can swap if a real downstream tool needs differently.
+- **PR preview docs.** Read-the-Docs has them out of the box; GitHub Pages requires extra setup. Defer.
+- **Whether to ship a `sadda` GitHub org logo / favicon.** Nice-to-have; not in 0.1.0.
+
+### Sources / references
+
+- 2026-05-21 documentation strategy entry (G12 deliverable; mkdocs-material + GH Pages choice)
+- 2026-05-21 Phase 1 slicing entry (G12 row)
+- 2026-05-18 Python API surface entry (stability tiers + Parselmouth migration commitment)
+- mkdocs-material: <https://squidfunk.github.io/mkdocs-material/>
+- mkdocstrings (Python handler): <https://mkdocstrings.github.io/python/>
+- cibuildwheel: <https://cibuildwheel.pypa.io/>
+- PyPI trusted publishing: <https://docs.pypi.org/trusted-publishers/>
+- maturin's release-action docs: <https://www.maturin.rs/distribution.html>
+
+---
+
 ## 2026-05-22 — Recipes (F1): `sadda.recipe.record` context manager, recipe_run SQL table, `.py` export at block exit
 
 Goal: settle the eleventh Phase 1 slice. F1 lands the reproducibility primitive — a `with sadda.recipe.record(project, name="..."):` block that links every `processing_run` row written inside it to a named `recipe_run`, plus a generated `<project>/recipes/<name>.py` script at block exit. The user's runnable artifact is the `.py`; the SQL rows are the audit linkage so anyone inspecting the corpus later can answer "which recipe produced this tier?"

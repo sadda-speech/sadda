@@ -1,25 +1,51 @@
 [project]
 name = "sadda"
-version = "0.0.0"
-description = "Open-source toolkit for phonetics and speech science research."
+version = "0.1.0"
+description = "Open-source toolkit for phonetics and speech-science research."
 readme = "README.md"
 license = { text = "Apache-2.0 OR MIT" }
 authors = [{ name = "Daniel Brenner", email = "wobaidan@gmail.com" }]
+keywords = [
+    "phonetics",
+    "speech",
+    "audio",
+    "praat",
+    "linguistics",
+    "dsp",
+    "formants",
+    "pitch",
+    "spectrogram",
+]
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
     "polars>=1.0",
 ]
 classifiers = [
-    "Development Status :: 1 - Planning",
+    "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Rust",
-    "Topic :: Scientific/Engineering",
     "Topic :: Multimedia :: Sound/Audio :: Analysis",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Information Analysis",
 ]
+
+[project.urls]
+Homepage = "https://sadda-speech.github.io/sadda/"
+Documentation = "https://sadda-speech.github.io/sadda/"
+Repository = "https://github.com/sadda-speech/sadda"
+Issues = "https://github.com/sadda-speech/sadda/issues"
+Changelog = "https://github.com/sadda-speech/sadda/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["maturin>=1.7,<2.0"]

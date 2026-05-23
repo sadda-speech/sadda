@@ -1,0 +1,127 @@
+name: Release
+
+# Triggers on a tag push that matches v*.*.*. The tag is the source of
+# truth for the release version — make sure pyproject.toml /
+# Cargo.toml are bumped before tagging.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  # Allow a manual dispatch for dry-runs (builds wheels, uploads to
+  # GitHub Actions artefacts but does NOT publish to PyPI).
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-wheels:
+    name: build wheels (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            cibw_archs: x86_64
+            cibw_platform: linux
+          - os: macos-14   # arm64 runner
+            target: aarch64-apple-darwin
+            cibw_archs: arm64
+            cibw_platform: macos
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            cibw_archs: AMD64
+            cibw_platform: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build wheels with cibuildwheel
+        uses: pypa/cibuildwheel@v2.21.3
+        env:
+          # Only build CPython 3.10–3.13; skip PyPy + 3.9 + musllinux.
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
+          CIBW_SKIP: "pp* *-musllinux_*"
+          CIBW_ARCHS: ${{ matrix.cibw_archs }}
+          CIBW_BUILD_VERBOSITY: "1"
+          # maturin needs Rust available inside the manylinux container.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --profile minimal --default-toolchain 1.85
+          CIBW_ENVIRONMENT_LINUX: 'PATH=/root/.cargo/bin:$PATH'
+          # macOS arm64 runners already have Rust; just ensure the target.
+          CIBW_BEFORE_BUILD_MACOS: "rustup target add aarch64-apple-darwin"
+          # Windows: the runner has Rust + maturin reaches it via PATH.
+          # Smoke-test: import the built wheel and check the version.
+          CIBW_TEST_COMMAND: 'python -c "import sadda; assert sadda.version().startswith(''0.1''), sadda.version()"'
+
+      - name: Upload wheel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.cibw_platform }}
+          path: ./wheelhouse/*.whl
+
+  build-sdist:
+    name: build sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install maturin
+        run: pip install "maturin>=1.7,<2.0"
+
+      - name: Build sdist
+        run: maturin sdist --out dist
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  publish:
+    name: publish to PyPI
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    # Only publish on tag push, not workflow_dispatch (which is dry-run).
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: pypi
+      url: https://pypi.org/p/sadda
+    permissions:
+      # Trusted publishing requires id-token: write.
+      id-token: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-staging
+
+      - name: Flatten into dist/
+        run: |
+          mkdir -p dist
+          find dist-staging -name '*.whl' -exec mv {} dist/ \;
+          find dist-staging -name '*.tar.gz' -exec mv {} dist/ \;
+          ls -lh dist/
+
+      - name: Publish to PyPI
+        # Uses trusted publishing (OIDC). No PYPI_API_TOKEN secret needed.
+        # Trust policy must be configured at
+        # https://pypi.org/manage/account/publishing/ pointing at this
+        # repo + workflow + environment "pypi".
+        uses: pypa/gh-action-pypi-publish@release/v1

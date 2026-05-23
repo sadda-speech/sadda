@@ -2,6 +2,9 @@
 /target
 **/*.rs.bk
 
+# mkdocs build output
+/site/
+
 # Python
 __pycache__/
 *.py[cod]
