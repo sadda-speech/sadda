@@ -32,6 +32,10 @@ pub struct Project {
     /// interior-mutable cell — `Project` is single-threaded by design
     /// (the embedded `rusqlite::Connection` isn't `Sync`).
     recipe_run_id: std::cell::Cell<Option<i64>>,
+    /// True if this `Project` instance owns the `.sadda-lock` file
+    /// and should delete it on `Drop`. False for the (currently-
+    /// unused) read-only-equivalent open path, if we ever add one.
+    holds_lock: bool,
 }
 
 /// Metadata for one recording inside a [`Project`].
@@ -525,10 +529,12 @@ impl Project {
         );
         std::fs::write(root.join("project.toml"), toml)?;
 
+        acquire_lock(&root)?;
         Ok(Project {
             root,
             conn,
             recipe_run_id: std::cell::Cell::new(None),
+            holds_lock: true,
         })
     }
 
@@ -560,10 +566,12 @@ impl Project {
             migrations::run(&mut conn)?;
         }
 
+        acquire_lock(&root)?;
         Ok(Project {
             root,
             conn,
             recipe_run_id: std::cell::Cell::new(None),
+            holds_lock: true,
         })
     }
 
@@ -2547,6 +2555,189 @@ pub enum TierRows {
     Point(Vec<Point>),
     /// Rows from a `reference` tier.
     Reference(Vec<Reference>),
+}
+
+// ---------------------------------------------------------------------------
+// Single-writer lock (F10)
+// ---------------------------------------------------------------------------
+
+/// Lockfile name inside the project root. Hidden via the leading
+/// dot on UNIX; not hidden on Windows but invisible in most file
+/// browsers there too.
+const LOCKFILE_NAME: &str = ".sadda-lock";
+
+/// Records the lock holder. TOML-serialised so a human inspecting
+/// the file gets a readable explanation.
+#[derive(Debug)]
+struct LockInfo {
+    pid: u32,
+    hostname: String,
+    acquired_at: String,
+}
+
+impl LockInfo {
+    fn render(&self) -> String {
+        format!(
+            "pid = {}\nhostname = {:?}\nacquired_at = {:?}\n",
+            self.pid, self.hostname, self.acquired_at,
+        )
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        let mut pid: Option<u32> = None;
+        let mut hostname: Option<String> = None;
+        let mut acquired_at: Option<String> = None;
+        for line in raw.lines() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("pid =") {
+                pid = rest.trim().parse().ok();
+            } else if let Some(rest) = line.strip_prefix("hostname =") {
+                hostname = Some(rest.trim().trim_matches('"').to_string());
+            } else if let Some(rest) = line.strip_prefix("acquired_at =") {
+                acquired_at = Some(rest.trim().trim_matches('"').to_string());
+            }
+        }
+        Some(Self {
+            pid: pid?,
+            hostname: hostname?,
+            acquired_at: acquired_at?,
+        })
+    }
+}
+
+/// Acquires the project's `.sadda-lock` file. Errors with
+/// [`EngineError::ProjectLocked`] if a live process on this host
+/// already holds it.
+fn acquire_lock(root: &Path) -> Result<()> {
+    let lockfile = root.join(LOCKFILE_NAME);
+    let our_pid = std::process::id();
+    let our_host = hostname();
+
+    if lockfile.exists()
+        && let Ok(raw) = std::fs::read_to_string(&lockfile)
+        && let Some(existing) = LockInfo::parse(&raw)
+    {
+        // Same PID = our own process re-opening (the previous open
+        // leaked); take over silently.
+        if existing.pid == our_pid {
+            // fall through to overwrite
+        } else if existing.hostname == our_host && pid_is_live(existing.pid) {
+            return Err(EngineError::ProjectLocked {
+                holder_pid: existing.pid,
+                hostname: existing.hostname,
+                lockfile_path: lockfile,
+            });
+        } else {
+            // Stale (dead PID, or different hostname we can't verify).
+            eprintln!(
+                "sadda: clearing stale lockfile at {} (was PID {} on {})",
+                lockfile.display(),
+                existing.pid,
+                existing.hostname,
+            );
+        }
+    }
+
+    let info = LockInfo {
+        pid: our_pid,
+        hostname: our_host,
+        acquired_at: now_iso8601(),
+    };
+    std::fs::write(&lockfile, info.render())?;
+    Ok(())
+}
+
+/// Best-effort lockfile delete. Ignores I/O errors — a stale
+/// file is detected and cleared by the next `acquire_lock`.
+fn release_lock(root: &Path) {
+    let _ = std::fs::remove_file(root.join(LOCKFILE_NAME));
+}
+
+/// Returns the running process's hostname, falling back to
+/// `"unknown"` if the OS can't tell us.
+fn hostname() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .or_else(|| {
+            // POSIX `uname -n` via libc. We use a simpler fallback:
+            // read /proc/sys/kernel/hostname on Linux. On other
+            // UNIXes both env vars usually work; on Windows
+            // COMPUTERNAME is always set.
+            std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn now_iso8601() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Crude RFC-3339-ish formatter: seconds since the epoch.
+    // The lockfile's audit value is informational; users who need
+    // a real timestamp can `stat .sadda-lock`.
+    format!("epoch+{secs}s")
+}
+
+/// True if a process with `pid` exists on this host. UNIX uses
+/// `kill(pid, 0)`; Windows uses `OpenProcess` + `CloseHandle`.
+#[cfg(unix)]
+fn pid_is_live(pid: u32) -> bool {
+    // 0 and negative-on-cast values are special to kill(2): 0 means
+    // "every process in the caller's process group", -1 means
+    // "every process the caller can signal." Neither is a real
+    // liveness check; reject up front.
+    if pid == 0 || pid > i32::MAX as u32 {
+        return false;
+    }
+    // SAFETY: kill(pid, 0) is a probe; doesn't change process state.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 {
+        // Successfully would have signalled — process exists.
+        return true;
+    }
+    // EPERM = process exists but we can't signal it (different
+    // uid). ESRCH = no such process.
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+fn pid_is_live(pid: u32) -> bool {
+    // SAFETY: OpenProcess + CloseHandle round-trip; no state change.
+    use std::ffi::c_void;
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit_handle: i32, process_id: u32) -> *mut c_void;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    unsafe {
+        CloseHandle(handle);
+    }
+    true
+}
+
+#[cfg(not(any(unix, windows)))]
+fn pid_is_live(_pid: u32) -> bool {
+    // Unknown platform: trust the lockfile and treat the lock as
+    // held. Forces the user to clear manually if they're sure.
+    true
+}
+
+impl Drop for Project {
+    fn drop(&mut self) {
+        if self.holds_lock {
+            release_lock(&self.root);
+        }
+    }
 }
 
 fn backup_corpus_db(conn: &Connection, db_path: &Path, from_version: i64) -> Result<()> {

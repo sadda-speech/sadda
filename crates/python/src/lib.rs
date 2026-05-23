@@ -43,6 +43,14 @@ pub(crate) fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
         sadda_engine::EngineError::Cardinality(msg) => {
             PyValueError::new_err(format!("cardinality violation: {msg}"))
         }
+        sadda_engine::EngineError::ProjectLocked {
+            holder_pid,
+            hostname,
+            lockfile_path,
+        } => PyRuntimeError::new_err(format!(
+            "project locked by PID {holder_pid} on {hostname}; lockfile at {}",
+            lockfile_path.display()
+        )),
     }
 }
 

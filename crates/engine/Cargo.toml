@@ -22,3 +22,8 @@ rustfft = "6"
 sha2 = "0.10"
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
+
+# F10 single-writer-lock PID liveness check (kill(pid, 0)) on UNIX.
+# Windows uses a direct FFI shim inline in corpus.rs (no extra dep).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

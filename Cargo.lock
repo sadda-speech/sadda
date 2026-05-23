@@ -4054,6 +4054,7 @@ dependencies = [
  "arrow",
  "cpal",
  "hound",
+ "libc",
  "ndarray",
  "parquet",
  "quick-xml 0.40.1",

@@ -52,6 +52,23 @@ pub enum EngineError {
     /// `add_point` / `add_reference`.
     #[error("cardinality violation: {0}")]
     Cardinality(String),
+
+    /// `Project::open` / `Project::create` found a live
+    /// `.sadda-lock` file in the project root. The slice-F10
+    /// single-writer guarantee refuses to open a project a
+    /// different process is already writing to.
+    #[error(
+        "project at {lockfile_path} is locked by PID {holder_pid} on {hostname}; \
+         close the other sadda instance or remove the .sadda-lock file"
+    )]
+    ProjectLocked {
+        /// PID recorded in the lockfile.
+        holder_pid: u32,
+        /// Hostname recorded in the lockfile.
+        hostname: String,
+        /// Filesystem path to the `.sadda-lock` file.
+        lockfile_path: std::path::PathBuf,
+    },
 }
 
 /// Convenience alias for `Result<T, EngineError>`, mirroring the std lib's
