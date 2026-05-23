@@ -29,3 +29,7 @@ cpal = "0.17"
 # E8 embedded-CPython script panel. Reuses the Phase-0 crate
 # that already validated the embed end-to-end.
 sadda-script-engine = { path = "../script-engine" }
+# E9 in-app `sadda.app` namespace. Direct pyo3 dep needed so
+# `append_to_inittab!` is in scope; auto-initialize matches the
+# script-engine's feature set so both share one interpreter.
+pyo3 = { version = "0.28", features = ["auto-initialize"] }

@@ -6,6 +6,133 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-23 — `sadda.app` in-app namespace (E9): append_to_inittab built-in module, thread-local snapshot, command palette via Ctrl+P
+
+Goal: settle the ninth Phase 2 slice. E9 turns the script panel from a "run pure Python" toy into the in-app scripting host the 2026-05-18 API-surface entry sketched: scripts read the GUI's current selection / active bundle / cursor, and register commands that show up in a palette.
+
+### What E9 must deliver
+
+From the Phase 2 slicing entry: "`sadda.app` API: current_selection, active_bundle, register_command. Lands the in-app `sadda.app` namespace per the 2026-05-18 API-surface entry. `register_command` adds the user's function to a command palette accessible via Ctrl+P or a menu. Scripts that don't touch `sadda.app` work identically whether run inside the app or via `sadda` from a terminal."
+
+### Two design problems
+
+E9 needs to settle two genuinely-hard problems the prior slices kicked down the road:
+
+**(1) Embed packaging — how does `import sadda.app` work without a pip install?** The embedded interpreter's `sys.path` defaults to the system Python's site-packages. If `sadda` isn't pip-installed there (and on a typical user's machine, it isn't), `import sadda.app` fails. E9's resolution: **register a built-in `sadda.app` module via PyO3's `append_to_inittab!`** before the interpreter starts. No filesystem `sadda` package required — `import sadda.app` resolves to the Rust-implemented module baked into the binary.
+
+The full `sadda` Python package (with stability decorators, DSP wrappers, etc.) is **NOT bundled in the embed**. Users who want it `pip install sadda` separately into whatever Python the embed picked up. The slicing-entry risk-spike note flagged Linux/Windows embed-packaging as deferred to a follow-up; E9 confirms the minimal-namespace approach is the v0.2 answer.
+
+**(2) State plumbing — how do PyO3 functions read SaddaApp's GUI state?** The functions in `sadda.app` need to return things owned by `SaddaApp` (selected annotation, active bundle, cursor). The standard solution for a single-threaded GUI process: **a thread-local pointer to an `AppSnapshot` struct, set immediately before `run_script` and cleared after**. The GIL guarantees the snapshot is valid for the script's lifetime (the GUI thread can't mutate `SaddaApp` while running Python on the same thread).
+
+### `sadda.app` surface at E9
+
+```python
+import sadda.app as app
+
+app.project_root()       # → str, project root directory
+app.active_bundle()      # → dict | None: {id, name, sample_rate, duration_seconds}
+app.current_selection()  # → dict | None: {kind, tier_id, annotation_id}
+app.cursor_seconds()     # → float, current playback cursor
+
+app.register_command("My Action", my_func)
+# my_func is invoked with no args when the user picks it from
+# the Ctrl+P palette
+```
+
+Each function with no snapshot active raises `RuntimeError("sadda.app called outside an active app session")`. In practice that's only possible if someone tries to import `sadda.app` from a script run via the standalone sadda Python package — fine; the function names exist, the call surface is consistent.
+
+### Snapshot design
+
+```rust
+struct AppSnapshot {
+    project_root: PathBuf,
+    bundle: Option<BundleInfo>,
+    selection: Option<AnnotationSelection>,
+    cursor: f64,
+}
+
+thread_local! {
+    static APP_SNAPSHOT: Cell<Option<NonNull<AppSnapshot>>> = const { Cell::new(None) };
+}
+
+fn with_snapshot<R>(f: impl FnOnce(&AppSnapshot) -> R) -> Option<R> {
+    APP_SNAPSHOT.with(|cell| cell.get().map(|p| f(unsafe { p.as_ref() })))
+}
+```
+
+The unsafe is fenced by:
+- Pointer set in `Cell` is non-null only between `run_script` setup and teardown.
+- The snapshot lives in a stack local of the caller (`run_script_with_snapshot`); it outlives the entire script run by construction.
+- GUI thread holds GIL during the run, so the snapshot can't race with any other thread that might want it.
+
+### Command palette
+
+`register_command(name, callable)` appends `(name, callable)` to a `Vec<(String, Py<PyAny>)>` on `SaddaApp`. The PyObject's refcount keeps the callable alive past the script run (it's still owned by Python — egui doesn't garbage-collect it).
+
+**Ctrl+P** (Cmd+P on macOS) opens a modal `Window` with:
+- Search input at the top
+- Filterable list below (substring match on command name)
+- Enter or click on a row invokes the callable
+
+When invoked, the app:
+1. Locates the `Py<PyAny>` in `registered_commands`
+2. Sets up the snapshot
+3. Acquires the GIL
+4. Calls `cb.call0(py)` — the script's PyO3 callable runs synchronously, GUI freezes for the duration
+5. Tears down
+
+If the callable raises, the exception's repr lands in `script_error` and the script panel's output pane shows it.
+
+Commands persist for the **app session**. After a relaunch, the user re-runs their registration script to repopulate.
+
+### Confirmed E9 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Embed packaging | **`append_to_inittab!` for `sadda.app` only — minimal namespace** | Works without pip install; sidesteps the full-wheel bundling complexity; the 2026-05-18 API-surface entry pinned `sadda.app` as the only in-app-specific module |
+| Full `sadda` package availability | **NOT bundled — users pip install for the wider engine API** | Bundling is a Phase-7 polish item per the milestone plan |
+| State plumbing | **Thread-local pointer to a stack-local snapshot** | GUI thread guarantees serialise; standard pattern; no Arc / Mutex overhead |
+| `sadda.app.active_project` from the slicing entry | **Renamed to `project_root()`** — returns a path string | A full Project PyObject would need to thread PyProject from the python crate; out of scope for the minimal namespace |
+| Command palette | **Modal Window opened by Ctrl/Cmd+P** | VS Code / IntelliJ convention; matches the existing label-edit modal pattern |
+| Command persistence | **App-session only; users re-run registration scripts** | Auto-running stored code on startup is hazardous |
+| Command invocation | **Synchronous on the GUI thread with snapshot set** | Same blocking semantics as `run_script` |
+| Snapshot timing | **Set before run_script / command invocation; cleared in a Drop guard so panics still clear it** | Defensive; an unwinding script must not leave a dangling pointer |
+| Snapshot contents | **project_root, active_bundle, selection, cursor** | The four pieces every script demo wants |
+
+### Layout
+
+- `crates/app/Cargo.toml` — adds `pyo3 = { version = "0.28", features = ["auto-initialize"] }`. (script-engine already brings pyo3 in transitively; making it a direct dep is necessary for `append_to_inittab!` to be in scope.)
+- `crates/app/src/sadda_app.rs` (new) — `AppSnapshot`, thread-local cell, `with_snapshot`, the `#[pymodule] fn sadda(...)` registering the `app` submodule, all functions.
+- `crates/app/src/main.rs` — `append_to_inittab!` call in `main` before `eframe::run_native`; `registered_commands` on `SaddaApp`; Ctrl+P handler; command-palette modal; `run_script_buffer` switches to `run_script_with_snapshot` that sets up the cell before calling into `script-engine`.
+
+### Lossiness / what E9 deliberately doesn't ship
+
+- **Bundling the full `sadda` Python wheel into the binary.** Phase-7 packaging work; large enough to be its own slice cluster.
+- **Calling engine mutators (`add_interval` etc.) from `sadda.app`.** Doable but requires threading a `PyProject`-equivalent through the snapshot; deferred to keep the v1 surface focused on read-side introspection.
+- **`current_selection_info` returning the full annotation data** (label, time span, etc.). E9 returns the identifying triple `(kind, tier_id, annotation_id)`; scripts that want more open the project externally via `sadda.open_project(root)` and look up.
+- **Command argument support.** `register_command(name, callable)` calls `cb.call0(py)`. Commands with args wait for a polish slice.
+- **Command persistence across launches.** Same reason.
+- **`sadda.app.refresh()`** — the API-surface entry mentioned this; egui repaints reactively, so it's a no-op for now. Stub for forward-compat if real users need it.
+- **`sadda.app.register_panel` for arbitrary widgets.** Same cut-line as the milestone-plan's "register_command only at 1.0."
+- **Cancellable / async command execution.** Same as E8.
+
+### What this entry doesn't decide
+
+- **Exact Ctrl+P modifier per platform.** Egui's `Modifiers::COMMAND` handles Ctrl on Linux/Windows and Cmd on macOS automatically.
+- **Whether the palette should fuzzy-match or substring-match.** Substring at v1; fuzzy is polish.
+- **What to do if the user registers two commands with the same name.** Just keep both; first-match wins on Ctrl+P selection.
+- **How big the snapshot can get.** Currently tiny; if it grows (e.g., a thumbnail of the waveform), revisit.
+
+### Sources / references
+
+- 2026-05-23 Phase 2 slicing entry (E9 row + the embed-packaging spike note)
+- 2026-05-23 E8 entry (the script panel this slice extends)
+- 2026-05-18 Python API surface entry (`sadda.app` namespace shape)
+- 2026-05-23 A1 entry (window state pattern this slice's snapshot mirrors)
+- PyO3 `append_to_inittab!`: <https://docs.rs/pyo3/latest/pyo3/macro.append_to_inittab.html>
+
+---
+
 ## 2026-05-23 — Embedded CPython script panel (E8): bottom panel reuses Phase-0 script-engine, code persists, output doesn't
 
 Goal: settle the eighth Phase 2 slice. E8 lights up the script-panel UI — the visible half of the embedded-CPython story. The interpreter itself was validated in Phase 0's `crates/script-engine`; E8 just wires it to a panel.

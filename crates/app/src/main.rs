@@ -8,15 +8,21 @@
 //! deliberately doesn't ship at A1.
 
 mod playback;
+mod sadda_app;
 mod state;
 
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
+use pyo3::prelude::*;
 use sadda_engine::{Project, TierType};
 
 use crate::playback::Playback;
+use crate::sadda_app::{
+    AppSnapshot, BundleInfo, ScriptSessionExtras, SelectionInfo, SelectionKind,
+    with_snapshot_active,
+};
 use crate::state::{
     ColormapKind, EnvelopeCache, PersistedState, SpectrogramConfig, ThemePref, TimelineState,
     build_envelope_for_range, colormap_bake, format_reference_lane_caption, power_to_db_normalized,
@@ -39,6 +45,13 @@ const APP_TITLE: &str = "sadda";
 const MAX_SPECTROGRAM_WIDTH: usize = 4096;
 
 fn main() -> eframe::Result<()> {
+    // E9: register the built-in `sadda` module BEFORE the embedded
+    // CPython interpreter starts, so embedded scripts can
+    // `import sadda.app` without needing the wheel pip-installed.
+    // Must happen before any pyo3 call that might trigger
+    // auto-initialize (the script-engine's first run_script).
+    pyo3::append_to_inittab!(sadda);
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1024.0, 720.0])
@@ -51,6 +64,15 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(SaddaApp::new(cc)))),
     )
+}
+
+// `append_to_inittab!` registers under the wrapper function's name,
+// which becomes the Python module name. The actual module body lives
+// in `sadda_app.rs`; this wrapper exists purely so the registered
+// name is `sadda` (and not `sadda_app`).
+#[pymodule]
+fn sadda(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    sadda_app::sadda(m)
 }
 
 /// Top-level app state. `ProjectLoaded` carries the engine handle plus
@@ -103,6 +125,15 @@ struct SaddaApp {
     /// E8: error from the most recent script run (e.g. Python
     /// syntax error). Rendered in the output pane alongside stderr.
     script_error: Option<String>,
+    /// E9: commands registered via `sadda.app.register_command`.
+    /// Lives for the app session. Surfaced in the Ctrl/Cmd+P
+    /// palette. Cleared on bundle change? No — commands are global
+    /// to the session, not bundle-scoped.
+    registered_commands: Vec<(String, Py<PyAny>)>,
+    /// E9: whether the command palette is currently visible.
+    command_palette_open: bool,
+    /// E9: search text in the command palette.
+    command_palette_query: String,
 }
 
 /// Mouse-driven edit-in-progress for tier lanes. Idle between drags;
@@ -206,6 +237,9 @@ impl SaddaApp {
             label_edit: None,
             script_output: None,
             script_error: None,
+            registered_commands: Vec::new(),
+            command_palette_open: false,
+            command_palette_query: String::new(),
         }
     }
 
@@ -1127,6 +1161,15 @@ impl eframe::App for SaddaApp {
             self.run_script_buffer();
         }
 
+        // E9: Ctrl/Cmd+P opens the command palette.
+        if ui
+            .ctx()
+            .input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::P))
+        {
+            self.command_palette_open = !self.command_palette_open;
+            self.command_palette_query.clear();
+        }
+
         // Delete / Backspace removes the selected interval. Skip
         // when label editing is active — those keys need to reach
         // the TextEdit instead.
@@ -1143,6 +1186,9 @@ impl eframe::App for SaddaApp {
         // Inline label-edit modal. Rendered before the menu so it
         // overlays everything; commit / cancel logic lives inside.
         self.label_edit_window(ui.ctx());
+
+        // E9 command palette. Same overlay pattern.
+        self.command_palette_window(ui.ctx());
 
         egui::Panel::top("menu").show_inside(ui, |ui| self.menu_bar(ui));
 
@@ -2070,9 +2116,10 @@ impl SaddaApp {
     }
 
     /// Runs the persisted script buffer through the embedded
-    /// CPython runtime. Captures stdout / stderr into
-    /// `self.script_output`; Python exceptions land in
-    /// `self.script_error`.
+    /// CPython runtime, with the `sadda.app` snapshot installed.
+    /// Captures stdout / stderr into `self.script_output`; Python
+    /// exceptions land in `self.script_error`. Drains any commands
+    /// the script registered into `self.registered_commands`.
     fn run_script_buffer(&mut self) {
         let code = self.persisted.script_buffer.clone();
         if code.trim().is_empty() {
@@ -2080,7 +2127,12 @@ impl SaddaApp {
             self.script_error = Some("(script buffer is empty)".to_string());
             return;
         }
-        match sadda_script_engine::run_script(&code) {
+        let snapshot = self.snapshot_now();
+        let mut extras = ScriptSessionExtras::default();
+        let result = with_snapshot_active(&snapshot, &mut extras, || {
+            sadda_script_engine::run_script(&code)
+        });
+        match result {
             Ok(output) => {
                 self.script_output = Some(output);
                 self.script_error = None;
@@ -2089,6 +2141,173 @@ impl SaddaApp {
                 self.script_output = None;
                 self.script_error = Some(e.to_string());
             }
+        }
+        // Append any newly-registered commands. PyObject refcount
+        // keeps the callable alive past this scope.
+        self.registered_commands
+            .extend(std::mem::take(&mut extras.registered_commands));
+    }
+
+    /// Invokes the command at index `i` of `registered_commands`,
+    /// passing no args. Surfaces Python exceptions in the script
+    /// panel's error slot.
+    fn invoke_command(&mut self, i: usize) {
+        let Some((name, callable_ref)) = self.registered_commands.get(i) else {
+            return;
+        };
+        let name = name.clone();
+        // Py<PyAny> needs the GIL to bump its refcount; do the
+        // clone + the call inside one `attach` block so we don't
+        // pay the GIL hit twice.
+        let snapshot = self.snapshot_now();
+        let mut extras = ScriptSessionExtras::default();
+        let result = with_snapshot_active(&snapshot, &mut extras, || {
+            Python::attach(|py| {
+                let cb = callable_ref.clone_ref(py);
+                cb.call0(py)
+            })
+        });
+        match result {
+            Ok(_) => {
+                // Successful invocation — no special UI update.
+                let _ = name;
+            }
+            Err(e) => {
+                self.script_error = Some(format!("Command {name:?} raised: {e}"));
+                // Also pop the script panel open if it isn't,
+                // so the user sees the error.
+                self.persisted.script_panel_open = true;
+            }
+        }
+        // Commands invoked from the palette can themselves
+        // register more commands — drain the extras.
+        self.registered_commands
+            .extend(std::mem::take(&mut extras.registered_commands));
+    }
+
+    /// Builds an `AppSnapshot` describing the current GUI state,
+    /// used by the `sadda.app.*` PyO3 functions during a script
+    /// run / command invocation.
+    fn snapshot_now(&self) -> AppSnapshot {
+        let project_root = match &self.app_state {
+            AppState::NoProject => PathBuf::new(),
+            AppState::ProjectLoaded { root, .. } => root.clone(),
+        };
+        let bundle = self.active_envelope.as_ref().and_then(|env| {
+            let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+                return None;
+            };
+            project.bundles().ok().and_then(|all| {
+                all.into_iter()
+                    .find(|b| b.id == env.bundle_id)
+                    .map(|b| BundleInfo {
+                        id: b.id,
+                        name: b.name,
+                        sample_rate: env.sample_rate,
+                        duration_seconds: env.duration_seconds,
+                    })
+            })
+        });
+        let selection = self.selected_annotation.map(|sel| match sel {
+            AnnotationSelection::Interval {
+                tier_id,
+                annotation_id,
+            } => SelectionInfo {
+                kind: SelectionKind::Interval,
+                tier_id,
+                annotation_id,
+            },
+            AnnotationSelection::Point {
+                tier_id,
+                annotation_id,
+            } => SelectionInfo {
+                kind: SelectionKind::Point,
+                tier_id,
+                annotation_id,
+            },
+        });
+        AppSnapshot {
+            project_root,
+            bundle,
+            selection,
+            cursor_seconds: self.timeline.cursor,
+        }
+    }
+
+    /// Renders the Ctrl/Cmd+P command palette as a modal Window.
+    /// Filtering by substring on the command name; Enter or click
+    /// invokes.
+    fn command_palette_window(&mut self, ctx: &egui::Context) {
+        if !self.command_palette_open {
+            return;
+        }
+        let mut keep_open = true;
+        let mut invoke_index: Option<usize> = None;
+        egui::Window::new("Command palette")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut keep_open)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                let resp = ui.text_edit_singleline(&mut self.command_palette_query);
+                resp.request_focus();
+                ui.separator();
+                if self.registered_commands.is_empty() {
+                    ui.label(
+                        egui::RichText::new(
+                            "(no commands registered yet — call sadda.app.register_command from the script panel)",
+                        )
+                        .italics()
+                        .weak(),
+                    );
+                    return;
+                }
+                let query = self.command_palette_query.to_lowercase();
+                let mut visible: Vec<usize> = (0..self.registered_commands.len())
+                    .filter(|&i| {
+                        let name = &self.registered_commands[i].0;
+                        query.is_empty() || name.to_lowercase().contains(&query)
+                    })
+                    .collect();
+                if visible.is_empty() {
+                    ui.label(
+                        egui::RichText::new("(no matches)").italics().weak(),
+                    );
+                    return;
+                }
+                // Enter invokes the first match.
+                if resp.lost_focus()
+                    && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                {
+                    invoke_index = visible.first().copied();
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        for i in visible.drain(..) {
+                            let row = ui.selectable_label(
+                                false,
+                                &self.registered_commands[i].0,
+                            );
+                            if row.clicked() {
+                                invoke_index = Some(i);
+                            }
+                        }
+                    });
+            });
+        if let Some(i) = invoke_index {
+            self.command_palette_open = false;
+            self.command_palette_query.clear();
+            self.invoke_command(i);
+        }
+        if !keep_open {
+            self.command_palette_open = false;
+            self.command_palette_query.clear();
+        }
+        // Escape closes.
+        if self.command_palette_open && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.command_palette_open = false;
+            self.command_palette_query.clear();
         }
     }
 
