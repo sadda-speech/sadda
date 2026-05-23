@@ -37,7 +37,10 @@ fn write_silent_wav(path: &Path, sr: u32, duration_s: f32) {
 fn new_project_with_bundle(root: &Path, duration_s: f32) -> (Project, i64) {
     let _ = std::fs::remove_dir_all(root);
     let proj = Project::create(root, "recipes_test").unwrap();
-    let wav = std::env::temp_dir().join(format!("sadda_f1_{}.wav", std::process::id(),));
+    // Use a temp WAV path scoped to *this* project root rather than a
+    // shared /tmp/sadda_<pid>.wav: cargo test runs tests in parallel and
+    // they were racing on the shared filename.
+    let wav = root.with_extension("source.wav");
     write_silent_wav(&wav, 16_000, duration_s);
     let bundle_id = proj.add_bundle_with(&BundleSpec::new("b"), &wav).unwrap();
     let _ = std::fs::remove_file(&wav);
