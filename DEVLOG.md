@@ -6,6 +6,142 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-23 — Spectrogram view (B3): dB-FS scale + 70dB floor, three colormaps with toolbar toggle, cached texture, central-pane vertical split
+
+Goal: settle the third Phase 2 slice. B3 adds the spectrogram below the waveform, with the toolbar controls + colormap variants the slicing entry called for. Combined with B2 this gives the visual stack a Praat-trained user expects.
+
+### What B3 must deliver
+
+From the Phase 2 slicing entry: "Uses C1's `sadda::dsp::spectrogram`; renders via egui's `TextureHandle` + a viridis-ish colormap. Configurable hop / window via a panel-local control row." Plus the spike note: "Spectrogram render performance on a 10-minute file. Render time for a long file is the most likely 'felt' bottleneck."
+
+### Render pipeline
+
+```
+mono samples (cached from B2's bundle load)
+        │
+        ▼
+sadda::dsp::stft(samples, hann_window, hop)        ← C1 primitive
+        │
+        ▼
+sadda::dsp::spectrogram::power_spectrogram(...)    ← C1 primitive
+        │
+        ▼
+10 · log10(power)  (dB-FS, clamped to [-dynamic_range, 0])
+        │
+        ▼
+normalise to [0, 1] then index into the active colormap LUT
+        │
+        ▼
+RGBA8 buffer, written into an egui::ColorImage
+        │
+        ▼
+egui::Context::load_texture → TextureHandle
+        │
+        ▼
+plot_ui.image(...)
+```
+
+The expensive bit (STFT + colour bake) runs once per `(bundle_id, window_ms, hop_ms, colormap, dynamic_range_db)` tuple. Cached output is `(TextureHandle, n_freq_bins, n_frames)`. Pan/zoom (when C5 lands) doesn't invalidate the cache.
+
+### Layout
+
+Central panel splits vertically inside `waveform_pane`:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ Bundle #1  ·  16000 Hz  ·  4.32s                         │ ← B2 caption row
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│              [ waveform — B2 ]                           │ ~30% height
+│                                                          │
+├──────────────────────────────────────────────────────────┤
+│ Window: [25] ms   Hop: [5] ms   Colormap: [viridis ▾]    │ ← B3 toolbar
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│                                                          │
+│              [ spectrogram — B3 ]                        │ ~70% height
+│                                                          │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+
+Split implemented as an `egui::Panel::top` for the waveform + the spectrogram filling the rest of the central pane. User can drag the divider to rebalance; default proportions persist across launches via egui's own panel-state storage.
+
+### Confirmed B3 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Frequency range | **Full Nyquist** | Lossless; matches Praat's default behavior; user can read off the y-axis to see what sample rate they're working with |
+| Power scale | **dB-FS, `10·log10(power)`** | Universal spectrogram convention; gives the visible dynamic-range structure that linear power flattens |
+| Dynamic-range floor | **70 dB by default** | Praat's default; covers the speech-relevant dynamic range without lighting up noise floors |
+| Colormaps shipped | **Viridis (default), Magma, Greyscale** | Viridis: modern perceptually-uniform default. Magma: dark-mode alt. Greyscale: Praat refugees |
+| Colormap toggle | **Dropdown in the toolbar row** | One-click swap; persisted across launches via the same `PersistedState` already carrying `theme` |
+| Colormap source | **`colorous = "1"` crate** | ~50 KB pure-Rust dep that ships matplotlib-faithful viridis + magma. Avoids hand-baking + bit-rot of approximations |
+| Default window | **25 ms** | Speech-DSP convention. Configurable in the toolbar |
+| Default hop | **5 ms** | Speech-DSP convention; 80% overlap at 25 ms window |
+| Hop/window inputs | **Numeric `DragValue` widgets, ms units** | More compact than sliders; precise; allow keyboard entry |
+| Cache invalidation key | **`(bundle_id, window_ms, hop_ms, colormap, dynamic_range_db)`** | Recomputes on any of the five changing |
+| Long-recording cap | **Texture width capped at 4096 cols; longer audio averages frames into buckets** | egui's typical max texture is 8192; 4096 keeps headroom and gives roughly 1px per ~150ms at 10 minutes |
+| Y-axis labelling | **Hz, top = Nyquist** | Standard; matches Praat/librosa |
+| X-axis labelling | **seconds, shared with the waveform plot** | Sets up C5's synced-cursor work — the two plots already speak the same x-units |
+
+### State changes
+
+```rust
+struct SpectrogramConfig {
+    window_ms: f32,           // default 25.0
+    hop_ms: f32,              // default 5.0
+    colormap: ColormapKind,   // default Viridis
+    dynamic_range_db: f32,    // default 70.0
+}
+
+struct SpectrogramCache {
+    bundle_id: i64,
+    config: SpectrogramConfig,
+    texture: egui::TextureHandle,
+    duration_seconds: f64,
+    nyquist_hz: f32,
+}
+```
+
+`SpectrogramConfig` lives in `PersistedState` so reopening a project remembers the last-used DSP settings.
+
+### Pure-data extraction
+
+`crates/app/src/state.rs` already hosts the envelope downsampler; B3 adds two more pure-data helpers there for unit-testability:
+
+- `power_to_db_normalized(power: &[f32], dynamic_range_db: f32) -> Vec<f32>` — log + clamp + normalize-to-[0,1] in one pass.
+- `colormap_bake(values: &[f32], width: usize, height: usize, colormap: ColormapKind) -> Vec<u8>` — apply the colormap to a freq-major (height × width) buffer and emit row-major RGBA8 (4 × width × height bytes).
+
+Both are testable with synthetic inputs; the egui texture upload happens in main.rs.
+
+### Lossiness / what B3 deliberately doesn't ship
+
+- **Per-frame log mel** / **mel spectrogram view.** A different module on a different y-axis; not in 0.2 scope. Could become a "View → Mel" toggle later.
+- **Cepstrogram / autocorrelogram.** Same.
+- **Reassigned spectrogram** (sharper-look). Same.
+- **Pitch / formant overlay on the spectrogram.** The pitch contour overlay is a 0.3 polish item; formants land with their own slice once the visualisation vocabulary settles.
+- **Zoom / scroll / cursor.** C5.
+- **Pre-emphasis toggle in the toolbar.** Praat exposes it; we don't yet. The user can pre-emphasise externally and re-import; first-class toggle waits for a real workflow ask.
+- **Phase spectrogram.** Power only.
+
+### What this entry doesn't decide
+
+- **Whether the spectrogram inherits the waveform pane's vertical split ratio or has its own.** Settled at implementation — start with a single egui-managed top/bottom split for simplicity.
+- **Exact toolbar widget shapes.** `DragValue` for the numerics, `ComboBox` for the colormap; can refine later.
+- **Whether the cache shares an LRU across bundles.** Single-bundle cache for v1; LRU lands if real users complain about switch latency.
+
+### Sources / references
+
+- 2026-05-23 Phase 2 slicing entry (B3 row + the render-performance spike note)
+- 2026-05-23 B2 entry (which this stacks on top of; shares the waveform pane's caption row)
+- 2026-05-21 C1 entry (the STFT + power-spectrogram primitives this consumes)
+- Matplotlib viridis/magma reference: <https://matplotlib.org/stable/users/explain/colors/colormaps.html>
+- `colorous`: <https://github.com/dtolnay/colorous>
+- Praat spectrogram defaults reference: <https://www.fon.hum.uva.nl/praat/manual/Spectrogram.html>
+
+---
+
 ## 2026-05-23 — Waveform view + bundle sidebar (B2): min/max envelope, fixed-resolution cache, left-sidebar single-select
 
 Goal: settle the second Phase 2 slice. B2 brings the first real content pane — a waveform of the active bundle's audio — and the bundle-selection UI that B3 / B4 / C5 will all share.

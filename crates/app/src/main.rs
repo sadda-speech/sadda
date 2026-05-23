@@ -15,12 +15,20 @@ use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
 use sadda_engine::Project;
 
-use crate::state::{EnvelopeCache, PersistedState, ThemePref, build_envelope};
+use crate::state::{
+    ColormapKind, EnvelopeCache, PersistedState, SpectrogramConfig, ThemePref, build_envelope,
+    colormap_bake, power_to_db_normalized,
+};
 
 const APP_TITLE: &str = "sadda";
 /// Bucket count for the B2 fixed-resolution waveform envelope. C5 will
 /// replace this with per-frame re-bucketing once zoom lands.
 const ENVELOPE_BUCKETS: usize = 2000;
+/// Cap on spectrogram texture width. egui's typical max texture size
+/// is 8192; 4096 keeps headroom and gives roughly 1px per ~150 ms at
+/// 10 minutes — fine resolution for the long-recording case the B3
+/// spike note flagged. Longer audio averages frames into buckets.
+const MAX_SPECTROGRAM_WIDTH: usize = 4096;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -57,9 +65,26 @@ struct SaddaApp {
     /// Currently-selected bundle. `None` means "no bundle selected;
     /// show the central-panel placeholder." Reset on project change.
     selected_bundle_id: Option<i64>,
-    /// Cached waveform envelope for the selected bundle. Rebuilt only
-    /// when the selection changes.
+    /// Cached waveform envelope (and raw mono samples) for the
+    /// selected bundle. Rebuilt only when the selection changes.
     active_envelope: Option<EnvelopeCache>,
+    /// Cached spectrogram texture for the selected bundle + current
+    /// `SpectrogramConfig`. Rebuilt only when either changes.
+    active_spectrogram: Option<SpectrogramCache>,
+}
+
+/// Cached spectrogram render. Invalidates whenever the bundle or the
+/// DSP config changes.
+struct SpectrogramCache {
+    bundle_id: i64,
+    config: SpectrogramConfig,
+    /// GPU texture handle for the colormapped image. Egui keeps the
+    /// texture alive for the lifetime of this handle.
+    texture: egui::TextureHandle,
+    /// Echoed from the source bundle for the x-axis bounds.
+    duration_seconds: f64,
+    /// Echoed from the source bundle for the y-axis bounds.
+    nyquist_hz: f32,
 }
 
 impl SaddaApp {
@@ -74,6 +99,7 @@ impl SaddaApp {
             error: None,
             selected_bundle_id: None,
             active_envelope: None,
+            active_spectrogram: None,
         }
     }
 
@@ -132,6 +158,8 @@ impl SaddaApp {
 
     /// Loads the bundle's audio, builds the envelope cache, and sets
     /// it as the active bundle. Errors surface in the bottom banner.
+    /// Invalidates the spectrogram cache; it gets rebuilt lazily on
+    /// the next frame.
     fn select_bundle(&mut self, bundle_id: i64) {
         let AppState::ProjectLoaded { project, .. } = &self.app_state else {
             return;
@@ -150,13 +178,36 @@ impl SaddaApp {
             sample_rate: audio.sample_rate,
             duration_seconds: audio.duration_seconds(),
             envelope,
+            mono_samples: mono,
         });
         self.selected_bundle_id = Some(bundle_id);
+        self.active_spectrogram = None;
     }
 
     fn clear_bundle_selection(&mut self) {
         self.selected_bundle_id = None;
         self.active_envelope = None;
+        self.active_spectrogram = None;
+    }
+
+    /// Rebuilds the spectrogram cache if stale (i.e. cached bundle id
+    /// or config differs from the current pair). On error, sets the
+    /// error banner and leaves the previous cache (if any) in place.
+    fn rebuild_spectrogram_if_stale(&mut self, ctx: &egui::Context) {
+        let Some(env) = &self.active_envelope else {
+            return;
+        };
+        let bundle_id = env.bundle_id;
+        let cfg = self.persisted.spectrogram;
+        if let Some(sc) = &self.active_spectrogram {
+            if sc.bundle_id == bundle_id && sc.config == cfg {
+                return;
+            }
+        }
+        match build_spectrogram_texture(ctx, env, cfg) {
+            Ok(sc) => self.active_spectrogram = Some(sc),
+            Err(msg) => self.set_error(msg),
+        }
     }
 
     fn set_error(&mut self, msg: String) {
@@ -170,6 +221,73 @@ fn project_name_from_path(path: &Path) -> String {
     path.file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "untitled".into())
+}
+
+/// Runs STFT + power-spectrogram + dB-normalise + colormap on the
+/// envelope cache's mono samples and uploads the result as an egui
+/// texture. Returns a fresh [`SpectrogramCache`] or an error message
+/// suitable for the bottom banner.
+fn build_spectrogram_texture(
+    ctx: &egui::Context,
+    env: &EnvelopeCache,
+    cfg: SpectrogramConfig,
+) -> Result<SpectrogramCache, String> {
+    let sr = env.sample_rate as f32;
+    let window_samples = ((cfg.window_ms / 1000.0) * sr).round() as usize;
+    let hop_samples = ((cfg.hop_ms / 1000.0) * sr).round() as usize;
+    if window_samples < 4 || hop_samples == 0 {
+        return Err(format!(
+            "Spectrogram: window ({} ms) / hop ({} ms) are too small at {} Hz",
+            cfg.window_ms, cfg.hop_ms, sr,
+        ));
+    }
+    if env.mono_samples.len() < window_samples {
+        return Err(format!(
+            "Spectrogram: bundle too short ({} samples) for window {} ms",
+            env.mono_samples.len(),
+            cfg.window_ms,
+        ));
+    }
+
+    let window = sadda_engine::dsp::hann(window_samples);
+    let (stft_out, shape) = sadda_engine::dsp::stft(&env.mono_samples, &window, hop_samples);
+    let power = sadda_engine::dsp::power_spectrogram(&stft_out, shape);
+    let normalized = power_to_db_normalized(&power, cfg.dynamic_range_db);
+
+    // Optionally downsample the time dimension so the texture stays
+    // under MAX_SPECTROGRAM_WIDTH. The spike note in the B3 DEVLOG
+    // entry flagged 10-minute files; this is the cap that handles it.
+    let (display_width, display) = if shape.n_frames > MAX_SPECTROGRAM_WIDTH {
+        let stride = shape.n_frames.div_ceil(MAX_SPECTROGRAM_WIDTH);
+        let new_width = shape.n_frames.div_ceil(stride);
+        let mut out = vec![0.0_f32; shape.n_freq_bins * new_width];
+        for b in 0..shape.n_freq_bins {
+            for x in 0..new_width {
+                let start = x * stride;
+                let end = (start + stride).min(shape.n_frames);
+                let mut acc = 0.0_f32;
+                for f in start..end {
+                    acc += normalized[b * shape.n_frames + f];
+                }
+                out[b * new_width + x] = acc / (end - start) as f32;
+            }
+        }
+        (new_width, out)
+    } else {
+        (shape.n_frames, normalized)
+    };
+
+    let rgba = colormap_bake(&display, display_width, shape.n_freq_bins, cfg.colormap);
+    let image = egui::ColorImage::from_rgba_unmultiplied([display_width, shape.n_freq_bins], &rgba);
+    let texture = ctx.load_texture("spectrogram", image, egui::TextureOptions::LINEAR);
+
+    Ok(SpectrogramCache {
+        bundle_id: env.bundle_id,
+        config: cfg,
+        texture,
+        duration_seconds: env.duration_seconds,
+        nyquist_hz: sr / 2.0,
+    })
 }
 
 impl eframe::App for SaddaApp {
@@ -210,7 +328,7 @@ impl eframe::App for SaddaApp {
                     .default_size(200.0)
                     .min_size(120.0)
                     .show_inside(ui, |ui| self.bundle_sidebar(ui));
-                egui::CentralPanel::default().show_inside(ui, |ui| self.waveform_pane(ui));
+                egui::CentralPanel::default().show_inside(ui, |ui| self.bundle_content_pane(ui));
             }
         }
     }
@@ -389,6 +507,22 @@ impl SaddaApp {
         }
     }
 
+    /// Central content for a loaded project: caption + waveform on
+    /// top (resizable), spectrogram filling the rest.
+    fn bundle_content_pane(&mut self, ui: &mut egui::Ui) {
+        // Top sub-panel: waveform. Resizable; user can drag the
+        // divider to rebalance with the spectrogram.
+        egui::Panel::top("waveform_split")
+            .resizable(true)
+            .default_size(220.0)
+            .min_size(80.0)
+            .show_inside(ui, |ui| self.waveform_pane(ui));
+
+        // Bottom: spectrogram fills the remainder.
+        self.rebuild_spectrogram_if_stale(ui.ctx());
+        self.spectrogram_pane(ui);
+    }
+
     fn waveform_pane(&mut self, ui: &mut egui::Ui) {
         let Some(env) = &self.active_envelope else {
             ui.centered_and_justified(|ui| {
@@ -434,6 +568,104 @@ impl SaddaApp {
                         .line(Line::new("", segment).color(egui::Color32::from_rgb(80, 140, 220)));
                 }
             });
+    }
+
+    fn spectrogram_pane(&mut self, ui: &mut egui::Ui) {
+        // Toolbar row above the plot (window / hop / colormap).
+        self.spectrogram_toolbar(ui);
+
+        let Some(sc) = &self.active_spectrogram else {
+            ui.centered_and_justified(|ui| {
+                ui.label(
+                    egui::RichText::new(if self.active_envelope.is_some() {
+                        "(building spectrogram…)"
+                    } else {
+                        "Select a bundle to see its spectrogram"
+                    })
+                    .weak(),
+                );
+            });
+            return;
+        };
+
+        let duration = sc.duration_seconds;
+        let nyquist = sc.nyquist_hz as f64;
+        let centre = egui_plot::PlotPoint::new(duration / 2.0, nyquist / 2.0);
+        let size = egui::Vec2::new(duration as f32, nyquist as f32);
+        let texture_id = sc.texture.id();
+
+        Plot::new("spectrogram")
+            .show_axes([true, true])
+            .y_axis_label("Hz")
+            .x_axis_label("seconds")
+            .include_x(0.0)
+            .include_x(duration)
+            .include_y(0.0)
+            .include_y(nyquist)
+            .allow_drag(false)
+            .allow_zoom(false)
+            .allow_scroll(false)
+            .show(ui, |plot_ui| {
+                plot_ui.image(egui_plot::PlotImage::new(
+                    "spectrogram_img",
+                    texture_id,
+                    centre,
+                    size,
+                ));
+            });
+    }
+
+    fn spectrogram_toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Window:");
+            let win = ui.add(
+                egui::DragValue::new(&mut self.persisted.spectrogram.window_ms)
+                    .speed(1.0)
+                    .range(5.0..=200.0)
+                    .suffix(" ms"),
+            );
+            ui.add_space(8.0);
+            ui.label("Hop:");
+            let hop = ui.add(
+                egui::DragValue::new(&mut self.persisted.spectrogram.hop_ms)
+                    .speed(0.5)
+                    .range(1.0..=100.0)
+                    .suffix(" ms"),
+            );
+            ui.add_space(8.0);
+            ui.label("Range:");
+            let dr = ui.add(
+                egui::DragValue::new(&mut self.persisted.spectrogram.dynamic_range_db)
+                    .speed(1.0)
+                    .range(20.0..=120.0)
+                    .suffix(" dB"),
+            );
+            ui.add_space(8.0);
+            let mut cmap = self.persisted.spectrogram.colormap;
+            let combo = egui::ComboBox::from_label("Colormap")
+                .selected_text(cmap.label())
+                .show_ui(ui, |ui| {
+                    let mut changed = false;
+                    for kind in [
+                        ColormapKind::Viridis,
+                        ColormapKind::Magma,
+                        ColormapKind::Greyscale,
+                    ] {
+                        if ui.selectable_value(&mut cmap, kind, kind.label()).clicked() {
+                            changed = true;
+                        }
+                    }
+                    changed
+                });
+            self.persisted.spectrogram.colormap = cmap;
+
+            // The cache invalidates by `==` comparison, so any
+            // change to the DragValues / ComboBox above is picked
+            // up on the next frame's `rebuild_spectrogram_if_stale`.
+            // The bindings here exist mostly to silence unused
+            // warnings on the response objects.
+            let _ = (win, hop, dr, combo);
+        });
     }
 
     fn welcome(&mut self, ui: &mut egui::Ui) {
