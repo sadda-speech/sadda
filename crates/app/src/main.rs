@@ -96,6 +96,13 @@ struct SaddaApp {
     /// In-progress inline label edit triggered by double-clicking an
     /// interval. Commits on Enter / focus-loss; cancels on Escape.
     label_edit: Option<LabelEdit>,
+    /// E8: most recent `script-engine` output (stdout + stderr).
+    /// `None` until the user clicks Run for the first time this
+    /// session. Not persisted across launches — regenerable cheaply.
+    script_output: Option<sadda_script_engine::ScriptOutput>,
+    /// E8: error from the most recent script run (e.g. Python
+    /// syntax error). Rendered in the output pane alongside stderr.
+    script_error: Option<String>,
 }
 
 /// Mouse-driven edit-in-progress for tier lanes. Idle between drags;
@@ -197,6 +204,8 @@ impl SaddaApp {
             playback: None,
             draft_edit: DraftEdit::None,
             label_edit: None,
+            script_output: None,
+            script_error: None,
         }
     }
 
@@ -1107,6 +1116,17 @@ impl eframe::App for SaddaApp {
             self.toggle_playback();
         }
 
+        // E8: Ctrl/Cmd+Enter runs the script buffer when the panel
+        // is open. `Modifiers::COMMAND` covers Ctrl on Linux/Windows
+        // and Cmd on macOS via egui's platform-aware handling.
+        if self.persisted.script_panel_open
+            && ui
+                .ctx()
+                .input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter))
+        {
+            self.run_script_buffer();
+        }
+
         // Delete / Backspace removes the selected interval. Skip
         // when label editing is active — those keys need to reach
         // the TextEdit instead.
@@ -1142,6 +1162,19 @@ impl eframe::App for SaddaApp {
                     }
                 });
             });
+        }
+
+        // E8 script panel — bottom panel above status/error, shown
+        // only when toggled on via View → Show Script Panel AND a
+        // project is loaded (no point running scripts otherwise).
+        if self.persisted.script_panel_open
+            && matches!(self.app_state, AppState::ProjectLoaded { .. })
+        {
+            egui::Panel::bottom("script_panel")
+                .resizable(true)
+                .default_size(220.0)
+                .min_size(120.0)
+                .show_inside(ui, |ui| self.script_panel(ui));
         }
 
         match &self.app_state {
@@ -1266,6 +1299,9 @@ impl SaddaApp {
             ui.radio_value(&mut self.persisted.theme, ThemePref::System, "System");
             ui.radio_value(&mut self.persisted.theme, ThemePref::Light, "Light");
             ui.radio_value(&mut self.persisted.theme, ThemePref::Dark, "Dark");
+            ui.separator();
+            // E8: script-panel toggle. Persists across launches.
+            ui.checkbox(&mut self.persisted.script_panel_open, "Show Script Panel");
         });
     }
 
@@ -1953,6 +1989,106 @@ impl SaddaApp {
                 self.timeline.set_cursor(t);
             }
             Err(e) => self.set_error(format!("Failed to add point: {e}")),
+        }
+    }
+
+    /// E8 script panel: top = code editor, bottom = output. Run via
+    /// the button OR Ctrl/Cmd+Enter (handled at the app level so
+    /// the shortcut works whether or not the editor has focus).
+    fn script_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Script").strong());
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Ctrl/Cmd+Enter to run").weak().small());
+            let mut run_clicked = false;
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Run").clicked() {
+                    run_clicked = true;
+                }
+            });
+            if run_clicked {
+                self.run_script_buffer();
+            }
+        });
+        ui.separator();
+
+        // Top half: code editor. Bottom half: output. The split is
+        // not user-resizable inside the panel for v1; the outer
+        // Panel::bottom is resizable.
+        let total_h = ui.available_height();
+        let code_h = (total_h * 0.6).max(60.0);
+        let output_h = (total_h - code_h - 4.0).max(40.0);
+
+        egui::ScrollArea::vertical()
+            .id_salt("script_code_scroll")
+            .max_height(code_h)
+            .show(ui, |ui| {
+                ui.add_sized(
+                    [ui.available_width(), code_h],
+                    egui::TextEdit::multiline(&mut self.persisted.script_buffer)
+                        .desired_rows(8)
+                        .code_editor()
+                        .hint_text("# Python — pure stdlib only at E8.\n# `import sadda` lands in E9.\nprint('hello from sadda')\n"),
+                );
+            });
+
+        ui.separator();
+        ui.label(egui::RichText::new("Output").weak().small());
+        egui::ScrollArea::vertical()
+            .id_salt("script_output_scroll")
+            .max_height(output_h)
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                if let Some(output) = &self.script_output {
+                    if !output.stdout.is_empty() {
+                        ui.label(egui::RichText::new(&output.stdout).monospace());
+                    }
+                    if !output.stderr.is_empty() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(220, 80, 80),
+                            egui::RichText::new(&output.stderr).monospace(),
+                        );
+                    }
+                    if output.stdout.is_empty() && output.stderr.is_empty() {
+                        ui.label(egui::RichText::new("(no output)").italics().weak());
+                    }
+                }
+                if let Some(err) = &self.script_error {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 80, 80),
+                        egui::RichText::new(err).monospace(),
+                    );
+                }
+                if self.script_output.is_none() && self.script_error.is_none() {
+                    ui.label(
+                        egui::RichText::new("(no runs yet — click Run or press Ctrl/Cmd+Enter)")
+                            .italics()
+                            .weak(),
+                    );
+                }
+            });
+    }
+
+    /// Runs the persisted script buffer through the embedded
+    /// CPython runtime. Captures stdout / stderr into
+    /// `self.script_output`; Python exceptions land in
+    /// `self.script_error`.
+    fn run_script_buffer(&mut self) {
+        let code = self.persisted.script_buffer.clone();
+        if code.trim().is_empty() {
+            self.script_output = None;
+            self.script_error = Some("(script buffer is empty)".to_string());
+            return;
+        }
+        match sadda_script_engine::run_script(&code) {
+            Ok(output) => {
+                self.script_output = Some(output);
+                self.script_error = None;
+            }
+            Err(e) => {
+                self.script_output = None;
+                self.script_error = Some(e.to_string());
+            }
         }
     }
 

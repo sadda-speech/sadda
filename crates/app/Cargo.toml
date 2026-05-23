@@ -26,3 +26,6 @@ colorous = "1"
 # C5 audio playback uses cpal's *output* side (same crate version
 # the engine + python crate already pull in for E1's input path).
 cpal = "0.17"
+# E8 embedded-CPython script panel. Reuses the Phase-0 crate
+# that already validated the embed end-to-end.
+sadda-script-engine = { path = "../script-engine" }

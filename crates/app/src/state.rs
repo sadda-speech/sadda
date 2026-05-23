@@ -37,6 +37,14 @@ pub struct PersistedState {
     /// Last-used spectrogram window / hop / colormap / dB-range.
     #[serde(default)]
     pub spectrogram: SpectrogramConfig,
+    /// E8: whether the embedded-CPython script panel is currently
+    /// shown at the bottom of the app.
+    #[serde(default)]
+    pub script_panel_open: bool,
+    /// E8: persisted script-editor buffer. Survives relaunches so
+    /// users don't lose typed scripts.
+    #[serde(default)]
+    pub script_buffer: String,
 }
 
 impl PersistedState {
