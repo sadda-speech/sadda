@@ -28,6 +28,10 @@ use crate::error::{EngineError, Result};
 pub struct Project {
     root: PathBuf,
     conn: Connection,
+    /// Currently-active F1 recipe-run id, if any. Single-threaded
+    /// interior-mutable cell — `Project` is single-threaded by design
+    /// (the embedded `rusqlite::Connection` isn't `Sync`).
+    recipe_run_id: std::cell::Cell<Option<i64>>,
 }
 
 /// Metadata for one recording inside a [`Project`].
@@ -430,6 +434,57 @@ pub struct ReferenceSpec {
     pub extra: Option<String>,
 }
 
+/// A row of the `recipe_run` table (F1). Persistent record of a
+/// recipe block: name, parameters, and the audit timestamps.
+#[derive(Debug, Clone)]
+pub struct RecipeRun {
+    /// Recipe id (primary key).
+    pub id: i64,
+    /// Human-readable name (UNIQUE per project).
+    pub name: String,
+    /// Sadda version recorded at `start_recipe` time.
+    pub sadda_version: String,
+    /// Opaque JSON parameters supplied by the caller. `None` if absent.
+    pub parameters: Option<String>,
+    /// ISO 8601 UTC timestamp set at insert time.
+    pub started_at: String,
+    /// ISO 8601 UTC timestamp set by `end_recipe`. `None` if the
+    /// recipe never completed cleanly (process crash / panic).
+    pub completed_at: Option<String>,
+    /// `'in_progress'` | `'ok'` | `'error'`.
+    pub status: String,
+    /// On `status = 'error'`, the exception text. `None` otherwise.
+    pub error_message: Option<String>,
+}
+
+/// A row of the `processing_run` table — the audit shape every
+/// engine-side mutation that produces tiers / signals / bundles
+/// emits. The script generator walks these for a recipe to emit the
+/// captured calls.
+#[derive(Debug, Clone)]
+pub struct ProcessingRunRow {
+    /// Processing-run id (primary key).
+    pub id: i64,
+    /// Bundle the run targeted.
+    pub bundle_id: i64,
+    /// `'dsp_algorithm'` | `'ml_model'` | `'clinical_measure'` | `'plugin'` | `'live_recording'`.
+    pub kind: String,
+    /// Reverse-DNS identifier of the processor (e.g. `sadda.io.eaf.import`).
+    pub processor_id: String,
+    /// Sadda version at run time.
+    pub processor_version: String,
+    /// JSON parameters; processor-specific shape.
+    pub parameters: Option<String>,
+    /// JSON-encoded array of new tier ids.
+    pub output_tier_ids: Option<String>,
+    /// ISO 8601 UTC start.
+    pub started_at: String,
+    /// ISO 8601 UTC finish.
+    pub finished_at: Option<String>,
+    /// `'ok'` | `'error'` | `'partial'`.
+    pub status: String,
+}
+
 impl Project {
     /// Creates a new project at `path`. The path must not exist yet. Lays
     /// down the directory tree, opens a fresh `corpus.db`, runs the full
@@ -458,7 +513,11 @@ impl Project {
         );
         std::fs::write(root.join("project.toml"), toml)?;
 
-        Ok(Project { root, conn })
+        Ok(Project {
+            root,
+            conn,
+            recipe_run_id: std::cell::Cell::new(None),
+        })
     }
 
     /// Opens an existing project at `path`. Applies any pending migrations
@@ -489,7 +548,11 @@ impl Project {
             migrations::run(&mut conn)?;
         }
 
-        Ok(Project { root, conn })
+        Ok(Project {
+            root,
+            conn,
+            recipe_run_id: std::cell::Cell::new(None),
+        })
     }
 
     /// Returns the project's filesystem root directory.
@@ -1347,10 +1410,16 @@ impl Project {
         self.conn.execute(
             "INSERT INTO processing_run \
                 (bundle_id, kind, processor_id, processor_version, \
-                 parameters, output_tier_ids, finished_at, status) \
+                 parameters, output_tier_ids, finished_at, status, recipe_run_id) \
              VALUES (?1, 'dsp_algorithm', 'sadda.io.textgrid.import', ?2, ?3, ?4, \
-                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'ok')",
-            rusqlite::params![bundle_id, crate::version(), params, output_tier_ids,],
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'ok', ?5)",
+            rusqlite::params![
+                bundle_id,
+                crate::version(),
+                params,
+                output_tier_ids,
+                self.recipe_run_id.get(),
+            ],
         )?;
         Ok(new_tier_ids)
     }
@@ -1665,12 +1734,155 @@ impl Project {
         self.conn.execute(
             "INSERT INTO processing_run \
                 (bundle_id, kind, processor_id, processor_version, \
-                 parameters, output_tier_ids, finished_at, status) \
+                 parameters, output_tier_ids, finished_at, status, recipe_run_id) \
              VALUES (?1, 'dsp_algorithm', 'sadda.io.eaf.import', ?2, ?3, ?4, \
-                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'ok')",
-            rusqlite::params![bundle_id, crate::version(), params, output_tier_ids,],
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'ok', ?5)",
+            rusqlite::params![
+                bundle_id,
+                crate::version(),
+                params,
+                output_tier_ids,
+                self.recipe_run_id.get(),
+            ],
         )?;
         Ok(new_tier_ids)
+    }
+
+    /// Returns the currently-active F1 recipe run id, if any.
+    ///
+    /// Set by [`Self::start_recipe`] and cleared by [`Self::end_recipe`].
+    /// Used by the existing `processing_run` writers (`import_textgrid`,
+    /// `import_eaf`, `commit_recording`) to populate
+    /// `processing_run.recipe_run_id` whenever they INSERT.
+    pub fn current_recipe_id(&self) -> Option<i64> {
+        self.recipe_run_id.get()
+    }
+
+    /// Creates a new `recipe_run` row with `name` and `parameters` (an
+    /// opaque JSON string the caller supplies) and sets it as this
+    /// project's active recipe. Returns the new recipe id.
+    ///
+    /// Refuses to start a second recipe while another is already
+    /// active (nesting is out of scope for v1). The `name` must be
+    /// unique within the project — UNIQUE constraint on `recipe_run.name`.
+    pub fn start_recipe(&self, name: &str, parameters_json: Option<&str>) -> Result<i64> {
+        if self.recipe_run_id.get().is_some() {
+            return Err(EngineError::Corpus(
+                "start_recipe: another recipe is already active for this project".into(),
+            ));
+        }
+        let id: i64 = self.conn.query_row(
+            "INSERT INTO recipe_run (name, sadda_version, parameters, status) \
+             VALUES (?1, ?2, ?3, 'in_progress') RETURNING id",
+            rusqlite::params![name, crate::version(), parameters_json],
+            |row| row.get(0),
+        )?;
+        self.recipe_run_id.set(Some(id));
+        Ok(id)
+    }
+
+    /// Closes the active recipe: marks the row `'ok'` or `'error'` and
+    /// stamps `completed_at`. Clears the project's active recipe id.
+    /// Returns silently if the id doesn't match the active one
+    /// (defensive: a panicking `__exit__` may double-call this).
+    pub fn end_recipe(
+        &self,
+        recipe_run_id: i64,
+        status: &str,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        // Defensive: only clear the cell if we own the active recipe.
+        if self.recipe_run_id.get() == Some(recipe_run_id) {
+            self.recipe_run_id.set(None);
+        }
+        self.conn.execute(
+            "UPDATE recipe_run \
+                SET status = ?2, \
+                    completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), \
+                    error_message = ?3 \
+              WHERE id = ?1",
+            rusqlite::params![recipe_run_id, status, error_message],
+        )?;
+        Ok(())
+    }
+
+    /// Lists recipes in id order. Each row carries the metadata needed
+    /// by the script generator (name, parameters, status).
+    pub fn recipes(&self) -> Result<Vec<RecipeRun>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, sadda_version, parameters, started_at, completed_at, \
+                    status, error_message \
+             FROM recipe_run ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(RecipeRun {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    sadda_version: row.get(2)?,
+                    parameters: row.get(3)?,
+                    started_at: row.get(4)?,
+                    completed_at: row.get(5)?,
+                    status: row.get(6)?,
+                    error_message: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Fetches a single recipe by name. Errors if not found.
+    pub fn recipe_by_name(&self, name: &str) -> Result<RecipeRun> {
+        let r = self.conn.query_row(
+            "SELECT id, name, sadda_version, parameters, started_at, completed_at, \
+                    status, error_message \
+             FROM recipe_run WHERE name = ?1",
+            [name],
+            |row| {
+                Ok(RecipeRun {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    sadda_version: row.get(2)?,
+                    parameters: row.get(3)?,
+                    started_at: row.get(4)?,
+                    completed_at: row.get(5)?,
+                    status: row.get(6)?,
+                    error_message: row.get(7)?,
+                })
+            },
+        )?;
+        Ok(r)
+    }
+
+    /// Returns the `processing_run` rows linked to a recipe, ordered
+    /// by `id` (i.e., insertion order). The script generator walks
+    /// this list to emit the captured calls.
+    pub fn processing_runs_for_recipe(
+        &self,
+        recipe_run_id: i64,
+    ) -> Result<Vec<ProcessingRunRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, bundle_id, kind, processor_id, processor_version, \
+                    parameters, output_tier_ids, started_at, finished_at, status \
+             FROM processing_run WHERE recipe_run_id = ?1 ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([recipe_run_id], |row| {
+                Ok(ProcessingRunRow {
+                    id: row.get(0)?,
+                    bundle_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    processor_id: row.get(3)?,
+                    processor_version: row.get(4)?,
+                    parameters: row.get(5)?,
+                    output_tier_ids: row.get(6)?,
+                    started_at: row.get(7)?,
+                    finished_at: row.get(8)?,
+                    status: row.get(9)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Atomically commits a stopped [`crate::live::StoppedSession`] into the
@@ -1746,10 +1958,15 @@ impl Project {
             self.conn.execute(
                 "INSERT INTO processing_run \
                     (bundle_id, kind, processor_id, processor_version, \
-                     parameters, finished_at, status) \
+                     parameters, finished_at, status, recipe_run_id) \
                  VALUES (?1, 'live_recording', 'sadda.live', ?2, ?3, \
-                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'ok')",
-                rusqlite::params![bundle_id, crate::version(), params_json],
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'ok', ?4)",
+                rusqlite::params![
+                    bundle_id,
+                    crate::version(),
+                    params_json,
+                    self.recipe_run_id.get(),
+                ],
             )?;
             Ok(bundle_id)
         })();

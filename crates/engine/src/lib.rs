@@ -14,9 +14,9 @@ pub mod storage;
 
 pub use audio::Audio;
 pub use corpus::{
-    Bundle, BundleSpec, DerivedSignal, Interval, IntervalSpec, Point, PointSpec, Project,
-    Reference, ReferenceSpec, Session, SessionSpec, Speaker, SpeakerSpec, Tier, TierRows, TierSpec,
-    TierType,
+    Bundle, BundleSpec, DerivedSignal, Interval, IntervalSpec, Point, PointSpec,
+    ProcessingRunRow, Project, RecipeRun, Reference, ReferenceSpec, Session, SessionSpec,
+    Speaker, SpeakerSpec, Tier, TierRows, TierSpec, TierType,
 };
 pub use error::{EngineError, Result};
 pub use live::{
