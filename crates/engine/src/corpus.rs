@@ -1619,8 +1619,7 @@ impl Project {
 
         // tier_id_str → row id (for resolving PARENT_REF when inserting
         // child tiers).
-        let mut id_map: std::collections::HashMap<String, i64> =
-            std::collections::HashMap::new();
+        let mut id_map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         let mut new_tier_ids: Vec<i64> = Vec::with_capacity(eaf.tiers.len());
 
         for idx in order {
@@ -1718,11 +1717,7 @@ impl Project {
         }
 
         let display = path.display().to_string();
-        let params = format!(
-            "{{\"path\":{:?},\"n_tiers\":{}}}",
-            display,
-            eaf.tiers.len()
-        );
+        let params = format!("{{\"path\":{:?},\"n_tiers\":{}}}", display, eaf.tiers.len());
         let output_tier_ids = format!(
             "[{}]",
             new_tier_ids
@@ -1857,10 +1852,7 @@ impl Project {
     /// Returns the `processing_run` rows linked to a recipe, ordered
     /// by `id` (i.e., insertion order). The script generator walks
     /// this list to emit the captured calls.
-    pub fn processing_runs_for_recipe(
-        &self,
-        recipe_run_id: i64,
-    ) -> Result<Vec<ProcessingRunRow>> {
+    pub fn processing_runs_for_recipe(&self, recipe_run_id: i64) -> Result<Vec<ProcessingRunRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, bundle_id, kind, processor_id, processor_version, \
                     parameters, output_tier_ids, started_at, finished_at, status \
@@ -1924,9 +1916,9 @@ impl Project {
         let audio = Audio::from_wav_path(&src_wav)?;
 
         let sanitized = sanitize_filename(name);
-        let dest_rel = Path::new("signals").join("original").join(format!(
-            "{sanitized}.wav"
-        ));
+        let dest_rel = Path::new("signals")
+            .join("original")
+            .join(format!("{sanitized}.wav"));
         let dest_abs = self.root.join(&dest_rel);
         if dest_abs.exists() {
             return Err(EngineError::Corpus(format!(
@@ -2332,7 +2324,14 @@ fn topo_sort_eaf_tiers(tiers: &[crate::io::eaf::EafTier]) -> Result<Vec<usize>> 
     }
 
     for i in 0..tiers.len() {
-        visit(i, tiers, &index_by_id, &mut visited, &mut on_stack, &mut order)?;
+        visit(
+            i,
+            tiers,
+            &index_by_id,
+            &mut visited,
+            &mut on_stack,
+            &mut order,
+        )?;
     }
     Ok(order)
 }
@@ -2350,8 +2349,8 @@ fn parse_reference_sentinel(json: Option<&str>) -> (String, i64, Option<String>)
     // Minimal hand-rolled extractor avoiding a serde_json dependency on
     // this hot path. Looks for the literal substrings emitted by
     // `export_eaf` above.
-    let target_kind = extract_json_string(raw, "\"target_kind\":")
-        .unwrap_or_else(|| "annotation".to_string());
+    let target_kind =
+        extract_json_string(raw, "\"target_kind\":").unwrap_or_else(|| "annotation".to_string());
     let target_id = extract_json_i64(raw, "\"target_id\":").unwrap_or(0);
     let extra_rest = extract_json_object(raw, "\"extra\":");
     (target_kind, target_id, extra_rest)

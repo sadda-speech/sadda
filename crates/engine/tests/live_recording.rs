@@ -67,7 +67,10 @@ fn commit_creates_bundle_and_processing_run() {
     assert!(bundles[0].n_frames > 0);
 
     // WAV landed at signals/original/<name>.wav.
-    let wav = root.join("signals").join("original").join("practice_take_1.wav");
+    let wav = root
+        .join("signals")
+        .join("original")
+        .join("practice_take_1.wav");
     assert!(wav.exists(), "expected wav at {}", wav.display());
 
     // processing_run audited as live_recording.
@@ -121,8 +124,7 @@ fn pitch_subscriber_observes_440hz_for_440hz_sine() {
 fn discard_after_stop_leaves_no_bundle_or_processing_run() {
     let root = unique_dir("discard");
     let proj = new_project(&root);
-    let (mut session, _results) =
-        LiveSession::start(&root, LiveConfig::default()).unwrap();
+    let (mut session, _results) = LiveSession::start(&root, LiveConfig::default()).unwrap();
     session.push_samples(&sine(44_100, 440.0, 0.05, 0.5));
     thread::sleep(Duration::from_millis(60));
     let stopped = session.stop().unwrap();
@@ -140,9 +142,7 @@ fn commit_with_zero_frames_errors() {
     let (session, _results) = LiveSession::start(&root, LiveConfig::default()).unwrap();
     let stopped = session.stop().unwrap();
     // Nothing was pushed.
-    let err = proj
-        .commit_recording(stopped, "empty", "{}")
-        .unwrap_err();
+    let err = proj.commit_recording(stopped, "empty", "{}").unwrap_err();
     let msg = format!("{err}");
     assert!(
         msg.contains("frames_written = 0"),
@@ -169,9 +169,7 @@ fn commit_refuses_duplicate_destination() {
     thread::sleep(Duration::from_millis(60));
     let stopped2 = s2.stop().unwrap();
     let in_progress_dir = stopped2.in_progress_dir.clone();
-    let err = proj
-        .commit_recording(stopped2, "take", "{}")
-        .unwrap_err();
+    let err = proj.commit_recording(stopped2, "take", "{}").unwrap_err();
     assert!(format!("{err}").contains("destination already exists"));
     // .in_progress still has the WAV (we didn't even attempt the rename).
     assert!(in_progress_dir.join("audio.wav").exists());

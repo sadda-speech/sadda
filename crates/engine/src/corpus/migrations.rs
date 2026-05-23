@@ -19,9 +19,7 @@ const V2_SQL: &str = include_str!("../../migrations/V2__schema_migrations_proven
 const V3_SQL: &str = include_str!("../../migrations/V3__entity_schema.sql");
 const V4_SQL: &str = include_str!("../../migrations/V4__sparse_annotations.sql");
 const V5_SQL: &str = include_str!("../../migrations/V5__derived_signal.sql");
-const V6_SQL: &str = include_str!(
-    "../../migrations/V6__processing_run_kind_live_recording.sql"
-);
+const V6_SQL: &str = include_str!("../../migrations/V6__processing_run_kind_live_recording.sql");
 const V7_SQL: &str = include_str!("../../migrations/V7__recipe_run.sql");
 
 /// One forward-only migration step.

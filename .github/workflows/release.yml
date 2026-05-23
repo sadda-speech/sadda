@@ -36,13 +36,13 @@ jobs:
             cibw_archs: AMD64
             cibw_platform: windows
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -73,7 +73,7 @@ jobs:
           CIBW_TEST_COMMAND: 'python -c "import sadda; assert sadda.version().startswith(''0.1''), sadda.version()"'
 
       - name: Upload wheel artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: wheels-${{ matrix.cibw_platform }}
           path: ./wheelhouse/*.whl
@@ -82,10 +82,10 @@ jobs:
     name: build sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -96,7 +96,7 @@ jobs:
         run: maturin sdist --out dist
 
       - name: Upload sdist artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -115,7 +115,7 @@ jobs:
       id-token: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: dist-staging
 
