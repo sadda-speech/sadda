@@ -6,6 +6,134 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-23 — Embedded CPython script panel (E8): bottom panel reuses Phase-0 script-engine, code persists, output doesn't
+
+Goal: settle the eighth Phase 2 slice. E8 lights up the script-panel UI — the visible half of the embedded-CPython story. The interpreter itself was validated in Phase 0's `crates/script-engine`; E8 just wires it to a panel.
+
+### What E8 must deliver
+
+From the Phase 2 slicing entry: "Reuse Phase 0's `crates/script-engine` for the embed. Egui text editor + Run button + output pane. Scripts can `import sadda` and get the active project handle via `sadda.app.active_project`."
+
+E8 ships the panel + the runner; **`import sadda` and `sadda.app` defer to E9**. The two slices are split because E9 needs to settle a real packaging question (how the embedded interpreter finds the sadda module) that's bigger than the UI work E8 represents.
+
+### Reused infrastructure
+
+`crates/script-engine` from Phase 0 already provides:
+
+```rust
+pub fn run_script(code: &str) -> PyResult<ScriptOutput>;
+pub struct ScriptOutput { pub stdout: String, pub stderr: String }
+```
+
+Each call uses a fresh globals dict; state doesn't persist between runs. `auto-initialize` brings the interpreter up on first call.
+
+### Panel layout
+
+New bottom panel between the tier strip and the status bar, toggleable via **View → Show Script Panel**:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ menu                                                     │
+├───────────┬──────────────────────────────────────────────┤
+│ sidebar   │ waveform                                     │
+│           │ ─ spectrogram toolbar ─                      │
+│ bundles   │ spectrogram                                  │
+│           │ ─ tier strip ─                               │
+│           ├──────────────────────────────────────────────┤
+│           │ ▸ Script                          [ Run ]    │
+│           │                                              │
+│           │   import math                                │
+│           │   print("hello", math.pi)                    │
+│           │                                              │
+│           │ ─ output ─                                   │
+│           │   hello 3.141592653589793                    │
+│           ├──────────────────────────────────────────────┤
+│           │ Project: vowels  ·  /home/alice/vowels       │
+└───────────┴──────────────────────────────────────────────┘
+```
+
+The panel itself splits into top (code editor — multi-line `TextEdit`) and bottom (output — read-only `TextEdit`). Resizable divider between. Defaults: 60/40 (code/output), ~200px tall total.
+
+### Persistence
+
+| What | Persisted? | Where |
+|---|---|---|
+| Panel open/closed | **Yes** | `PersistedState.script_panel_open` |
+| Script source code | **Yes** | `PersistedState.script_buffer` |
+| Most recent output | **No** | In-memory only on `SaddaApp` |
+| Cursor position / selection inside the editor | **No** | egui's per-frame state |
+| Editor / output split ratio | **Implicit** via egui's `Panel::bottom` resize state | Free via the framework |
+
+Persisting the script content matters — users will type non-trivial scripts and re-launch the app; losing them on relaunch is hostile. Persisting output is wasteful (regenerable in <100 ms by clicking Run) and risks bloating the storage blob with stdin dumps over time.
+
+### Run model
+
+- **Run button** (top-right of the script panel header) and **Ctrl/Cmd+Enter** keyboard shortcut both invoke `run_script(self.script_buffer)`.
+- Errors from the interpreter (`PyErr`) surface in the output pane formatted as `stderr` would: red colour, no special panel.
+- Execution is **blocking** — the GUI freezes for the duration of the script. That's a v1 simplification; long-running scripts are user responsibility. Real-time progress + cancellation is a 0.3 polish item.
+
+### What scripts can't do at E8 (defers to E9)
+
+- **`import sadda`** — the embedded interpreter's `sys.path` doesn't necessarily contain the sadda module (it depends on how the binary was launched; pyo3's auto-initialize uses the same Python the script-engine crate compiled against, which may or may not have `sadda` installed). E9 adds the wiring + a fallback to inject `sadda` into the namespace.
+- **`sadda.app.current_selection / active_bundle / register_command`** — entire `sadda.app` namespace lands in E9.
+- **Calling Rust-side state directly** (e.g., reading the current `timeline.cursor`) — same; E9 owns that bridge.
+
+Pure-Python scripts work at E8: arithmetic, stdlib calls, `print` / `import math` / `import json`, etc. Enough to verify the embed is live and to play with the interpreter.
+
+### Confirmed E8 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Panel placement | **Bottom panel, between tier strip and status bar** | Doesn't crowd the editor; resizable; toggleable from View |
+| Toggle | **View → Show Script Panel** | Discoverable; standard menu placement |
+| Default state | **Closed** | Avoids surprising new users; egui storage preserves the previous session's choice |
+| Inner layout | **Top: editor; bottom: output. Resizable divider** | Matches most IDE script consoles |
+| Code persistence | **Yes (in `PersistedState`)** | Losing typed scripts on relaunch is hostile |
+| Output persistence | **No** | Cheap to regenerate; persisting risks unbounded growth |
+| Run keybindings | **Button + Ctrl/Cmd+Enter** | Universal IDE convention for "run buffer" |
+| Execution model | **Blocking; GUI freezes during run** | v1 simplification; cancellation is polish |
+| `import sadda` access | **Deferred to E9** | Needs packaging spike + the `sadda.app` namespace; both are E9's job |
+| Output format | **Plain text; stderr in red** | Matches the existing error banner colour |
+| Script size cap | **None** | Egui handles multi-KB strings fine; users who want sanity will write to a file and `exec(open(...).read())` |
+
+### State changes on `SaddaApp`
+
+- **New `PersistedState` fields**: `script_panel_open: bool`, `script_buffer: String`.
+- **New in-memory fields**: `script_output: Option<ScriptOutput>` (last-run result; `None` if the user hasn't pressed Run since launch).
+
+### Layout
+
+- `crates/app/Cargo.toml` — adds `sadda-script-engine = { path = "../script-engine" }`.
+- `crates/app/src/state.rs` — `PersistedState` gets `script_panel_open` + `script_buffer` (both `#[serde(default)]`).
+- `crates/app/src/main.rs` — `view_menu` gets a `Show Script Panel` checkbox; new `script_panel` method renders the bottom panel; `Ctrl/Cmd+Enter` keyboard handler when the panel is open.
+
+### Lossiness / what E8 deliberately doesn't ship
+
+- **`import sadda` + `sadda.app` namespace.** E9.
+- **Async / cancellable execution.** Polish slice. The GUI freezes during long runs in v1.
+- **Multiple script tabs / sessions.** Single buffer.
+- **Syntax highlighting.** Plain `TextEdit`; a syntax-highlighter widget can layer in via `egui_extras` or a custom layouter; polish.
+- **File open / save** for scripts. v1 users `Ctrl+A → copy → paste into their editor`. Sadda's broader recipe system (F1) is the persistent-script story.
+- **Script history / "Run previous" navigation.** Not in scope.
+- **Output buffer limit.** v1 stores whatever the script printed; very chatty scripts can fill memory. Cap can layer in if a real complaint surfaces.
+- **REPL semantics** (state persists between runs). Each run starts fresh per `script-engine`'s contract.
+- **Locale / encoding controls** for `sys.stdout`. UTF-8 everywhere; no per-script override.
+
+### What this entry doesn't decide
+
+- **Whether the script panel should also appear in the welcome screen state (no project loaded).** Probably no — there's nothing useful to do without a project. Settled in implementation; greys out when no project.
+- **Visual prominence of the Run button.** Default-styled for v1; can promote to coloured button later.
+- **Whether Ctrl+Enter or Cmd+Enter on macOS specifically.** Egui's modifier handling is platform-aware; using `Modifiers::COMMAND` covers both.
+
+### Sources / references
+
+- 2026-05-23 Phase 2 slicing entry (E8 row)
+- 2026-05-23 A1 entry (`PersistedState` shape this slice extends)
+- Phase 0 `crates/script-engine/README.md` (the reuse target)
+- 2026-05-18 Python API surface entry (`sadda.app` design — settled in E9)
+
+---
+
 ## 2026-05-23 — Point-tier editing (D7): click-to-add overrides cursor positioning, drag-to-move, shared label modal
 
 Goal: settle the seventh Phase 2 slice. D7 brings the tier strip's point lanes to feature-parity with D6's interval lanes: add, move, edit-label, delete. Lighter than D6 (points are zero-width events; no boundary-drag) but with one design twist where it bumps into B4's click-to-position semantics.
