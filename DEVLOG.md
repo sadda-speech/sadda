@@ -6,6 +6,134 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-23 — Point-tier editing (D7): click-to-add overrides cursor positioning, drag-to-move, shared label modal
+
+Goal: settle the seventh Phase 2 slice. D7 brings the tier strip's point lanes to feature-parity with D6's interval lanes: add, move, edit-label, delete. Lighter than D6 (points are zero-width events; no boundary-drag) but with one design twist where it bumps into B4's click-to-position semantics.
+
+### What D7 must deliver
+
+From the Phase 2 slicing entry: "Click to add a point; drag to move; delete to remove. Same engine-surface extension pattern (`update_point / delete_point`)."
+
+### Engine extension
+
+Surface-symmetric with D6's interval methods:
+
+```rust
+impl Project {
+    pub fn update_point(&self, id: i64, spec: &PointSpec) -> Result<()>;
+    pub fn delete_point(&self, id: i64) -> Result<()>;
+}
+```
+
+Same conventions:
+
+- `update_point` replaces `(time_seconds, label, extra, parent_annotation_id)`. Rejects `tier_id` changes. Re-validates cardinality.
+- `delete_point` is idempotent — no error on a missing id.
+- Both fire the V3 audit triggers automatically.
+
+### The click-to-add vs. click-to-position conflict
+
+B4 shipped click-on-empty-lane → position cursor + deselect. D7's "click to add a point" would collide with that *if applied uniformly*. Resolution: **point lanes override**. Two disjoint behaviours by tier type:
+
+| Click target | Interval lane | Point lane |
+|---|---|---|
+| Empty space | Position cursor + deselect (B4 / C5) | **Add new point at click time (D7)** |
+| Existing annotation body | Select + position cursor at start | Select + position cursor at point time |
+| Within boundary hit zone | Start drag-resize (D6) | n/a — points are zero-width |
+| Drag-and-release on annotation | Drag boundary → resize (D6) | **Drag point → move (D7)** |
+
+This matches Praat — `TextGrid` editor adds a point on PointTier click. Users who want the cursor moved in a point lane can click an existing point (which moves cursor to that point's time per C5).
+
+### Drag-to-move state
+
+A new `DraftEdit` variant:
+
+```rust
+enum DraftEdit {
+    // ... existing variants
+    MovingPoint {
+        tier_id: i64,
+        annotation_id: i64,
+        original_time: f64,
+        current_time: f64,
+    },
+}
+```
+
+Mouse-down within ~6px of a point's tick → start `MovingPoint`. Drag updates `current_time`; the rendered tick follows the pointer. Mouse-up commits via `update_point` (or drops the draft if the time hasn't actually changed).
+
+### LabelEdit refactor
+
+D6's `LabelEdit` stored `base: sadda_engine::Interval` — couldn't fit a point's data. D7 lifts it to a polymorphic struct that re-fetches the base row at commit time:
+
+```rust
+struct LabelEdit {
+    tier_id: i64,
+    annotation_id: i64,
+    kind: LabelEditKind,    // Interval | Point
+    text: String,
+    just_started: bool,
+}
+```
+
+The modal Window UI is unchanged (TextEdit + Save / Cancel + Enter / Escape). Commit-time logic branches on `kind` to call `update_interval` or `update_point` with the re-fetched base row's other fields preserved.
+
+### Delete key
+
+D6's `delete_selected_annotation` already had a `match self.selected_annotation` shape; D7 fills in the `AnnotationSelection::Point` arm to call `delete_point`. No new keybinding.
+
+### Confirmed D7 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Engine update API | **`update_point(id, &PointSpec)`, replace-all** | Surface-symmetric with `update_interval`; same audit-trigger free-lunch |
+| Engine delete API | **`delete_point(id)`, idempotent** | Matches `delete_interval`; user mental model |
+| Click conflict resolution | **Point lanes override empty-click = add; cursor positioning still happens on click-on-existing-point** | Matches Praat; the "I clicked on a point lane to do something" interpretation is unambiguously "add a point" |
+| Point hit zone for drag | **6 pixels** | Same as D6 boundary; same rationale |
+| Minimum drag-to-move | **None — any drag commits** | Distinct from drag-to-create (which has a 5ms floor); moving by ε is still a deliberate "I touched it" action |
+| No-op move detection | **If `\|current - original\| < 1ms`, drop the draft silently** | Prevents writing an audit row for a noise-level mouse jitter |
+| Label edit | **Reuse D6's modal Window** | Already proven; inline overlay is still a polish item |
+| Delete key | **Same Delete/Backspace handler from D6, with the Point arm filled in** | Single keybinding for both tier types |
+| Audit log | **Free via V3 triggers** | Same as D6 |
+
+### State changes
+
+- `DraftEdit::MovingPoint` variant added.
+- `LabelEdit` refactored: drops `base: Interval`; adds `kind: LabelEditKind`.
+- `delete_selected_annotation` extended with the `Point` arm.
+- `commit_draft_edit` extended with the `MovingPoint` arm.
+
+### Layout
+
+- `crates/engine/src/corpus.rs` — `Project::update_point` + `Project::delete_point`.
+- `crates/engine/tests/sparse_annotations.rs` — 5 new tests covering update / tier-change reject / round-trip move / idempotent delete / audit-log trail.
+- `crates/app/src/main.rs` — `DraftEdit::MovingPoint` + `LabelEdit` refactor + `render_point_lane` rewrite (boundary-style hit detection for grab; click-add for empty space; double-click label) + `commit_draft_edit` MovingPoint arm + `delete_selected_annotation` Point arm.
+
+### Lossiness / what D7 deliberately doesn't ship
+
+- **Snap-to-cursor on drag-move.** Polish slice; same reasoning as D6.
+- **Insert-at-cursor keyboard shortcut.** A "press P to add a point at the cursor" binding could ship later; mouse is enough at v1.
+- **Multi-point select + bulk delete.** Single-select only.
+- **Drag with shift to constrain to nearest tick** (e.g., zero-crossing snap). Polish.
+- **Reference-tier editing.** Reference lanes still show their caption; their visualisation has to come first.
+- **Undo / redo.** Same answer as D6 — the audit log captures the data for a future implementation.
+
+### What this entry doesn't decide
+
+- **Whether moving a point should preserve the cursor's position relative to the point** (e.g., follow with the cursor). Settled in implementation: cursor stays where it was unless the user clicks the new location.
+- **Visual affordance for "drag me"** (cursor change on hover near a point tick). Polish.
+- **Whether duplicate points at the same time are allowed** — engine doesn't reject them; UX doesn't prevent them.
+
+### Sources / references
+
+- 2026-05-23 Phase 2 slicing entry (D7 row)
+- 2026-05-23 D6 entry (the surface-symmetric pattern this slice extends to point lanes)
+- 2026-05-23 B4 entry (the click-to-position behaviour D7 overrides in point lanes only)
+- 2026-05-23 C5 entry (cursor positioning conventions)
+- Praat PointTier editor reference: <https://www.fon.hum.uva.nl/praat/manual/PointTier.html>
+
+---
+
 ## 2026-05-23 — Interval-tier editing (D6): mouse state machine, drag-create, drag-resize, double-click label, delete key
 
 Goal: settle the sixth Phase 2 slice. D6 turns the tier-strip pane from a read-only viewer into an interval editor. Two engine methods land alongside the GUI work.

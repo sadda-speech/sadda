@@ -98,13 +98,14 @@ struct SaddaApp {
     label_edit: Option<LabelEdit>,
 }
 
-/// Mouse-driven edit-in-progress for interval lanes. Idle between
-/// drags; transitions live in `render_interval_lane`.
+/// Mouse-driven edit-in-progress for tier lanes. Idle between drags;
+/// transitions live in `render_interval_lane` / `render_point_lane`.
 #[derive(Debug, Clone)]
 enum DraftEdit {
     /// No drag in progress.
     None,
-    /// User is dragging in empty lane space to create a new interval.
+    /// User is dragging in empty interval-lane space to create a new
+    /// interval.
     Creating {
         tier_id: i64,
         start_time: f64,
@@ -119,6 +120,13 @@ enum DraftEdit {
         fixed_time: f64,
         current_time: f64,
     },
+    /// User is dragging an existing point tick to move it (D7).
+    MovingPoint {
+        tier_id: i64,
+        annotation_id: i64,
+        original_time: f64,
+        current_time: f64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,18 +136,24 @@ enum BoundaryEdge {
 }
 
 /// Inline label-edit state. Created on double-click; drained on
-/// commit / cancel.
+/// commit / cancel. Polymorphic over interval / point lanes: the
+/// `kind` tells the commit-time handler which engine `update_*`
+/// method to call; the base row is re-fetched at commit so
+/// non-label fields aren't snapshotted into a stale buffer.
 struct LabelEdit {
     tier_id: i64,
     annotation_id: i64,
+    kind: LabelEditKind,
     text: String,
     /// Set to `true` for the first frame so the TextEdit grabs
     /// focus; cleared after.
     just_started: bool,
-    /// Snapshot of the existing interval used to commit the
-    /// label change via `update_interval` (replace-all
-    /// semantics).
-    base: sadda_engine::Interval,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LabelEditKind {
+    Interval,
+    Point,
 }
 
 /// Identifies the currently-selected annotation in the tier strip.
@@ -282,19 +296,25 @@ impl SaddaApp {
         self.timeline = TimelineState::default();
     }
 
-    /// Deletes the currently-selected interval annotation. No-op if
-    /// nothing is selected, or if the selection is a point (handled
-    /// in D7).
+    /// Deletes the currently-selected annotation (interval or
+    /// point). No-op if nothing is selected.
     fn delete_selected_annotation(&mut self) {
-        let Some(AnnotationSelection::Interval { annotation_id, .. }) = self.selected_annotation
-        else {
+        let Some(sel) = self.selected_annotation else {
             return;
         };
         let AppState::ProjectLoaded { project, .. } = &self.app_state else {
             return;
         };
-        if let Err(e) = project.delete_interval(annotation_id) {
-            self.set_error(format!("Failed to delete interval: {e}"));
+        let result = match sel {
+            AnnotationSelection::Interval { annotation_id, .. } => project
+                .delete_interval(annotation_id)
+                .map_err(|e| format!("Failed to delete interval: {e}")),
+            AnnotationSelection::Point { annotation_id, .. } => project
+                .delete_point(annotation_id)
+                .map_err(|e| format!("Failed to delete point: {e}")),
+        };
+        if let Err(msg) = result {
+            self.set_error(msg);
             return;
         }
         self.selected_annotation = None;
@@ -350,19 +370,51 @@ impl SaddaApp {
             } else {
                 Some(le.text)
             };
-            let result = project.update_interval(
-                le.annotation_id,
-                &sadda_engine::IntervalSpec {
-                    tier_id: le.tier_id,
-                    start_seconds: le.base.start_seconds,
-                    end_seconds: le.base.end_seconds,
-                    label: new_label,
-                    parent_annotation_id: le.base.parent_annotation_id,
-                    extra: le.base.extra,
+            // Re-fetch the base row at commit so we preserve any
+            // non-label fields that might have changed elsewhere
+            // (resize, move, parent_annotation_id update) since
+            // the label-edit window opened.
+            let result: Result<(), String> = match le.kind {
+                LabelEditKind::Interval => match project.intervals(le.tier_id) {
+                    Ok(rows) => match rows.into_iter().find(|r| r.id == le.annotation_id) {
+                        Some(existing) => project
+                            .update_interval(
+                                le.annotation_id,
+                                &sadda_engine::IntervalSpec {
+                                    tier_id: le.tier_id,
+                                    start_seconds: existing.start_seconds,
+                                    end_seconds: existing.end_seconds,
+                                    label: new_label,
+                                    parent_annotation_id: existing.parent_annotation_id,
+                                    extra: existing.extra,
+                                },
+                            )
+                            .map_err(|e| format!("Failed to save label: {e}")),
+                        None => Ok(()), // deleted concurrently
+                    },
+                    Err(e) => Err(format!("Failed to reload interval: {e}")),
                 },
-            );
-            if let Err(e) = result {
-                self.set_error(format!("Failed to save label: {e}"));
+                LabelEditKind::Point => match project.points(le.tier_id) {
+                    Ok(rows) => match rows.into_iter().find(|r| r.id == le.annotation_id) {
+                        Some(existing) => project
+                            .update_point(
+                                le.annotation_id,
+                                &sadda_engine::PointSpec {
+                                    tier_id: le.tier_id,
+                                    time_seconds: existing.time_seconds,
+                                    label: new_label,
+                                    parent_annotation_id: existing.parent_annotation_id,
+                                    extra: existing.extra,
+                                },
+                            )
+                            .map_err(|e| format!("Failed to save label: {e}")),
+                        None => Ok(()),
+                    },
+                    Err(e) => Err(format!("Failed to reload point: {e}")),
+                },
+            };
+            if let Err(msg) = result {
+                self.set_error(msg);
             }
         } else if cancel {
             self.label_edit = None;
@@ -580,7 +632,7 @@ fn render_interval_lane(
     new_selection: &mut Option<AnnotationSelection>,
     new_cursor: &mut Option<f64>,
     new_draft_action: &mut Option<DraftAction>,
-    label_edit_request: &mut Option<(i64, sadda_engine::Interval)>,
+    label_edit_request: &mut Option<LabelEdit>,
 ) {
     let view_range = (view_end - view_start).max(1e-6);
     let lane_width = rect.width() as f64;
@@ -718,7 +770,13 @@ fn render_interval_lane(
                 let x0 = rect.left() + ((r.start_seconds - view_start) * x_per_second) as f32;
                 let x1 = rect.left() + ((r.end_seconds - view_start) * x_per_second) as f32;
                 if p.x >= x0 && p.x <= x1 && rect.y_range().contains(p.y) {
-                    *label_edit_request = Some((tier_id, r.clone()));
+                    *label_edit_request = Some(LabelEdit {
+                        tier_id,
+                        annotation_id: r.id,
+                        kind: LabelEditKind::Interval,
+                        text: r.label.clone().unwrap_or_default(),
+                        just_started: true,
+                    });
                     return;
                 }
             }
@@ -819,16 +877,29 @@ enum DraftAction {
     Start(DraftEdit),
     Update(f64),
     Commit,
+    /// Click-to-add for point lanes (D7). Distinct from `Start +
+    /// Commit` because there's no draft state to inspect — the
+    /// caller knows the tier + time at click-resolve time.
+    AddPointNow {
+        tier_id: i64,
+        time: f64,
+    },
 }
 
 fn matches_this_tier(draft: &DraftEdit, tier_id: i64) -> bool {
     match draft {
         DraftEdit::None => false,
-        DraftEdit::Creating { tier_id: t, .. } | DraftEdit::Resizing { tier_id: t, .. } => {
-            *t == tier_id
-        }
+        DraftEdit::Creating { tier_id: t, .. }
+        | DraftEdit::Resizing { tier_id: t, .. }
+        | DraftEdit::MovingPoint { tier_id: t, .. } => *t == tier_id,
     }
 }
+
+/// Pixel hit-zone width for grabbing a point tick.
+const POINT_HIT_ZONE_PX: f32 = 6.0;
+/// Minimum drag distance (in seconds) for a point-move to count as
+/// a real change. Tiny mouse jitter shouldn't write audit rows.
+const MIN_POINT_MOVE_SECONDS: f64 = 0.001;
 
 #[allow(clippy::too_many_arguments)]
 fn render_point_lane(
@@ -840,20 +911,31 @@ fn render_point_lane(
     rows: &[sadda_engine::Point],
     selection: Option<AnnotationSelection>,
     response: &egui::Response,
+    draft: &DraftEdit,
     new_selection: &mut Option<AnnotationSelection>,
     new_cursor: &mut Option<f64>,
+    new_draft_action: &mut Option<DraftAction>,
+    label_edit_request: &mut Option<LabelEdit>,
 ) {
     let view_range = (view_end - view_start).max(1e-6);
     let lane_width = rect.width() as f64;
     let x_per_second = lane_width / view_range;
     let base_color = egui::Color32::from_rgb(230, 180, 70);
     let selected_color = egui::Color32::from_rgb(255, 220, 120);
-    let click_pos = response.interact_pointer_pos();
-    // Pick the nearest point to a click within this tolerance.
-    let click_tolerance_px = 6.0;
+    let draft_color = egui::Color32::from_rgb(60, 200, 130);
 
+    // Draw existing ticks.
     for p in rows {
         if p.time_seconds < view_start || p.time_seconds > view_end {
+            continue;
+        }
+        // If this point is being moved, skip the static render —
+        // the moved position is drawn below in the draft pass.
+        if matches!(
+            draft,
+            DraftEdit::MovingPoint { tier_id: t, annotation_id: a, .. }
+                if *t == tier_id && *a == p.id
+        ) {
             continue;
         }
         let x = rect.left() + ((p.time_seconds - view_start) * x_per_second) as f32;
@@ -875,27 +957,126 @@ fn render_point_lane(
             ],
             egui::Stroke::new(stroke_width, colour),
         );
-        if let Some(label) = &p.label {
-            if !label.is_empty() {
-                painter.text(
-                    egui::Pos2::new(x + 3.0, rect.top() + 2.0),
-                    egui::Align2::LEFT_TOP,
-                    truncate_label(label, TIER_LABEL_MAX_CHARS),
-                    egui::FontId::proportional(11.0),
-                    colour,
-                );
+        if let Some(label) = &p.label
+            && !label.is_empty()
+        {
+            painter.text(
+                egui::Pos2::new(x + 3.0, rect.top() + 2.0),
+                egui::Align2::LEFT_TOP,
+                truncate_label(label, TIER_LABEL_MAX_CHARS),
+                egui::FontId::proportional(11.0),
+                colour,
+            );
+        }
+    }
+
+    // Draw the live moving-point preview (if it belongs to this tier).
+    if let DraftEdit::MovingPoint {
+        tier_id: t,
+        current_time,
+        ..
+    } = draft
+        && *t == tier_id
+        && *current_time >= view_start
+        && *current_time <= view_end
+    {
+        let x = rect.left() + ((current_time - view_start) * x_per_second) as f32;
+        painter.line_segment(
+            [
+                egui::Pos2::new(x, rect.top() + 2.0),
+                egui::Pos2::new(x, rect.bottom() - 2.0),
+            ],
+            egui::Stroke::new(2.0, draft_color),
+        );
+    }
+
+    // ----- Mouse interaction dispatch ---------------------------------
+
+    // Double-click on an existing point → label edit.
+    if response.double_clicked() {
+        if let Some(p) = response.interact_pointer_pos() {
+            for row in rows {
+                let x = rect.left() + ((row.time_seconds - view_start) * x_per_second) as f32;
+                if (p.x - x).abs() <= POINT_HIT_ZONE_PX && rect.y_range().contains(p.y) {
+                    *label_edit_request = Some(LabelEdit {
+                        tier_id,
+                        annotation_id: row.id,
+                        kind: LabelEditKind::Point,
+                        text: row.label.clone().unwrap_or_default(),
+                        just_started: true,
+                    });
+                    return;
+                }
             }
         }
-        if let Some(cp) = click_pos
-            && (cp.x - x).abs() <= click_tolerance_px
-            && rect.contains(cp)
-            && response.clicked()
-        {
-            *new_selection = Some(AnnotationSelection::Point {
-                tier_id,
-                annotation_id: p.id,
-            });
-            *new_cursor = Some(p.time_seconds);
+    }
+
+    // Mouse-down: if near an existing tick, start MovingPoint;
+    // otherwise no-op (empty-click handled below via response.clicked).
+    if response.drag_started_by(egui::PointerButton::Primary) {
+        if let Some(p) = response.interact_pointer_pos() {
+            for row in rows {
+                let x = rect.left() + ((row.time_seconds - view_start) * x_per_second) as f32;
+                if (p.x - x).abs() <= POINT_HIT_ZONE_PX {
+                    *new_draft_action = Some(DraftAction::Start(DraftEdit::MovingPoint {
+                        tier_id,
+                        annotation_id: row.id,
+                        original_time: row.time_seconds,
+                        current_time: row.time_seconds,
+                    }));
+                    return;
+                }
+            }
+            // No tick under pointer — fall through; the click handler
+            // below will add a new point on mouse-up.
+        }
+    }
+
+    if response.dragged() && matches_this_tier(draft, tier_id) {
+        if let Some(p) = response.interact_pointer_pos() {
+            let t = view_start + ((p.x - rect.left()) as f64) / x_per_second;
+            *new_draft_action = Some(DraftAction::Update(t));
+        }
+    }
+
+    if response.drag_stopped() && matches_this_tier(draft, tier_id) {
+        *new_draft_action = Some(DraftAction::Commit);
+        return;
+    }
+
+    // Plain click (no drag): if it hit an existing tick, select +
+    // position cursor. Otherwise, add a new point at the click time.
+    if response.clicked() && !matches!(draft, DraftEdit::None) {
+        return;
+    }
+    if response.clicked() {
+        if let Some(p) = response.interact_pointer_pos() {
+            for row in rows {
+                let x = rect.left() + ((row.time_seconds - view_start) * x_per_second) as f32;
+                if (p.x - x).abs() <= POINT_HIT_ZONE_PX && rect.y_range().contains(p.y) {
+                    *new_selection = Some(AnnotationSelection::Point {
+                        tier_id,
+                        annotation_id: row.id,
+                    });
+                    *new_cursor = Some(row.time_seconds);
+                    return;
+                }
+            }
+            // Empty space — add a new point at the click time. This
+            // overrides B4's click-to-position-cursor behaviour
+            // *only for point lanes* (matches Praat's PointTier
+            // editor convention).
+            if rect.contains(p) {
+                let t = view_start + ((p.x - rect.left()) as f64) / x_per_second;
+                *new_draft_action = Some(DraftAction::Start(DraftEdit::MovingPoint {
+                    tier_id,
+                    annotation_id: -1, // sentinel: "new, not yet committed"
+                    original_time: t,
+                    current_time: t,
+                }));
+                // Immediately commit — no drag needed for a click-add.
+                *new_draft_action = Some(DraftAction::AddPointNow { tier_id, time: t });
+            }
         }
     }
 }
@@ -1440,7 +1621,7 @@ impl SaddaApp {
         // at most — only the tier the cursor is over fires).
         let mut new_draft_action: Option<DraftAction> = None;
         // Label-edit request: double-clicking an interval body.
-        let mut label_edit_request: Option<(i64, sadda_engine::Interval)> = None;
+        let mut label_edit_request: Option<LabelEdit> = None;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             for tier in &tiers {
@@ -1504,8 +1685,11 @@ impl SaddaApp {
                                 &rows,
                                 self.selected_annotation,
                                 &response,
+                                &self.draft_edit,
                                 &mut new_selection,
                                 &mut new_cursor,
+                                &mut new_draft_action,
+                                &mut label_edit_request,
                             ),
                             Err(e) => {
                                 new_error = Some(format!(
@@ -1601,24 +1785,22 @@ impl SaddaApp {
                 }
                 DraftAction::Update(t) => match &mut self.draft_edit {
                     DraftEdit::Creating { current_time, .. }
-                    | DraftEdit::Resizing { current_time, .. } => {
+                    | DraftEdit::Resizing { current_time, .. }
+                    | DraftEdit::MovingPoint { current_time, .. } => {
                         *current_time = t;
                     }
                     DraftEdit::None => {}
                 },
                 DraftAction::Commit => self.commit_draft_edit(),
+                DraftAction::AddPointNow { tier_id, time } => {
+                    self.add_point_immediate(tier_id, time);
+                }
             }
         }
 
         // ---- Inline label edit request -----------------------------
-        if let Some((tier_id, base)) = label_edit_request {
-            self.label_edit = Some(LabelEdit {
-                tier_id,
-                annotation_id: base.id,
-                text: base.label.clone().unwrap_or_default(),
-                just_started: true,
-                base,
-            });
+        if let Some(req) = label_edit_request {
+            self.label_edit = Some(req);
         }
     }
 
@@ -1705,9 +1887,72 @@ impl SaddaApp {
                     )
                     .map_err(|e| format!("Failed to resize interval: {e}"))
             }
+            DraftEdit::MovingPoint {
+                tier_id,
+                annotation_id,
+                original_time,
+                current_time,
+            } => {
+                // Mouse jitter under MIN_POINT_MOVE_SECONDS is
+                // dropped without writing a no-op audit row.
+                if (current_time - original_time).abs() < MIN_POINT_MOVE_SECONDS {
+                    return;
+                }
+                let existing = match project.points(tier_id) {
+                    Ok(rows) => rows.into_iter().find(|r| r.id == annotation_id),
+                    Err(e) => {
+                        return self.set_error(format!("Failed to reload point: {e}"));
+                    }
+                };
+                let Some(existing) = existing else {
+                    return;
+                };
+                let new_time = current_time.max(0.0).min(self.timeline.duration);
+                project
+                    .update_point(
+                        annotation_id,
+                        &sadda_engine::PointSpec {
+                            tier_id,
+                            time_seconds: new_time,
+                            label: existing.label,
+                            parent_annotation_id: existing.parent_annotation_id,
+                            extra: existing.extra,
+                        },
+                    )
+                    .map(|_| {
+                        self.timeline.set_cursor(new_time);
+                    })
+                    .map_err(|e| format!("Failed to move point: {e}"))
+            }
         };
         if let Err(msg) = result {
             self.set_error(msg);
+        }
+    }
+
+    /// Click-to-add for point lanes (D7). The lane render fires
+    /// this as a `DraftAction::AddPointNow` when the user clicks
+    /// empty space in a point lane.
+    fn add_point_immediate(&mut self, tier_id: i64, time: f64) {
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        let t = time.max(0.0).min(self.timeline.duration);
+        match project.add_point(&sadda_engine::PointSpec {
+            tier_id,
+            time_seconds: t,
+            label: None,
+            extra: None,
+            ..Default::default()
+        }) {
+            Ok(id) => {
+                self.selected_annotation = Some(AnnotationSelection::Point {
+                    tier_id,
+                    annotation_id: id,
+                });
+                self.timeline.set_cursor(t);
+            }
+            Err(e) => self.set_error(format!("Failed to add point: {e}")),
         }
     }
 
