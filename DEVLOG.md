@@ -6,6 +6,122 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-23 — Tier-strip view (B4): three-pane vertical split, per-tier-type lane vocabulary, clickable selection
+
+Goal: settle the fourth Phase 2 slice. B4 adds the tier-strip pane below the spectrogram, completing the Praat-style waveform / spectrogram / tier-strip visual stack. Plus the basic annotation-selection state that C5 (cursor sync) and D-cluster (editing) will both reach into.
+
+### What B4 must deliver
+
+From the Phase 2 slicing entry: "Reads tier rows via `Project::tiers(Some(bundle_id))` + `intervals/points/references_for`. Renders each tier as a horizontal lane below the spectrogram; intervals as filled rectangles, points as vertical ticks; clicking a row selects the annotation."
+
+### Layout: three-pane split
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ menu                                                     │
+├───────────┬──────────────────────────────────────────────┤
+│ sidebar   │ caption                                      │
+│           ├──────────────────────────────────────────────┤
+│ bundles   │                                              │
+│           │   waveform                  ← Panel::top      │
+│           │                                              │
+│           ├──────────────────────────────────────────────┤
+│           │ toolbar (window / hop / colormap)            │
+│           ├──────────────────────────────────────────────┤
+│           │                                              │
+│           │   spectrogram               ← CentralPanel   │
+│           │                                              │
+│           ├──────────────────────────────────────────────┤
+│           │ phones   ┃ ━━━ ━━━ ━━ ━━━━ ━━━━ ━━━━━━       │
+│           │ words    ┃ ━━━━━━ ━━━━━━━━━━━━━━━━━━         │ ← Panel::bottom (B4)
+│           │ events   ┃    ┃   ┃   ┃    ┃                 │
+│           │ lex      ┃ (reference)                       │
+│           ├──────────────────────────────────────────────┤
+│           │ Project: vowels  ·  /home/alice/vowels       │
+└───────────┴──────────────────────────────────────────────┘
+```
+
+Two `Panel`s now wrap the central pane: `top("waveform_split")` (resizable, ~220px) and `bottom("tier_strip")` (resizable, ~28px × #tiers). Spectrogram fills whatever's left.
+
+### Lane vocabulary
+
+Each tier renders as a 28-pixel-tall row with a 120-pixel label gutter on the left. Past the gutter, the lane spans the bundle's `[0, duration_seconds]` along the x-axis (sharing units with the spectrogram and waveform — sets up C5's synced cursor for free).
+
+| Tier type | Lane contents |
+|---|---|
+| `interval` | Filled rectangle per interval, spanning `[start, end]`. Label text inside (truncated with `…` if it overflows). Selected interval gets a brighter fill + a stroke. |
+| `point` | Vertical tick at each point's time. Label drawn above the tick (truncated similarly). Selected tick gets a brighter colour + 2× width. |
+| `reference` | Lane shows a "(reference — N targets)" caption instead of time-positioned content. References don't have time data of their own; sensible rendering needs to resolve the targets, which is a future slice. |
+| `continuous_numeric` / `continuous_vector` / `categorical_sampled` | Lane shows "(dense — not displayable in tier strip)". Visualizing these as overlays on the spectrogram is the right idiom; it lands when overlays do (post-0.2). |
+
+### Selection state
+
+New `AppState`-adjacent field:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnnotationSelection {
+    Interval { tier_id: i64, annotation_id: i64 },
+    Point    { tier_id: i64, annotation_id: i64 },
+    // Reference selection added when reference rendering becomes interactive.
+}
+
+struct SaddaApp {
+    // ...
+    selected_annotation: Option<AnnotationSelection>,
+}
+```
+
+Selection clears on bundle change and on click outside any tick/rectangle. Lives on `SaddaApp` (not `PersistedState`) — selection is an in-memory ephemerality, not a persistent setting.
+
+### Confirmed B4 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Pane placement | **Bottom panel, below spectrogram** | Praat / WaveSurfer / librosa convention; spectrogram + tier strip share the same x-axis units |
+| Lane height | **Fixed 28 px** | Compact; readable; consistent regardless of tier count |
+| Tier name gutter | **Fixed 120 px on the left** | Fits most names; truncates with `…` |
+| Hidden tiers | **Show with a "(can't render this type)" caption** | Don't silently drop — confuses users about what's in the corpus |
+| Selection state | **In-memory only on `SaddaApp`** | Selection isn't worth persisting across launches; cluster C5/D6/D7 read it directly |
+| Selection clears on | **Bundle change + click outside any item** | Matches every editor's behavior |
+| Interval label overflow | **Truncated with `…`, no wrap** | Lane height doesn't accommodate wrapping; hover tooltip can land later |
+| Reference-tier preview | **`(reference — N targets)` text only** | Time-less; meaningful rendering requires resolving `(target_kind, target_id)` pairs — separate slice |
+| Many tiers | **Vertical scroll** | `ScrollArea` wrap around the lane list |
+| Tier ordering | **Engine's `Project::tiers` insertion order** | Deterministic; reordering UX is a D-cluster context-menu concern |
+
+### Pure-data extraction
+
+Most of B4 is rendering, but two helpers belong in `state.rs` (testable):
+
+- `truncate_label(text, max_chars) -> String` — produces `"hello…"` when the label is too long. Used by both interval rectangles and point ticks.
+- `format_reference_lane_caption(n_targets: usize) -> String` — `"(reference — 3 targets)"` / `"(reference — 1 target)"` etc.
+
+### Lossiness / what B4 deliberately doesn't ship
+
+- **Editing.** Drag-to-create / drag-boundary / double-click-to-edit-label all land in D6 (interval) / D7 (point). B4 is read-only.
+- **Hover tooltips.** Defer to a polish slice.
+- **Tier reordering / rename / delete via right-click.** D-cluster context menus.
+- **Reference-tier visualisation.** Resolving the targets needs design — show as link? Stretch from the source to the target? Out of B4 scope.
+- **Dense-tier overlays on the spectrogram.** Same.
+- **Selection visualisation that extends to the waveform / spectrogram.** That's C5 (synced cursor) — selecting an interval should highlight its time range across all panes. B4 marks the selected annotation in the tier strip only.
+- **Multiple tier strips (left/right of the spectrogram).** ELAN / Anvil ship multi-pane tier views; we don't yet need that complexity.
+- **Tier-level mute / solo / hide toggles.** Same.
+
+### What this entry doesn't decide
+
+- **Colour palette per tier type.** Settled at implementation — light blue for intervals, amber for points, grey for inactive captions. Themed palette work is a polish slice.
+- **Whether the lane labels can be rich-text** (e.g. icons indicating tier type). Plain text for now.
+- **Whether selection survives a reload of the same bundle.** Currently clears on any bundle re-select.
+
+### Sources / references
+
+- 2026-05-23 Phase 2 slicing entry (B4 row)
+- 2026-05-23 B3 entry (which this stacks below)
+- Praat tier display reference: <https://www.fon.hum.uva.nl/praat/manual/TextGrid_files_2.html>
+- ELAN tier strip layout: <https://www.mpi.nl/corpus/html/elan/ch04s02.html>
+
+---
+
 ## 2026-05-23 — Spectrogram view (B3): dB-FS scale + 70dB floor, three colormaps with toolbar toggle, cached texture, central-pane vertical split
 
 Goal: settle the third Phase 2 slice. B3 adds the spectrogram below the waveform, with the toolbar controls + colormap variants the slicing entry called for. Combined with B2 this gives the visual stack a Praat-trained user expects.

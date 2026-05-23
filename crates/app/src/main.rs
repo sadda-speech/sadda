@@ -13,12 +13,20 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
-use sadda_engine::Project;
+use sadda_engine::{Project, TierType};
 
 use crate::state::{
     ColormapKind, EnvelopeCache, PersistedState, SpectrogramConfig, ThemePref, build_envelope,
-    colormap_bake, power_to_db_normalized,
+    colormap_bake, format_reference_lane_caption, power_to_db_normalized, truncate_label,
 };
+
+/// Maximum characters drawn inside an interval rectangle or above a
+/// point tick before truncation kicks in (with an ellipsis).
+const TIER_LABEL_MAX_CHARS: usize = 20;
+/// Vertical pixels per lane in the tier strip.
+const TIER_LANE_HEIGHT: f32 = 28.0;
+/// Width of the left gutter holding the tier name in the tier strip.
+const TIER_LABEL_GUTTER: f32 = 120.0;
 
 const APP_TITLE: &str = "sadda";
 /// Bucket count for the B2 fixed-resolution waveform envelope. C5 will
@@ -71,6 +79,19 @@ struct SaddaApp {
     /// Cached spectrogram texture for the selected bundle + current
     /// `SpectrogramConfig`. Rebuilt only when either changes.
     active_spectrogram: Option<SpectrogramCache>,
+    /// Currently-selected annotation in the tier strip. In-memory
+    /// only — clears on bundle change. Reached by C5 (cursor sync)
+    /// and D6/D7 (editing) when those slices land.
+    selected_annotation: Option<AnnotationSelection>,
+}
+
+/// Identifies the currently-selected annotation in the tier strip.
+/// Reference selection is omitted in B4 (reference lanes don't have
+/// time-positioned content yet).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnnotationSelection {
+    Interval { tier_id: i64, annotation_id: i64 },
+    Point { tier_id: i64, annotation_id: i64 },
 }
 
 /// Cached spectrogram render. Invalidates whenever the bundle or the
@@ -100,6 +121,7 @@ impl SaddaApp {
             selected_bundle_id: None,
             active_envelope: None,
             active_spectrogram: None,
+            selected_annotation: None,
         }
     }
 
@@ -182,12 +204,14 @@ impl SaddaApp {
         });
         self.selected_bundle_id = Some(bundle_id);
         self.active_spectrogram = None;
+        self.selected_annotation = None;
     }
 
     fn clear_bundle_selection(&mut self) {
         self.selected_bundle_id = None;
         self.active_envelope = None;
         self.active_spectrogram = None;
+        self.selected_annotation = None;
     }
 
     /// Rebuilds the spectrogram cache if stale (i.e. cached bundle id
@@ -288,6 +312,152 @@ fn build_spectrogram_texture(
         duration_seconds: env.duration_seconds,
         nyquist_hz: sr / 2.0,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Tier-strip lane renderers
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn render_interval_lane(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    duration: f64,
+    tier_id: i64,
+    rows: &[sadda_engine::Interval],
+    selection: Option<AnnotationSelection>,
+    response: &egui::Response,
+    new_selection: &mut Option<AnnotationSelection>,
+) {
+    if duration <= 0.0 {
+        return;
+    }
+    let lane_width = rect.width() as f64;
+    let x_per_second = lane_width / duration;
+    let base_fill = egui::Color32::from_rgb(82, 138, 198);
+    let selected_fill = egui::Color32::from_rgb(160, 200, 250);
+    let text_color = egui::Color32::WHITE;
+    let click_pos = response.interact_pointer_pos();
+
+    for r in rows {
+        let x0 = rect.left() + (r.start_seconds * x_per_second) as f32;
+        let x1 = rect.left() + (r.end_seconds * x_per_second) as f32;
+        let item_rect = egui::Rect::from_min_max(
+            egui::Pos2::new(x0.max(rect.left()), rect.top() + 2.0),
+            egui::Pos2::new(x1.min(rect.right()), rect.bottom() - 2.0),
+        );
+        let is_selected = matches!(
+            selection,
+            Some(AnnotationSelection::Interval { tier_id: t, annotation_id: a })
+                if t == tier_id && a == r.id
+        );
+        painter.rect_filled(
+            item_rect,
+            2.0,
+            if is_selected {
+                selected_fill
+            } else {
+                base_fill
+            },
+        );
+        if is_selected {
+            painter.rect_stroke(
+                item_rect,
+                2.0,
+                egui::Stroke::new(1.5, egui::Color32::WHITE),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if let Some(label) = &r.label {
+            if !label.is_empty() && item_rect.width() > 20.0 {
+                painter.text(
+                    item_rect.left_center() + egui::Vec2::new(4.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    truncate_label(label, TIER_LABEL_MAX_CHARS),
+                    egui::FontId::proportional(11.0),
+                    text_color,
+                );
+            }
+        }
+        if let Some(p) = click_pos
+            && item_rect.contains(p)
+            && response.clicked()
+        {
+            *new_selection = Some(AnnotationSelection::Interval {
+                tier_id,
+                annotation_id: r.id,
+            });
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_point_lane(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    duration: f64,
+    tier_id: i64,
+    rows: &[sadda_engine::Point],
+    selection: Option<AnnotationSelection>,
+    response: &egui::Response,
+    new_selection: &mut Option<AnnotationSelection>,
+) {
+    if duration <= 0.0 {
+        return;
+    }
+    let lane_width = rect.width() as f64;
+    let x_per_second = lane_width / duration;
+    let base_color = egui::Color32::from_rgb(230, 180, 70);
+    let selected_color = egui::Color32::from_rgb(255, 220, 120);
+    let click_pos = response.interact_pointer_pos();
+    // Pick the nearest point to a click within this tolerance.
+    let click_tolerance_px = 6.0;
+
+    for p in rows {
+        let x = rect.left() + (p.time_seconds * x_per_second) as f32;
+        if x < rect.left() || x > rect.right() {
+            continue;
+        }
+        let is_selected = matches!(
+            selection,
+            Some(AnnotationSelection::Point { tier_id: t, annotation_id: a })
+                if t == tier_id && a == p.id
+        );
+        let stroke_width = if is_selected { 2.0 } else { 1.0 };
+        let colour = if is_selected {
+            selected_color
+        } else {
+            base_color
+        };
+        painter.line_segment(
+            [
+                egui::Pos2::new(x, rect.top() + 2.0),
+                egui::Pos2::new(x, rect.bottom() - 2.0),
+            ],
+            egui::Stroke::new(stroke_width, colour),
+        );
+        if let Some(label) = &p.label {
+            if !label.is_empty() {
+                painter.text(
+                    egui::Pos2::new(x + 3.0, rect.top() + 2.0),
+                    egui::Align2::LEFT_TOP,
+                    truncate_label(label, TIER_LABEL_MAX_CHARS),
+                    egui::FontId::proportional(11.0),
+                    colour,
+                );
+            }
+        }
+        if let Some(cp) = click_pos
+            && (cp.x - x).abs() <= click_tolerance_px
+            && rect.contains(cp)
+            && response.clicked()
+        {
+            *new_selection = Some(AnnotationSelection::Point {
+                tier_id,
+                annotation_id: p.id,
+            });
+        }
+    }
 }
 
 impl eframe::App for SaddaApp {
@@ -507,8 +677,9 @@ impl SaddaApp {
         }
     }
 
-    /// Central content for a loaded project: caption + waveform on
-    /// top (resizable), spectrogram filling the rest.
+    /// Central content for a loaded project: waveform on top
+    /// (resizable), tier strip on the bottom (resizable, sized by
+    /// tier count), spectrogram filling the middle.
     fn bundle_content_pane(&mut self, ui: &mut egui::Ui) {
         // Top sub-panel: waveform. Resizable; user can drag the
         // divider to rebalance with the spectrogram.
@@ -518,9 +689,34 @@ impl SaddaApp {
             .min_size(80.0)
             .show_inside(ui, |ui| self.waveform_pane(ui));
 
-        // Bottom: spectrogram fills the remainder.
+        // Bottom sub-panel: tier strip. Resizable; default height
+        // scales with the number of tiers up to a sensible cap.
+        let n_lanes = self.estimate_tier_lane_count();
+        let default_strip_height = ((n_lanes as f32).max(1.0) * TIER_LANE_HEIGHT + 8.0).min(220.0);
+        egui::Panel::bottom("tier_strip")
+            .resizable(true)
+            .default_size(default_strip_height)
+            .min_size(TIER_LANE_HEIGHT + 8.0)
+            .show_inside(ui, |ui| self.tier_strip_pane(ui));
+
+        // Centre: spectrogram fills the remainder.
         self.rebuild_spectrogram_if_stale(ui.ctx());
         self.spectrogram_pane(ui);
+    }
+
+    /// How many lanes the tier strip will render for the current
+    /// project / bundle. Used only to size the bottom panel; returns
+    /// `0` when no bundle is selected.
+    fn estimate_tier_lane_count(&self) -> usize {
+        let (Some(env), AppState::ProjectLoaded { project, .. }) =
+            (&self.active_envelope, &self.app_state)
+        else {
+            return 0;
+        };
+        project
+            .tiers(Some(env.bundle_id))
+            .map(|t| t.len())
+            .unwrap_or(0)
     }
 
     fn waveform_pane(&mut self, ui: &mut egui::Ui) {
@@ -666,6 +862,152 @@ impl SaddaApp {
             // warnings on the response objects.
             let _ = (win, hop, dr, combo);
         });
+    }
+
+    fn tier_strip_pane(&mut self, ui: &mut egui::Ui) {
+        let (Some(env), AppState::ProjectLoaded { project, .. }) =
+            (&self.active_envelope, &self.app_state)
+        else {
+            ui.centered_and_justified(|ui| {
+                ui.label(egui::RichText::new("Select a bundle to see its tiers").weak());
+            });
+            return;
+        };
+        let bundle_id = env.bundle_id;
+        let duration = env.duration_seconds;
+        let tiers = match project.tiers(Some(bundle_id)) {
+            Ok(t) => t,
+            Err(e) => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 80, 80),
+                    format!("Failed to list tiers: {e}"),
+                );
+                return;
+            }
+        };
+        if tiers.is_empty() {
+            ui.label(egui::RichText::new("(no tiers in this bundle yet)").italics());
+            return;
+        }
+        // Snapshot the selection up-front; any click handled inside
+        // the lane render mutates the snapshot, which we copy back
+        // at the end. Borrow-checker-friendly: avoids needing &mut
+        // self while we also hold &project.
+        let mut new_selection = self.selected_annotation;
+        // Same idea for the error banner.
+        let mut new_error: Option<String> = None;
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for tier in &tiers {
+                ui.horizontal(|ui| {
+                    // Left gutter: tier name + type hint.
+                    ui.allocate_ui_with_layout(
+                        egui::Vec2::new(TIER_LABEL_GUTTER, TIER_LANE_HEIGHT),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.label(egui::RichText::new(truncate_label(&tier.name, 16)).strong());
+                        },
+                    );
+                    // Right: time-positioned lane.
+                    let avail = ui.available_size_before_wrap();
+                    let lane_size = egui::Vec2::new(avail.x, TIER_LANE_HEIGHT);
+                    let (rect, response) = ui.allocate_exact_size(lane_size, egui::Sense::click());
+                    let painter = ui.painter_at(rect);
+                    let visuals = ui.visuals();
+
+                    // Background.
+                    painter.rect_filled(rect, 2.0, visuals.extreme_bg_color);
+                    painter.rect_stroke(
+                        rect,
+                        2.0,
+                        egui::Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+                        egui::StrokeKind::Inside,
+                    );
+
+                    match tier.r#type {
+                        TierType::Interval => match project.intervals(tier.id) {
+                            Ok(rows) => render_interval_lane(
+                                &painter,
+                                rect,
+                                duration,
+                                tier.id,
+                                &rows,
+                                self.selected_annotation,
+                                &response,
+                                &mut new_selection,
+                            ),
+                            Err(e) => {
+                                new_error = Some(format!(
+                                    "Failed to list intervals for tier {}: {e}",
+                                    tier.id,
+                                ));
+                            }
+                        },
+                        TierType::Point => match project.points(tier.id) {
+                            Ok(rows) => render_point_lane(
+                                &painter,
+                                rect,
+                                duration,
+                                tier.id,
+                                &rows,
+                                self.selected_annotation,
+                                &response,
+                                &mut new_selection,
+                            ),
+                            Err(e) => {
+                                new_error = Some(format!(
+                                    "Failed to list points for tier {}: {e}",
+                                    tier.id,
+                                ));
+                            }
+                        },
+                        TierType::Reference => match project.references_for(tier.id) {
+                            Ok(rows) => {
+                                let caption = format_reference_lane_caption(rows.len());
+                                painter.text(
+                                    rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    caption,
+                                    egui::FontId::proportional(12.0),
+                                    visuals.weak_text_color(),
+                                );
+                            }
+                            Err(e) => {
+                                new_error = Some(format!(
+                                    "Failed to list references for tier {}: {e}",
+                                    tier.id,
+                                ));
+                            }
+                        },
+                        TierType::ContinuousNumeric
+                        | TierType::ContinuousVector
+                        | TierType::CategoricalSampled => {
+                            painter.text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "(dense — not displayable in tier strip)",
+                                egui::FontId::proportional(12.0),
+                                visuals.weak_text_color(),
+                            );
+                        }
+                    }
+
+                    // Click on the lane background (not on a hit
+                    // item) deselects.
+                    if response.clicked()
+                        && new_selection == self.selected_annotation
+                        && self.selected_annotation.is_some()
+                    {
+                        new_selection = None;
+                    }
+                });
+            }
+        });
+
+        self.selected_annotation = new_selection;
+        if let Some(msg) = new_error {
+            self.set_error(msg);
+        }
     }
 
     fn welcome(&mut self, ui: &mut egui::Ui) {
