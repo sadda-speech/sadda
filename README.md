@@ -14,6 +14,25 @@ Pre-built wheels are available for Linux x86_64, macOS arm64, and
 Windows x86_64 on Python 3.10–3.13. Other platforms install from
 sdist; you'll need a Rust toolchain locally.
 
+## Desktop app
+
+Unsigned binaries for the egui-based desktop app are attached to
+each `v*.*.*-app` release on the
+[GitHub Releases page](https://github.com/sadda-speech/sadda/releases).
+Download the one for your OS and run it directly:
+
+- `sadda-app-linux-x86_64`
+- `sadda-app-macos-arm64` (Apple Silicon)
+- `sadda-app-windows-x86_64.exe`
+
+macOS users will see an "unidentified developer" warning on first
+launch — right-click → Open to bypass. Proper notarisation lands
+in 1.0.
+
+The embedded script panel needs Python 3.11 or 3.12 installed on
+the system. Everything else (waveform, spectrogram, tier editing,
+playback) works without Python.
+
 ## Quickstart
 
 ```python
