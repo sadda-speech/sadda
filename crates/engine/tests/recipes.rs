@@ -37,10 +37,7 @@ fn write_silent_wav(path: &Path, sr: u32, duration_s: f32) {
 fn new_project_with_bundle(root: &Path, duration_s: f32) -> (Project, i64) {
     let _ = std::fs::remove_dir_all(root);
     let proj = Project::create(root, "recipes_test").unwrap();
-    let wav = std::env::temp_dir().join(format!(
-        "sadda_f1_{}.wav",
-        std::process::id(),
-    ));
+    let wav = std::env::temp_dir().join(format!("sadda_f1_{}.wav", std::process::id(),));
     write_silent_wav(&wav, 16_000, duration_s);
     let bundle_id = proj.add_bundle_with(&BundleSpec::new("b"), &wav).unwrap();
     let _ = std::fs::remove_file(&wav);
@@ -146,7 +143,9 @@ fn live_commit_inside_recipe_links_processing_run() {
         ..LiveConfig::default()
     };
     let (mut session, _results) = LiveSession::start(&root, cfg.clone()).unwrap();
-    let samples: Vec<f32> = (0..16_000 / 2).map(|i| (i as f32 / 1000.0).sin() * 0.3).collect();
+    let samples: Vec<f32> = (0..16_000 / 2)
+        .map(|i| (i as f32 / 1000.0).sin() * 0.3)
+        .collect();
     session.push_samples(&samples);
     thread::sleep(Duration::from_millis(80));
     let stopped = session.stop().unwrap();

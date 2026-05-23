@@ -36,8 +36,8 @@
 use std::fs;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -227,10 +227,7 @@ impl LiveSession {
             bits_per_sample: 32,
             sample_format: hound::SampleFormat::Float,
         };
-        let writer = hound::WavWriter::new(
-            BufWriter::new(fs::File::create(&wav_path)?),
-            wav_spec,
-        )?;
+        let writer = hound::WavWriter::new(BufWriter::new(fs::File::create(&wav_path)?), wav_spec)?;
 
         let (raw_producer, raw_consumer) = rtrb::RingBuffer::<f32>::new(RAW_RING_CAPACITY);
         let (meter_producer, meter_consumer) =
@@ -479,8 +476,8 @@ impl ConsumerCtx {
                     } else {
                         DB_FS_FLOOR
                     };
-                    let meter_time = (frames_total + mono_chunk_len) as f64
-                        / cfg.sample_rate as f64;
+                    let meter_time =
+                        (frames_total + mono_chunk_len) as f64 / cfg.sample_rate as f64;
                     let _ = self.meters.push(MeterFrame {
                         peak,
                         rms,
@@ -505,8 +502,7 @@ impl ConsumerCtx {
                         .into_iter()
                         .rev()
                         .collect();
-                    let centre_seconds = (frames_total as f64
-                        - window_samples as f64 / 2.0)
+                    let centre_seconds = (frames_total as f64 - window_samples as f64 / 2.0)
                         / cfg.sample_rate as f64;
                     emit_dsp_frames(
                         &window,
@@ -664,11 +660,7 @@ mod tests {
 
     fn fresh_root(name: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!(
-            "sadda_live_test_{}_{}",
-            std::process::id(),
-            name
-        ));
+        p.push(format!("sadda_live_test_{}_{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(p.join("signals")).unwrap();
         p

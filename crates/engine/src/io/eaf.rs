@@ -141,8 +141,7 @@ pub fn parse(input: &str) -> Result<EafFile> {
     let mut media_url: Option<String> = None;
 
     // TIME_ORDER: slot ID → ms value.
-    let mut time_slots: std::collections::HashMap<String, i64> =
-        std::collections::HashMap::new();
+    let mut time_slots: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
 
     // Parsed tiers; finalised after annotations are resolved.
     let mut tiers: Vec<RawTier> = Vec::new();
@@ -178,8 +177,7 @@ pub fn parse(input: &str) -> Result<EafFile> {
                         for attr in e.attributes() {
                             let attr = attr.map_err(map_attr_err)?;
                             if attr.key.local_name().as_ref() == b"MEDIA_URL" {
-                                media_url =
-                                    Some(String::from_utf8_lossy(&attr.value).into_owned());
+                                media_url = Some(String::from_utf8_lossy(&attr.value).into_owned());
                             }
                         }
                     }
@@ -303,7 +301,12 @@ pub fn parse(input: &str) -> Result<EafFile> {
                             (current_annotation_open.take(), current_tier.as_mut())
                         {
                             let resolved = match partial {
-                                PartialAnnotation::Alignable { id, ref1, ref2, value } => {
+                                PartialAnnotation::Alignable {
+                                    id,
+                                    ref1,
+                                    ref2,
+                                    value,
+                                } => {
                                     let start = *time_slots.get(&ref1).ok_or_else(|| {
                                         EngineError::Corpus(format!(
                                             "EAF: unresolved TIME_SLOT_REF1 {ref1:?}"
@@ -321,13 +324,15 @@ pub fn parse(input: &str) -> Result<EafFile> {
                                         value,
                                     }
                                 }
-                                PartialAnnotation::Ref { id, annotation_ref, value } => {
-                                    EafAnnotation::Ref {
-                                        id,
-                                        annotation_ref,
-                                        value,
-                                    }
-                                }
+                                PartialAnnotation::Ref {
+                                    id,
+                                    annotation_ref,
+                                    value,
+                                } => EafAnnotation::Ref {
+                                    id,
+                                    annotation_ref,
+                                    value,
+                                },
                             };
                             tier.annotations.push(resolved);
                         }
@@ -501,9 +506,7 @@ pub fn write_to_bytes(file: &EafFile) -> Result<Vec<u8>> {
     let mut buf = Cursor::new(Vec::new());
     let mut writer = Writer::new_with_indent(&mut buf, b' ', 4);
 
-    writer
-        .write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))
-        ?;
+    writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), None)))?;
 
     // Collect all unique time-ms values used by alignable annotations, then
     // assign synthetic slot IDs in sorted order. This keeps the TIME_ORDER
@@ -552,14 +555,10 @@ pub fn write_to_bytes(file: &EafFile) -> Result<Vec<u8>> {
         md.push_attribute(("MIME_TYPE", "audio/x-wav"));
         writer.write_event(Event::Empty(md))?;
     }
-    writer
-        .write_event(Event::End(BytesEnd::new("HEADER")))
-        ?;
+    writer.write_event(Event::End(BytesEnd::new("HEADER")))?;
 
     // <TIME_ORDER>
-    writer
-        .write_event(Event::Start(BytesStart::new("TIME_ORDER")))
-        ?;
+    writer.write_event(Event::Start(BytesStart::new("TIME_ORDER")))?;
     for t in &times {
         let mut slot = BytesStart::new("TIME_SLOT");
         let id = &time_to_slot[t];
@@ -567,9 +566,7 @@ pub fn write_to_bytes(file: &EafFile) -> Result<Vec<u8>> {
         slot.push_attribute(("TIME_VALUE", t.to_string().as_str()));
         writer.write_event(Event::Empty(slot))?;
     }
-    writer
-        .write_event(Event::End(BytesEnd::new("TIME_ORDER")))
-        ?;
+    writer.write_event(Event::End(BytesEnd::new("TIME_ORDER")))?;
 
     // <TIER>...
     for tier in &file.tiers {
@@ -581,9 +578,7 @@ pub fn write_to_bytes(file: &EafFile) -> Result<Vec<u8>> {
         }
         writer.write_event(Event::Start(t_el))?;
         for ann in &tier.annotations {
-            writer
-                .write_event(Event::Start(BytesStart::new("ANNOTATION")))
-                ?;
+            writer.write_event(Event::Start(BytesStart::new("ANNOTATION")))?;
             match ann {
                 EafAnnotation::Alignable {
                     id,
@@ -593,27 +588,13 @@ pub fn write_to_bytes(file: &EafFile) -> Result<Vec<u8>> {
                 } => {
                     let mut a = BytesStart::new("ALIGNABLE_ANNOTATION");
                     a.push_attribute(("ANNOTATION_ID", id.as_str()));
-                    a.push_attribute((
-                        "TIME_SLOT_REF1",
-                        time_to_slot[start_ms].as_str(),
-                    ));
-                    a.push_attribute((
-                        "TIME_SLOT_REF2",
-                        time_to_slot[end_ms].as_str(),
-                    ));
+                    a.push_attribute(("TIME_SLOT_REF1", time_to_slot[start_ms].as_str()));
+                    a.push_attribute(("TIME_SLOT_REF2", time_to_slot[end_ms].as_str()));
                     writer.write_event(Event::Start(a))?;
-                    writer
-                        .write_event(Event::Start(BytesStart::new("ANNOTATION_VALUE")))
-                        ?;
-                    writer
-                        .write_event(Event::Text(BytesText::new(value)))
-                        ?;
-                    writer
-                        .write_event(Event::End(BytesEnd::new("ANNOTATION_VALUE")))
-                        ?;
-                    writer
-                        .write_event(Event::End(BytesEnd::new("ALIGNABLE_ANNOTATION")))
-                        ?;
+                    writer.write_event(Event::Start(BytesStart::new("ANNOTATION_VALUE")))?;
+                    writer.write_event(Event::Text(BytesText::new(value)))?;
+                    writer.write_event(Event::End(BytesEnd::new("ANNOTATION_VALUE")))?;
+                    writer.write_event(Event::End(BytesEnd::new("ALIGNABLE_ANNOTATION")))?;
                 }
                 EafAnnotation::Ref {
                     id,
@@ -624,27 +605,15 @@ pub fn write_to_bytes(file: &EafFile) -> Result<Vec<u8>> {
                     a.push_attribute(("ANNOTATION_ID", id.as_str()));
                     a.push_attribute(("ANNOTATION_REF", annotation_ref.as_str()));
                     writer.write_event(Event::Start(a))?;
-                    writer
-                        .write_event(Event::Start(BytesStart::new("ANNOTATION_VALUE")))
-                        ?;
-                    writer
-                        .write_event(Event::Text(BytesText::new(value)))
-                        ?;
-                    writer
-                        .write_event(Event::End(BytesEnd::new("ANNOTATION_VALUE")))
-                        ?;
-                    writer
-                        .write_event(Event::End(BytesEnd::new("REF_ANNOTATION")))
-                        ?;
+                    writer.write_event(Event::Start(BytesStart::new("ANNOTATION_VALUE")))?;
+                    writer.write_event(Event::Text(BytesText::new(value)))?;
+                    writer.write_event(Event::End(BytesEnd::new("ANNOTATION_VALUE")))?;
+                    writer.write_event(Event::End(BytesEnd::new("REF_ANNOTATION")))?;
                 }
             }
-            writer
-                .write_event(Event::End(BytesEnd::new("ANNOTATION")))
-                ?;
+            writer.write_event(Event::End(BytesEnd::new("ANNOTATION")))?;
         }
-        writer
-            .write_event(Event::End(BytesEnd::new("TIER")))
-            ?;
+        writer.write_event(Event::End(BytesEnd::new("TIER")))?;
     }
 
     // Emit linguistic types used by the tiers. We always emit
@@ -681,7 +650,10 @@ pub fn write_to_bytes(file: &EafFile) -> Result<Vec<u8>> {
             "Symbolic_Association",
             "1-1 association with a parent annotation",
         ),
-        ("Included_In", "Time alignable annotations within the parent annotation's time interval, gaps are allowed"),
+        (
+            "Included_In",
+            "Time alignable annotations within the parent annotation's time interval, gaps are allowed",
+        ),
     ] {
         let mut c = BytesStart::new("CONSTRAINT");
         c.push_attribute(("DESCRIPTION", *desc));
@@ -689,9 +661,7 @@ pub fn write_to_bytes(file: &EafFile) -> Result<Vec<u8>> {
         writer.write_event(Event::Empty(c))?;
     }
 
-    writer
-        .write_event(Event::End(BytesEnd::new("ANNOTATION_DOCUMENT")))
-        ?;
+    writer.write_event(Event::End(BytesEnd::new("ANNOTATION_DOCUMENT")))?;
 
     Ok(buf.into_inner())
 }
@@ -903,6 +873,9 @@ mod tests {
         let rendered = String::from_utf8(bytes).unwrap();
         // Three unique times (0, 500, 1000) → three TIME_SLOT entries.
         let slots = rendered.matches("<TIME_SLOT").count();
-        assert_eq!(slots, 3, "expected 3 TIME_SLOT entries; rendered: {rendered}");
+        assert_eq!(
+            slots, 3,
+            "expected 3 TIME_SLOT entries; rendered: {rendered}"
+        );
     }
 }

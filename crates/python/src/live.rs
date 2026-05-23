@@ -28,9 +28,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
-use sadda_engine::{
-    LiveConfig, LiveSession as EngineLiveSession, StoppedSession,
-};
+use sadda_engine::{LiveConfig, LiveSession as EngineLiveSession, StoppedSession};
 
 use crate::engine_err_to_py;
 
@@ -489,10 +487,7 @@ fn device_label(d: &cpal::Device) -> Result<String, cpal::DeviceNameError> {
     d.name()
 }
 
-fn build_stream_config(
-    device: &cpal::Device,
-    cfg: &LiveConfig,
-) -> PyResult<cpal::StreamConfig> {
+fn build_stream_config(device: &cpal::Device, cfg: &LiveConfig) -> PyResult<cpal::StreamConfig> {
     let default = device
         .default_input_config()
         .map_err(|e| PyRuntimeError::new_err(format!("default_input_config: {e}")))?;

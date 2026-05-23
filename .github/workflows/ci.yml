@@ -19,10 +19,16 @@ jobs:
     name: build + test (linux)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust components
         run: rustup component add rustfmt clippy
+
+      - name: Install ALSA dev headers
+        # cpal's alsa-sys (live recording, slice E1) needs libasound2-dev
+        # on Debian/Ubuntu hosts. Without it, every cargo build fails at
+        # the alsa-sys build script.
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
