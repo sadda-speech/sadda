@@ -451,3 +451,198 @@ fn annotation_insert_writes_audit_log_row() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn update_interval_replaces_all_fields() {
+    let root = unique_dir("interval_update");
+    let (proj, bundle_id) = new_project_with_bundle(&root);
+    let tier = proj
+        .add_tier(&TierSpec::new(bundle_id, "t", TierType::Interval))
+        .unwrap();
+    let id = proj
+        .add_interval(&IntervalSpec {
+            tier_id: tier,
+            start_seconds: 0.0,
+            end_seconds: 0.5,
+            label: Some("orig".into()),
+            extra: Some(r#"{"v":1}"#.into()),
+            ..Default::default()
+        })
+        .unwrap();
+    proj.update_interval(
+        id,
+        &IntervalSpec {
+            tier_id: tier,
+            start_seconds: 0.2,
+            end_seconds: 0.9,
+            label: Some("updated".into()),
+            extra: Some(r#"{"v":2}"#.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let rows = proj.intervals(tier).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, id);
+    assert_eq!(rows[0].start_seconds, 0.2);
+    assert_eq!(rows[0].end_seconds, 0.9);
+    assert_eq!(rows[0].label.as_deref(), Some("updated"));
+    assert_eq!(rows[0].extra.as_deref(), Some(r#"{"v":2}"#));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn update_interval_rejects_tier_change() {
+    let root = unique_dir("interval_update_tier_change");
+    let (proj, bundle_id) = new_project_with_bundle(&root);
+    let tier_a = proj
+        .add_tier(&TierSpec::new(bundle_id, "a", TierType::Interval))
+        .unwrap();
+    let tier_b = proj
+        .add_tier(&TierSpec::new(bundle_id, "b", TierType::Interval))
+        .unwrap();
+    let id = proj
+        .add_interval(&IntervalSpec {
+            tier_id: tier_a,
+            start_seconds: 0.0,
+            end_seconds: 0.5,
+            ..Default::default()
+        })
+        .unwrap();
+    let err = proj
+        .update_interval(
+            id,
+            &IntervalSpec {
+                tier_id: tier_b,
+                start_seconds: 0.0,
+                end_seconds: 0.5,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(format!("{err}").contains("cannot move annotation"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn update_interval_rejects_invalid_span() {
+    let root = unique_dir("interval_update_invalid");
+    let (proj, bundle_id) = new_project_with_bundle(&root);
+    let tier = proj
+        .add_tier(&TierSpec::new(bundle_id, "t", TierType::Interval))
+        .unwrap();
+    let id = proj
+        .add_interval(&IntervalSpec {
+            tier_id: tier,
+            start_seconds: 0.0,
+            end_seconds: 0.5,
+            ..Default::default()
+        })
+        .unwrap();
+    // start >= end is rejected by the SQL CHECK constraint.
+    let err = proj
+        .update_interval(
+            id,
+            &IntervalSpec {
+                tier_id: tier,
+                start_seconds: 0.6,
+                end_seconds: 0.6,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("CHECK") || msg.contains("constraint"),
+        "expected CHECK-constraint error, got: {msg}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn delete_interval_removes_the_row() {
+    let root = unique_dir("interval_delete");
+    let (proj, bundle_id) = new_project_with_bundle(&root);
+    let tier = proj
+        .add_tier(&TierSpec::new(bundle_id, "t", TierType::Interval))
+        .unwrap();
+    let id_a = proj
+        .add_interval(&IntervalSpec {
+            tier_id: tier,
+            start_seconds: 0.0,
+            end_seconds: 0.5,
+            label: Some("a".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let id_b = proj
+        .add_interval(&IntervalSpec {
+            tier_id: tier,
+            start_seconds: 0.5,
+            end_seconds: 1.0,
+            label: Some("b".into()),
+            ..Default::default()
+        })
+        .unwrap();
+
+    proj.delete_interval(id_a).unwrap();
+
+    let rows = proj.intervals(tier).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, id_b);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn delete_interval_is_idempotent() {
+    let root = unique_dir("interval_delete_idempotent");
+    let (proj, bundle_id) = new_project_with_bundle(&root);
+    let _ = bundle_id;
+    // Deleting an id that never existed is OK.
+    proj.delete_interval(999_999).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn update_and_delete_interval_write_audit_log_rows() {
+    let root = unique_dir("interval_update_delete_audit");
+    let (proj, bundle_id) = new_project_with_bundle(&root);
+    let tier = proj
+        .add_tier(&TierSpec::new(bundle_id, "t", TierType::Interval))
+        .unwrap();
+    let id = proj
+        .add_interval(&IntervalSpec {
+            tier_id: tier,
+            start_seconds: 0.0,
+            end_seconds: 0.5,
+            label: Some("orig".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    proj.update_interval(
+        id,
+        &IntervalSpec {
+            tier_id: tier,
+            start_seconds: 0.0,
+            end_seconds: 0.5,
+            label: Some("changed".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    proj.delete_interval(id).unwrap();
+
+    let conn = rusqlite::Connection::open(root.join("corpus.db")).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT op FROM audit_log WHERE table_name='annotation_interval' AND row_id=?1 ORDER BY id",
+        )
+        .unwrap();
+    let ops: Vec<String> = stmt
+        .query_map([id], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(ops, vec!["insert", "update", "delete"]);
+    let _ = std::fs::remove_dir_all(&root);
+}

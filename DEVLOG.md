@@ -6,6 +6,150 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-23 — Interval-tier editing (D6): mouse state machine, drag-create, drag-resize, double-click label, delete key
+
+Goal: settle the sixth Phase 2 slice. D6 turns the tier-strip pane from a read-only viewer into an interval editor. Two engine methods land alongside the GUI work.
+
+### What D6 must deliver
+
+From the Phase 2 slicing entry: "Drag in empty space to create a new interval; drag a boundary to resize; double-click to edit label inline; delete key removes the selected interval. Writes via `Project::add_interval`; engine API extended with `update_interval / delete_interval`."
+
+### Engine extension
+
+Two new methods on `Project`:
+
+```rust
+impl Project {
+    pub fn update_interval(&self, id: i64, spec: &IntervalSpec) -> Result<()>;
+    pub fn delete_interval(&self, id: i64) -> Result<()>;
+}
+```
+
+- **`update_interval`**: replace-all semantics on `(start_seconds, end_seconds, label, extra, parent_annotation_id)`. Rejects an attempt to change `tier_id` (would corrupt the parent-tier relationship). Cardinality re-validation runs on the new `parent_annotation_id`. The existing `annotation_interval_audit_update` trigger fires automatically — the audit trail records the before/after JSON without any caller cooperation.
+- **`delete_interval`**: simple `DELETE FROM annotation_interval WHERE id = ?`. The audit trigger captures the row before deletion. Returns `Ok(())` even when no row matched — idempotent, matches what users expect from a "remove" action.
+
+Surface-symmetric with the existing `add_interval`; same error model.
+
+### App mouse state machine
+
+The tier-strip interval lane handles four mouse interactions; D6's job is the state machine that disambiguates them:
+
+```rust
+enum DraftEdit {
+    None,
+    Creating  { tier_id: i64, start_time: f64, current_time: f64 },
+    Resizing  { tier_id: i64, annotation_id: i64, edge: BoundaryEdge,
+                fixed_time: f64, current_time: f64 },
+}
+enum BoundaryEdge { Start, End }
+```
+
+The dispatch on mouse-down inside an interval lane:
+
+| Pointer location at mouse-down | Action |
+|---|---|
+| Within ~6px of an interval boundary | Start `Resizing { edge }`; `fixed_time` = the *other* edge |
+| Inside an interval's body (not near a boundary) | Click-only handling (B4 select + C5 cursor positioning); no draft starts |
+| Empty lane space | Start `Creating { start_time }` |
+
+On `dragged()`: update `current_time` from `pointer_to_time`. The pane render draws a live preview overlay (different colour so it's clearly a draft).
+
+On `drag_stopped()`:
+
+- `Creating` with `|end - start| ≥ 5ms`: commit `Project::add_interval`. Smaller drags are treated as a stray click (no-op for create — the click handler already did its work).
+- `Resizing`: commit `Project::update_interval` with the new boundary; if the new range is negative (user dragged past the fixed edge), swap the endpoints first.
+
+### Inline label editing
+
+Double-click an interval → enter label-edit mode:
+
+```rust
+struct LabelEdit {
+    tier_id: i64,
+    annotation_id: i64,
+    text: String,        // mutable buffer the TextEdit binds to
+    just_started: bool,  // first-frame flag for request_focus
+}
+```
+
+The pane renders an `egui::TextEdit` over the interval's rectangle, pre-filled with the current label, focus requested on the first frame. Commit on **Enter** (writes via `Project::update_interval`); cancel on **Escape** (drops the buffer).
+
+Click outside the TextEdit also commits — matches the macOS / Praat convention where focus-loss saves the edit.
+
+### Delete key
+
+When `selected_annotation == Some(AnnotationSelection::Interval { … })` and the user presses **Delete** or **Backspace** (and no TextEdit has focus), call `Project::delete_interval(id)` and clear the selection. Same key binding works for points in D7.
+
+### Overlap policy
+
+The engine doesn't reject overlapping intervals — that's existing behaviour, validated by the fact that TextGrid export already handles it (errors at export time per the D1 contract, not at insert time). D6 inherits that: **users can create overlapping intervals**. The boundary-drag resize doesn't snap to neighbouring boundaries either; users are trusted.
+
+If real users complain about accidental overlap, a soft "snap within 5px to nearest boundary" can land as a 0.3 polish slice. Engine-enforced no-overlap is more invasive — it'd need an annotation-tier `non_overlapping` constraint and a schema migration; out of D6 scope.
+
+### Confirmed D6 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Engine update API | **`update_interval(id, &IntervalSpec)`, replace-all** | Smallest surface; cardinality enforcement reused; same shape as `add_interval` |
+| Tier-id change | **Rejected** | Moving an interval between tiers is a different operation; out of scope |
+| Engine delete API | **`delete_interval(id)`, idempotent** | Matches user mental model; existing audit trigger captures the OLD row |
+| Boundary hit zone | **6 pixels** | Standard for interactive editors; doesn't conflict with body click |
+| Minimum drag-to-create | **5 milliseconds** | Filters accidental clicks; 5ms at typical zoom is ~5px |
+| Negative-range resize | **Swap endpoints; never insert reversed** | The engine CHECK rejects `start >= end` anyway; swap gives the user the intuitive result |
+| Label edit trigger | **Double-click on body** | Universal convention; doesn't conflict with single-click select |
+| Label commit | **Enter or focus-loss** | macOS / Praat / VS Code convention |
+| Label cancel | **Escape** | Universal convention |
+| Delete key | **Delete or Backspace** | Both work; mirrors most editors |
+| Overlap policy | **Allowed at engine level; no UX prevention** | Inherits from existing engine behaviour; can layer "snap-to-boundary" later |
+| Draft preview colour | **Lighter shade of the base fill** | Visually obvious as in-progress; doesn't conflict with selection highlight |
+| Cursor positioning during drag | **Doesn't move; B4 cursor logic only fires on plain clicks** | Drag = edit; click = select + cursor. Two disjoint actions |
+| Audit log | **Free via the V3 triggers** | No caller cooperation needed |
+
+### State changes on `SaddaApp`
+
+- **New**: `draft_edit: DraftEdit`, `label_edit: Option<LabelEdit>`.
+- **Reset** in `clear_bundle_selection` / `select_bundle`: both cleared along with selection.
+- Existing `selected_annotation` from B4 stays the source of truth for "what does Delete affect?"
+
+### Layout
+
+- `crates/engine/src/corpus.rs` — `Project::update_interval`, `Project::delete_interval`.
+- `crates/engine/tests/sparse_annotations.rs` — extend with update/delete tests.
+- `crates/app/src/main.rs` — `DraftEdit`, `LabelEdit`; rewrite of `render_interval_lane` and the lane's mouse-event plumbing; delete-key handler at the app level; TextEdit overlay.
+
+### Lossiness / what D6 deliberately doesn't ship
+
+- **Point-tier editing.** Slice D7.
+- **Reference-tier editing.** Reference lanes still show "(reference — N targets)"; their visualisation needs to come first.
+- **Dense-tier editing.** No GUI for editing per-frame dense data at v1.
+- **Interval move (drag the body to shift)** — drag-resize only at the boundaries. Body-drag-to-move is a polish item.
+- **Multi-select.** Single selection only.
+- **Undo / redo.** No app-level undo stack at v1; the audit log captures the data needed to reconstruct one in a later slice.
+- **Snap-to-boundary, snap-to-cursor, magnetic guides.** All polish items.
+- **Insert-into-gap auto-grow** (Audacity behavior). v1 doesn't auto-resize neighbours.
+- **Rich-text labels.** Plain UTF-8 only; matches the engine's string column.
+- **Toolbar buttons for "Add / Delete"** — keyboard + drag only at v1; menu / palette can come later.
+- **Right-click context menus.** Same.
+
+### What this entry doesn't decide
+
+- **Whether label commits on focus-loss should also trigger when the user clicks another interval** — settled in implementation.
+- **Whether to show the new interval's draft preview in the waveform / spectrogram too** — only in the lane being edited for now; could extend.
+- **Numerical-precision floor for `start_seconds == end_seconds`** — the engine's CHECK already rejects equal; the app's 5ms min-drag is the soft guard.
+- **Cursor flash / blink in the label TextEdit** — egui default.
+
+### Sources / references
+
+- 2026-05-23 Phase 2 slicing entry (D6 row)
+- 2026-05-23 B4 entry (the tier-strip selection state this slice extends)
+- 2026-05-23 C5 entry (the timeline state edit times map through)
+- 2026-05-21 B2 entry (`add_interval` + cardinality model these new methods symmetrically extend)
+- 2026-05-22 D1 entry (TextGrid export's overlap handling — confirms engine doesn't reject overlaps at insert time)
+- Audacity edit-vocabulary reference: <https://manual.audacityteam.org/man/audacity_selection.html>
+- Praat label-edit convention: <https://www.fon.hum.uva.nl/praat/manual/Intro_7__Annotation.html>
+
+---
+
 ## 2026-05-23 — Synced cursor + zoom + scroll + playback (C5): shared timeline state, mouse-position-centered zoom, cpal output with linear resample, view follows cursor
 
 Goal: settle the fifth Phase 2 slice. C5 is the slice that turns three independent panes into a coordinated editor — they all share one timeline state, scrub in lockstep, and respond to a single transport. It's also the biggest single slice in Phase 2; budget realistically ~1200–1500 LOC.
