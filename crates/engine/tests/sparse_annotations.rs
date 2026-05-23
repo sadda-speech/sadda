@@ -793,3 +793,76 @@ fn update_and_delete_point_write_audit_log_rows() {
     assert_eq!(ops, vec!["insert", "update", "delete"]);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn delete_bundle_cascades_through_tiers_and_annotations() {
+    let root = unique_dir("delete_bundle_cascade");
+    let (proj, bundle_id) = new_project_with_bundle(&root);
+    let tier = proj
+        .add_tier(&TierSpec::new(bundle_id, "phones", TierType::Interval))
+        .unwrap();
+    proj.add_interval(&IntervalSpec {
+        tier_id: tier,
+        start_seconds: 0.0,
+        end_seconds: 0.5,
+        label: Some("h".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    proj.add_interval(&IntervalSpec {
+        tier_id: tier,
+        start_seconds: 0.5,
+        end_seconds: 1.0,
+        label: Some("e".into()),
+        ..Default::default()
+    })
+    .unwrap();
+
+    // Capture the WAV path before deletion so we can verify it's
+    // removed.
+    let conn = rusqlite::Connection::open(root.join("corpus.db")).unwrap();
+    let wav_rel: String = conn
+        .query_row(
+            "SELECT audio_relative_path FROM bundle WHERE id = ?1",
+            [bundle_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let wav_abs = root.join(&wav_rel);
+    assert!(wav_abs.exists());
+    drop(conn);
+
+    proj.delete_bundle(bundle_id).unwrap();
+
+    // Bundle row gone.
+    assert_eq!(proj.bundles().unwrap().len(), 0);
+    let conn = rusqlite::Connection::open(root.join("corpus.db")).unwrap();
+    let tier_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tier WHERE bundle_id = ?1",
+            [bundle_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tier_count, 0);
+    let interval_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM annotation_interval WHERE tier_id = ?1",
+            [tier],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(interval_count, 0);
+    // WAV file removed.
+    assert!(!wav_abs.exists());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn delete_bundle_is_idempotent_on_missing_id() {
+    let root = unique_dir("delete_bundle_missing");
+    let (proj, _bundle_id) = new_project_with_bundle(&root);
+    proj.delete_bundle(99_999).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
 use pyo3::prelude::*;
-use sadda_engine::{Project, TierType};
+use sadda_engine::{
+    LiveConfig, LiveResults, LiveSession, Project, StoppedSession, TierType,
+};
 
 use crate::playback::Playback;
 use crate::sadda_app::{
@@ -134,6 +136,22 @@ struct SaddaApp {
     command_palette_open: bool,
     /// E9: search text in the command palette.
     command_palette_query: String,
+    /// H1: informational (non-error) banner — green tone, dismissed
+    /// by user click. Used to confirm successful imports / exports.
+    info: Option<String>,
+    /// H1: live-recording modal state. `Some` while the modal is
+    /// open.
+    record_dialog: Option<RecordDialog>,
+    /// H1: pending bundle-deletion confirmation. `Some` while the
+    /// confirm modal is open.
+    pending_delete: Option<PendingBundleDelete>,
+}
+
+/// H1: identifies a bundle the user has requested be deleted,
+/// rendered as a confirmation modal.
+struct PendingBundleDelete {
+    id: i64,
+    name: String,
 }
 
 /// Mouse-driven edit-in-progress for tier lanes. Idle between drags;
@@ -194,6 +212,224 @@ enum LabelEditKind {
     Point,
 }
 
+/// H1: live-recording modal. State machine: Idle (configuring the
+/// session) → Recording (cpal stream running, meter updating) →
+/// Stopped (awaiting Save or Discard). On Save, commits to a bundle
+/// and selects it; on Discard or cancel, drops the in-progress
+/// directory.
+struct RecordDialog {
+    /// cpal device label. `"default"` resolves at start() to the
+    /// host's default input device.
+    device: String,
+    /// Available device labels for the picker. Populated once at
+    /// dialog construction.
+    device_options: Vec<String>,
+    /// Capture sample rate in Hz.
+    sample_rate: u32,
+    /// 1 (mono) or 2 (stereo). DSP path always runs on the
+    /// downmixed-to-mono signal.
+    channels: u16,
+    /// Bundle name the recording will be committed as.
+    name: String,
+    /// Current state of the dialog state machine.
+    state: RecordDialogState,
+    /// Live peak dB-FS for the meter (Recording state only).
+    meter_db: f32,
+    /// Seconds since the recording started (Recording state only).
+    elapsed_seconds: f64,
+    /// Sticky status message rendered below the action buttons.
+    status: String,
+}
+
+#[allow(clippy::large_enum_variant)]
+enum RecordDialogState {
+    Idle,
+    Recording(RecordingHandle),
+    Stopped {
+        stopped: StoppedSession,
+        duration: f64,
+        dropped: usize,
+    },
+}
+
+struct RecordingHandle {
+    /// Engine session — owns the WAV writer + consumer thread.
+    engine: LiveSession,
+    /// Result rings drained each frame; otherwise the engine's
+    /// consumer thread would back-pressure on full rings and start
+    /// dropping DSP frames.
+    results: LiveResults,
+    /// Holds the cpal stream alive on a dedicated thread (`cpal::Stream`
+    /// is `!Send` on Linux ALSA). Drop = stop signal + join.
+    cpal: CpalStreamHandle,
+    /// Wall-clock start instant — drives the elapsed-seconds display.
+    started_at: std::time::Instant,
+}
+
+/// Owns a `cpal::Stream` on a dedicated thread. The stream is
+/// `!Send` on Linux ALSA, so we cannot move it into the GUI's
+/// `App` field without contaminating eframe's threading. Dropping
+/// this handle stops the stream and joins the thread.
+struct CpalStreamHandle {
+    stop_tx: std::sync::mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for CpalStreamHandle {
+    fn drop(&mut self) {
+        let _ = self.stop_tx.send(());
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+impl RecordDialog {
+    fn new() -> Self {
+        let device_options = enumerate_input_devices();
+        let default_device = default_input_device_label().unwrap_or_else(|| "default".into());
+        Self {
+            device: default_device,
+            device_options,
+            sample_rate: 44_100,
+            channels: 1,
+            name: default_recording_name(),
+            state: RecordDialogState::Idle,
+            meter_db: -120.0,
+            elapsed_seconds: 0.0,
+            status: String::new(),
+        }
+    }
+}
+
+fn default_recording_name() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("recording_{secs}")
+}
+
+fn enumerate_input_devices() -> Vec<String> {
+    use cpal::traits::HostTrait;
+    let host = cpal::default_host();
+    let mut out = vec!["default".to_string()];
+    if let Ok(devices) = host.input_devices() {
+        for d in devices {
+            if let Ok(n) = cpal_device_name(&d) {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
+
+fn default_input_device_label() -> Option<String> {
+    use cpal::traits::HostTrait;
+    cpal::default_host()
+        .default_input_device()
+        .and_then(|d| cpal_device_name(&d).ok())
+}
+
+#[allow(deprecated)]
+fn cpal_device_name(d: &cpal::Device) -> std::result::Result<String, cpal::DeviceNameError> {
+    use cpal::traits::DeviceTrait;
+    d.name()
+}
+
+/// Pending action for the recording modal's render closure. Captured
+/// inside the egui closure (which borrows `dialog` mutably) and
+/// dispatched afterwards against `&mut self` to avoid a double
+/// borrow.
+#[derive(Debug, Clone, Copy)]
+enum RecordDialogAction {
+    Start,
+    Stop,
+    Commit,
+    Discard,
+    Close,
+}
+
+/// Builds the cpal input stream against `device_label` and pushes
+/// captured samples into `producer`. The stream lives on a
+/// dedicated thread (cpal::Stream is `!Send` on Linux ALSA).
+fn spawn_cpal_input(
+    device_label: &str,
+    cfg: &LiveConfig,
+    mut producer: rtrb::Producer<f32>,
+) -> std::result::Result<CpalStreamHandle, String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    let host = cpal::default_host();
+    let device = if device_label == "default" {
+        host.default_input_device()
+            .ok_or_else(|| "no default input device".to_string())?
+    } else {
+        let mut found = None;
+        let devices = host
+            .input_devices()
+            .map_err(|e| format!("enumerating input devices: {e}"))?;
+        for d in devices {
+            if cpal_device_name(&d).ok().as_deref() == Some(device_label) {
+                found = Some(d);
+                break;
+            }
+        }
+        found.ok_or_else(|| format!("input device not found: {device_label}"))?
+    };
+    let stream_cfg = cpal::StreamConfig {
+        channels: cfg.channels,
+        sample_rate: cfg.sample_rate,
+        buffer_size: cpal::BufferSize::Default,
+    };
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let thread = std::thread::Builder::new()
+        .name("sadda-app-cpal".into())
+        .spawn(move || {
+            let stream = match device.build_input_stream::<f32, _, _>(
+                &stream_cfg,
+                move |data: &[f32], _info: &cpal::InputCallbackInfo| {
+                    for &s in data {
+                        let _ = producer.push(s);
+                    }
+                },
+                move |err| eprintln!("sadda-app cpal error: {err}"),
+                None,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("sadda-app: build_input_stream failed: {e}");
+                    return;
+                }
+            };
+            use cpal::traits::StreamTrait;
+            if let Err(e) = stream.play() {
+                eprintln!("sadda-app: stream.play() failed: {e}");
+                return;
+            }
+            let _ = stop_rx.recv();
+            drop(stream);
+        })
+        .map_err(|e| format!("spawn cpal thread: {e}"))?;
+    Ok(CpalStreamHandle {
+        stop_tx,
+        thread: Some(thread),
+    })
+}
+
+/// Open `path` in the OS's native file manager. Best-effort: failure
+/// is silently ignored on the assumption the user can navigate to
+/// the path manually using the message they were just shown.
+fn open_in_file_manager(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("explorer").arg(path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open").arg(path).spawn();
+    let _ = result;
+}
+
 /// Identifies the currently-selected annotation in the tier strip.
 /// Reference selection is omitted in B4 (reference lanes don't have
 /// time-positioned content yet).
@@ -240,6 +476,9 @@ impl SaddaApp {
             registered_commands: Vec::new(),
             command_palette_open: false,
             command_palette_query: String::new(),
+            info: None,
+            record_dialog: None,
+            pending_delete: None,
         }
     }
 
@@ -294,6 +533,521 @@ impl SaddaApp {
             }
             Err(e) => self.set_error(format!("Failed to add bundle: {e}")),
         }
+    }
+
+    // ----- H1 Import / Export helpers ---------------------------------
+
+    fn import_textgrid_for_active_bundle(&mut self, path: PathBuf) {
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return;
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        match project.import_textgrid(&path, bundle_id) {
+            Ok(tier_ids) => {
+                self.error = None;
+                self.set_info(format!(
+                    "Imported {} tier{} from {}",
+                    tier_ids.len(),
+                    if tier_ids.len() == 1 { "" } else { "s" },
+                    path.display(),
+                ));
+            }
+            Err(e) => self.set_error(format!("TextGrid import failed: {e}")),
+        }
+    }
+
+    fn import_eaf_for_active_bundle(&mut self, path: PathBuf) {
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return;
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        match project.import_eaf(&path, bundle_id) {
+            Ok(tier_ids) => {
+                self.error = None;
+                self.set_info(format!(
+                    "Imported {} tier{} from {}",
+                    tier_ids.len(),
+                    if tier_ids.len() == 1 { "" } else { "s" },
+                    path.display(),
+                ));
+            }
+            Err(e) => self.set_error(format!("EAF import failed: {e}")),
+        }
+    }
+
+    fn export_textgrid_for_active_bundle(&mut self, path: PathBuf) {
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return;
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        match project.export_textgrid(bundle_id, &path, None) {
+            Ok(()) => {
+                self.error = None;
+                self.set_info(format!("Wrote TextGrid to {}", path.display()));
+            }
+            Err(e) => self.set_error(format!("TextGrid export failed: {e}")),
+        }
+    }
+
+    fn export_eaf_for_active_bundle(&mut self, path: PathBuf) {
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return;
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        match project.export_eaf(bundle_id, &path, None) {
+            Ok(()) => {
+                self.error = None;
+                self.set_info(format!("Wrote EAF to {}", path.display()));
+            }
+            Err(e) => self.set_error(format!("EAF export failed: {e}")),
+        }
+    }
+
+    /// Pops a save-file dialog defaulting to the project's
+    /// `exports/` directory + the active bundle's name + the
+    /// requested extension. Returns `None` if the user cancels.
+    fn suggest_export_path(&self, extension: &str) -> Option<PathBuf> {
+        let (root, bundle_id) = match &self.app_state {
+            AppState::ProjectLoaded { root, .. } => (root.clone(), self.selected_bundle_id?),
+            AppState::NoProject => return None,
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return None;
+        };
+        let bundle_name = project
+            .bundles()
+            .ok()?
+            .into_iter()
+            .find(|b| b.id == bundle_id)?
+            .name;
+        let exports = root.join("exports");
+        let _ = std::fs::create_dir_all(&exports);
+        let filename = format!("{bundle_name}.{extension}");
+        rfd::FileDialog::new()
+            .set_directory(&exports)
+            .set_file_name(&filename)
+            .save_file()
+    }
+
+    /// Opens the project root in the OS's native file manager.
+    fn show_project_folder(&mut self) {
+        let AppState::ProjectLoaded { root, .. } = &self.app_state else {
+            return;
+        };
+        open_in_file_manager(root);
+    }
+
+    /// Opens the parent directory of a bundle's WAV file in the OS
+    /// file manager.
+    fn reveal_bundle(&mut self, audio_rel: &str) {
+        let AppState::ProjectLoaded { root, .. } = &self.app_state else {
+            return;
+        };
+        let abs = root.join(audio_rel);
+        let parent = abs.parent().unwrap_or(root.as_path());
+        open_in_file_manager(parent);
+    }
+
+    /// Executes the pending bundle deletion. Clears the selection
+    /// if the deleted bundle was active; refreshes the bundle list
+    /// on the next frame.
+    fn confirm_pending_delete(&mut self) {
+        let Some(pending) = self.pending_delete.take() else {
+            return;
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        match project.delete_bundle(pending.id) {
+            Ok(()) => {
+                self.error = None;
+                if self.selected_bundle_id == Some(pending.id) {
+                    self.selected_bundle_id = None;
+                    self.active_envelope = None;
+                    self.active_spectrogram = None;
+                    self.selected_annotation = None;
+                    self.timeline = TimelineState::default();
+                    self.playback = None;
+                }
+                self.set_info(format!("Deleted bundle “{}”.", pending.name));
+            }
+            Err(e) => self.set_error(format!("Delete failed: {e}")),
+        }
+    }
+
+    /// Renders the bundle-delete confirmation modal when one is
+    /// pending.
+    fn render_pending_delete(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_delete.as_ref() else {
+            return;
+        };
+        let name = pending.name.clone();
+        let mut action: Option<bool> = None; // true = confirm, false = cancel
+        let mut is_open = true;
+        egui::Window::new("Delete bundle?")
+            .open(&mut is_open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Permanently delete bundle “{name}” and all its tiers, \
+                     annotations, and derived signals?"
+                ));
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("The recorded WAV will also be removed from disk.")
+                        .weak(),
+                );
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(
+                            egui::RichText::new("Delete")
+                                .color(egui::Color32::from_rgb(220, 80, 80)),
+                        )
+                        .clicked()
+                    {
+                        action = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        action = Some(false);
+                    }
+                });
+            });
+        if !is_open {
+            action = Some(false);
+        }
+        match action {
+            Some(true) => self.confirm_pending_delete(),
+            Some(false) => {
+                self.pending_delete = None;
+            }
+            None => {}
+        }
+    }
+
+    /// Opens the recording-modal dialog. State is reset on every
+    /// open.
+    fn open_record_dialog(&mut self) {
+        self.record_dialog = Some(RecordDialog::new());
+    }
+
+    /// Begins capture using `self.record_dialog`'s configured device
+    /// + format. Builds the engine session, spawns the cpal stream
+    /// thread, and flips the dialog into `Recording`. Errors surface
+    /// in the dialog's status line.
+    fn record_dialog_start(&mut self) {
+        let AppState::ProjectLoaded { root, .. } = &self.app_state else {
+            return;
+        };
+        let root = root.clone();
+        let Some(dialog) = self.record_dialog.as_mut() else {
+            return;
+        };
+        let cfg = LiveConfig {
+            sample_rate: dialog.sample_rate,
+            channels: dialog.channels,
+            ..Default::default()
+        };
+        let (mut engine, results) = match LiveSession::start(&root, cfg.clone()) {
+            Ok(pair) => pair,
+            Err(e) => {
+                dialog.status = format!("Start failed: {e}");
+                return;
+            }
+        };
+        let producer = match engine.take_producer() {
+            Some(p) => p,
+            None => {
+                dialog.status = "Start failed: engine produced no sample queue".into();
+                return;
+            }
+        };
+        let cpal = match spawn_cpal_input(&dialog.device, &cfg, producer) {
+            Ok(handle) => handle,
+            Err(e) => {
+                // Engine session leaks an .in_progress dir if we abandon
+                // it; stop+discard cleans it up.
+                if let Ok(stopped) = engine.stop() {
+                    let _ = stopped.discard();
+                }
+                dialog.status = format!("Audio device error: {e}");
+                return;
+            }
+        };
+        dialog.state = RecordDialogState::Recording(RecordingHandle {
+            engine,
+            results,
+            cpal,
+            started_at: std::time::Instant::now(),
+        });
+        dialog.status = "Recording…".into();
+        dialog.meter_db = -120.0;
+        dialog.elapsed_seconds = 0.0;
+    }
+
+    /// Stops the recording, transitioning into `Stopped`. The WAV
+    /// file is flushed but not yet committed.
+    fn record_dialog_stop(&mut self) {
+        let Some(dialog) = self.record_dialog.as_mut() else {
+            return;
+        };
+        let state = std::mem::replace(&mut dialog.state, RecordDialogState::Idle);
+        let RecordDialogState::Recording(handle) = state else {
+            dialog.state = state;
+            return;
+        };
+        let RecordingHandle {
+            engine, cpal, ..
+        } = handle;
+        // 1. Drop the cpal stream first so no further callbacks fire.
+        drop(cpal);
+        // 2. Stop the engine session, which joins the consumer thread.
+        match engine.stop() {
+            Ok(stopped) => {
+                let duration = stopped.duration_seconds();
+                let dropped = stopped.dropped_samples;
+                dialog.elapsed_seconds = duration;
+                dialog.status = if dropped > 0 {
+                    format!("Stopped — {duration:.1}s captured ({dropped} samples dropped)")
+                } else {
+                    format!("Stopped — {duration:.1}s captured")
+                };
+                dialog.state = RecordDialogState::Stopped {
+                    stopped,
+                    duration,
+                    dropped,
+                };
+            }
+            Err(e) => {
+                dialog.status = format!("Stop failed: {e}");
+            }
+        }
+    }
+
+    /// Commits the stopped recording into the project as a new bundle
+    /// and selects it.
+    fn record_dialog_commit(&mut self) {
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        let Some(dialog) = self.record_dialog.as_mut() else {
+            return;
+        };
+        let state = std::mem::replace(&mut dialog.state, RecordDialogState::Idle);
+        let (stopped, _duration, _dropped) = match state {
+            RecordDialogState::Stopped {
+                stopped,
+                duration,
+                dropped,
+            } => (stopped, duration, dropped),
+            other => {
+                dialog.state = other;
+                dialog.status = "Stop the recording before saving.".into();
+                return;
+            }
+        };
+        let name = dialog.name.trim().to_string();
+        if name.is_empty() {
+            dialog.status = "Give the recording a name.".into();
+            // Recover the stopped session into the dialog for retry.
+            dialog.state = RecordDialogState::Stopped {
+                duration: stopped.duration_seconds(),
+                dropped: stopped.dropped_samples,
+                stopped,
+            };
+            return;
+        }
+        let params_json = format!(
+            "{{\"device\":{:?},\"sample_rate\":{},\"channels\":{},\"duration_s\":{}}}",
+            dialog.device,
+            dialog.sample_rate,
+            dialog.channels,
+            stopped.duration_seconds(),
+        );
+        match project.commit_recording(stopped, &name, &params_json) {
+            Ok(bundle_id) => {
+                let saved_name = name.clone();
+                self.record_dialog = None;
+                self.set_info(format!("Saved recording as bundle “{saved_name}”."));
+                self.select_bundle(bundle_id);
+            }
+            Err(e) => {
+                if let Some(d) = self.record_dialog.as_mut() {
+                    d.status = format!("Save failed: {e}");
+                }
+            }
+        }
+    }
+
+    /// Discards the stopped recording (deletes the in-progress dir).
+    fn record_dialog_discard(&mut self) {
+        let Some(dialog) = self.record_dialog.as_mut() else {
+            return;
+        };
+        let state = std::mem::replace(&mut dialog.state, RecordDialogState::Idle);
+        match state {
+            RecordDialogState::Stopped { stopped, .. } => {
+                let _ = stopped.discard();
+                self.record_dialog = None;
+            }
+            RecordDialogState::Recording(handle) => {
+                // Closing while still recording: stop then discard.
+                let RecordingHandle { engine, cpal, .. } = handle;
+                drop(cpal);
+                if let Ok(stopped) = engine.stop() {
+                    let _ = stopped.discard();
+                }
+                self.record_dialog = None;
+            }
+            RecordDialogState::Idle => {
+                self.record_dialog = None;
+            }
+        }
+    }
+
+    /// Renders the recording modal (when open). Drains the engine's
+    /// result rings each frame so the meter stays current and the
+    /// engine's consumer thread doesn't back-pressure.
+    fn render_record_dialog(&mut self, ctx: &egui::Context) {
+        if self.record_dialog.is_none() {
+            return;
+        }
+        // Poll engine result rings to update the meter + elapsed time.
+        if let Some(dialog) = self.record_dialog.as_mut() {
+            if let RecordDialogState::Recording(handle) = &mut dialog.state {
+                let mut latest_peak = dialog.meter_db;
+                while let Ok(m) = handle.results.meters.pop() {
+                    latest_peak = m.rms_db;
+                }
+                while handle.results.pitches.pop().is_ok() {}
+                while handle.results.intensities.pop().is_ok() {}
+                while handle.results.formants.pop().is_ok() {}
+                dialog.meter_db = latest_peak;
+                dialog.elapsed_seconds = handle.started_at.elapsed().as_secs_f64();
+                ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            }
+        }
+
+        // Track which action to take after the closure (so we don't
+        // borrow `self.record_dialog` mutably while also calling
+        // `&mut self` methods on `SaddaApp`).
+        let mut action: Option<RecordDialogAction> = None;
+        let mut is_open = true;
+        // Borrowing `self.record_dialog` here releases before action dispatch.
+        if let Some(dialog) = self.record_dialog.as_mut() {
+            egui::Window::new("Record from microphone")
+                .open(&mut is_open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    let recording = matches!(dialog.state, RecordDialogState::Recording(_));
+                    let stopped = matches!(dialog.state, RecordDialogState::Stopped { .. });
+                    let idle = matches!(dialog.state, RecordDialogState::Idle);
+
+                    ui.add_enabled_ui(idle, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Device:");
+                            egui::ComboBox::from_id_salt("record-device")
+                                .selected_text(&dialog.device)
+                                .show_ui(ui, |ui| {
+                                    for d in &dialog.device_options {
+                                        ui.selectable_value(
+                                            &mut dialog.device, d.clone(), d,
+                                        );
+                                    }
+                                });
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Sample rate:");
+                            for &rate in &[16_000u32, 22_050, 44_100, 48_000] {
+                                ui.selectable_value(
+                                    &mut dialog.sample_rate,
+                                    rate,
+                                    format!("{rate}"),
+                                );
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Channels:");
+                            ui.selectable_value(&mut dialog.channels, 1, "1 (mono)");
+                            ui.selectable_value(&mut dialog.channels, 2, "2 (stereo)");
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.add_enabled(
+                            !recording,
+                            egui::TextEdit::singleline(&mut dialog.name).desired_width(220.0),
+                        );
+                    });
+
+                    ui.separator();
+
+                    if recording {
+                        ui.label(format!("Elapsed: {:.1}s", dialog.elapsed_seconds));
+                        ui.label(format!("Level: {:.1} dB-FS", dialog.meter_db));
+                    } else if stopped {
+                        ui.label(format!("Captured: {:.1}s", dialog.elapsed_seconds));
+                    }
+
+                    if !dialog.status.is_empty() {
+                        ui.separator();
+                        ui.label(&dialog.status);
+                    }
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if idle {
+                            if ui.button("Start").clicked() {
+                                action = Some(RecordDialogAction::Start);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                action = Some(RecordDialogAction::Close);
+                            }
+                        } else if recording {
+                            if ui.button("Stop").clicked() {
+                                action = Some(RecordDialogAction::Stop);
+                            }
+                        } else if stopped {
+                            if ui.button("Save").clicked() {
+                                action = Some(RecordDialogAction::Commit);
+                            }
+                            if ui.button("Discard").clicked() {
+                                action = Some(RecordDialogAction::Discard);
+                            }
+                        }
+                    });
+                });
+        }
+
+        if !is_open {
+            action = Some(RecordDialogAction::Close);
+        }
+
+        match action {
+            None => {}
+            Some(RecordDialogAction::Start) => self.record_dialog_start(),
+            Some(RecordDialogAction::Stop) => self.record_dialog_stop(),
+            Some(RecordDialogAction::Commit) => self.record_dialog_commit(),
+            Some(RecordDialogAction::Discard) => self.record_dialog_discard(),
+            Some(RecordDialogAction::Close) => self.record_dialog_discard(),
+        }
+    }
+
+    /// Informational banner — same look as `self.error` but green.
+    /// Used to confirm successful imports / exports.
+    fn set_info(&mut self, msg: String) {
+        self.info = Some(msg);
     }
 
     /// Loads the bundle's audio, builds the envelope cache, and sets
@@ -1190,6 +1944,12 @@ impl eframe::App for SaddaApp {
         // E9 command palette. Same overlay pattern.
         self.command_palette_window(ui.ctx());
 
+        // H1 live-recording modal.
+        self.render_record_dialog(ui.ctx());
+
+        // H1 bundle-delete confirmation modal.
+        self.render_pending_delete(ui.ctx());
+
         egui::Panel::top("menu").show_inside(ui, |ui| self.menu_bar(ui));
 
         if let AppState::ProjectLoaded { name, root, .. } = &self.app_state {
@@ -1205,6 +1965,17 @@ impl eframe::App for SaddaApp {
                     ui.colored_label(egui::Color32::from_rgb(220, 80, 80), &msg);
                     if ui.button("Dismiss").clicked() {
                         self.error = None;
+                    }
+                });
+            });
+        }
+
+        if let Some(msg) = self.info.clone() {
+            egui::Panel::bottom("info").show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::from_rgb(60, 170, 90), &msg);
+                    if ui.button("Dismiss").clicked() {
+                        self.info = None;
                     }
                 });
             });
@@ -1284,9 +2055,11 @@ impl SaddaApp {
             }
             ui.menu_button("Recent Projects", |ui| self.recent_projects_submenu(ui));
             ui.separator();
-            let bundle_enabled = matches!(self.app_state, AppState::ProjectLoaded { .. });
+            let project_open = matches!(self.app_state, AppState::ProjectLoaded { .. });
+            let bundle_selected =
+                project_open && self.selected_bundle_id.is_some();
             if ui
-                .add_enabled(bundle_enabled, egui::Button::new("Open Bundle…"))
+                .add_enabled(project_open, egui::Button::new("Open Bundle…"))
                 .on_disabled_hover_text("Open or create a project first")
                 .clicked()
             {
@@ -1298,6 +2071,77 @@ impl SaddaApp {
                 {
                     self.add_bundle_from_wav(path);
                 }
+            }
+            // ---- H1 Import submenu --------------------------------
+            ui.menu_button("Import", |ui| {
+                let import_enabled = bundle_selected;
+                ui.add_enabled_ui(import_enabled, |ui| {
+                    if ui.button("Praat TextGrid…").clicked() {
+                        ui.close();
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("Praat TextGrid", &["TextGrid", "textgrid"])
+                            .set_title("Import a Praat TextGrid into the active bundle")
+                            .pick_file()
+                        {
+                            self.import_textgrid_for_active_bundle(path);
+                        }
+                    }
+                    if ui.button("ELAN .eaf…").clicked() {
+                        ui.close();
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("ELAN EAF", &["eaf"])
+                            .set_title("Import an ELAN .eaf into the active bundle")
+                            .pick_file()
+                        {
+                            self.import_eaf_for_active_bundle(path);
+                        }
+                    }
+                });
+                if !import_enabled {
+                    ui.label(
+                        egui::RichText::new("(select a bundle first)").weak().small(),
+                    );
+                }
+            });
+            // ---- H1 Export submenu --------------------------------
+            ui.menu_button("Export", |ui| {
+                let export_enabled = bundle_selected;
+                ui.add_enabled_ui(export_enabled, |ui| {
+                    if ui.button("Praat TextGrid…").clicked() {
+                        ui.close();
+                        if let Some(path) = self.suggest_export_path("TextGrid") {
+                            self.export_textgrid_for_active_bundle(path);
+                        }
+                    }
+                    if ui.button("ELAN .eaf…").clicked() {
+                        ui.close();
+                        if let Some(path) = self.suggest_export_path("eaf") {
+                            self.export_eaf_for_active_bundle(path);
+                        }
+                    }
+                });
+                if !export_enabled {
+                    ui.label(
+                        egui::RichText::new("(select a bundle first)").weak().small(),
+                    );
+                }
+            });
+            // ---- H1 Recording -------------------------------------
+            if ui
+                .add_enabled(project_open, egui::Button::new("Record from microphone…"))
+                .on_disabled_hover_text("Open or create a project first")
+                .clicked()
+            {
+                ui.close();
+                self.open_record_dialog();
+            }
+            // ---- H1 Show project folder ---------------------------
+            if ui
+                .add_enabled(project_open, egui::Button::new("Show project folder"))
+                .clicked()
+            {
+                ui.close();
+                self.show_project_folder();
             }
             ui.separator();
             if ui.button("Quit").clicked() {
@@ -1388,6 +2232,8 @@ impl SaddaApp {
         }
         let selected = self.selected_bundle_id;
         let mut to_select: Option<i64> = None;
+        let mut to_reveal: Option<(i64, String)> = None;
+        let mut to_delete_prompt: Option<(i64, String)> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for b in &bundles {
                 let is_selected = selected == Some(b.id);
@@ -1399,6 +2245,22 @@ impl SaddaApp {
                 if row.clicked() && !is_selected {
                     to_select = Some(b.id);
                 }
+                row.context_menu(|ui| {
+                    if ui.button("Reveal in file manager").clicked() {
+                        to_reveal = Some((b.id, b.audio_relative_path.clone()));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui
+                        .button(egui::RichText::new("Delete bundle…").color(
+                            egui::Color32::from_rgb(220, 80, 80),
+                        ))
+                        .clicked()
+                    {
+                        to_delete_prompt = Some((b.id, b.name.clone()));
+                        ui.close();
+                    }
+                });
             }
         });
         ui.add_space(8.0);
@@ -1412,6 +2274,12 @@ impl SaddaApp {
         );
         if let Some(id) = to_select {
             self.select_bundle(id);
+        }
+        if let Some((_id, audio_rel)) = to_reveal {
+            self.reveal_bundle(&audio_rel);
+        }
+        if let Some((id, name)) = to_delete_prompt {
+            self.pending_delete = Some(PendingBundleDelete { id, name });
         }
     }
 

@@ -330,6 +330,13 @@ class Project:
         r"""
         Lists all bundles in id order.
         """
+    def delete_bundle(self, bundle_id: builtins.int) -> None:
+        r"""
+        Permanently deletes a bundle and all its tiers, annotations,
+        derived signals, and processing-run audit rows. Best-effort
+        removes the underlying WAV from disk. No-op if `bundle_id`
+        does not exist.
+        """
     def load_audio(self, bundle_id: builtins.int) -> Audio:
         r"""
         Loads the audio file for a bundle.
