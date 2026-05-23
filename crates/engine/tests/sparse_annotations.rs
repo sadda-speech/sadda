@@ -646,3 +646,150 @@ fn update_and_delete_interval_write_audit_log_rows() {
     assert_eq!(ops, vec!["insert", "update", "delete"]);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn update_point_replaces_all_fields() {
+    let root = unique_dir("point_update");
+    let (proj, bundle_id) = new_project_with_bundle(&root);
+    let tier = proj
+        .add_tier(&TierSpec::new(bundle_id, "events", TierType::Point))
+        .unwrap();
+    let id = proj
+        .add_point(&PointSpec {
+            tier_id: tier,
+            time_seconds: 0.25,
+            label: Some("click".into()),
+            extra: Some(r#"{"force":1}"#.into()),
+            ..Default::default()
+        })
+        .unwrap();
+    proj.update_point(
+        id,
+        &PointSpec {
+            tier_id: tier,
+            time_seconds: 0.5,
+            label: Some("release".into()),
+            extra: Some(r#"{"force":2}"#.into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let rows = proj.points(tier).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, id);
+    assert_eq!(rows[0].time_seconds, 0.5);
+    assert_eq!(rows[0].label.as_deref(), Some("release"));
+    assert_eq!(rows[0].extra.as_deref(), Some(r#"{"force":2}"#));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn update_point_rejects_tier_change() {
+    let root = unique_dir("point_update_tier_change");
+    let (proj, bundle_id) = new_project_with_bundle(&root);
+    let tier_a = proj
+        .add_tier(&TierSpec::new(bundle_id, "a", TierType::Point))
+        .unwrap();
+    let tier_b = proj
+        .add_tier(&TierSpec::new(bundle_id, "b", TierType::Point))
+        .unwrap();
+    let id = proj
+        .add_point(&PointSpec {
+            tier_id: tier_a,
+            time_seconds: 0.1,
+            ..Default::default()
+        })
+        .unwrap();
+    let err = proj
+        .update_point(
+            id,
+            &PointSpec {
+                tier_id: tier_b,
+                time_seconds: 0.1,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(format!("{err}").contains("cannot move annotation"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn delete_point_removes_the_row() {
+    let root = unique_dir("point_delete");
+    let (proj, bundle_id) = new_project_with_bundle(&root);
+    let tier = proj
+        .add_tier(&TierSpec::new(bundle_id, "events", TierType::Point))
+        .unwrap();
+    let id_a = proj
+        .add_point(&PointSpec {
+            tier_id: tier,
+            time_seconds: 0.1,
+            ..Default::default()
+        })
+        .unwrap();
+    let id_b = proj
+        .add_point(&PointSpec {
+            tier_id: tier,
+            time_seconds: 0.5,
+            ..Default::default()
+        })
+        .unwrap();
+
+    proj.delete_point(id_a).unwrap();
+
+    let rows = proj.points(tier).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, id_b);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn delete_point_is_idempotent() {
+    let root = unique_dir("point_delete_idempotent");
+    let (proj, _bundle_id) = new_project_with_bundle(&root);
+    proj.delete_point(999_999).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn update_and_delete_point_write_audit_log_rows() {
+    let root = unique_dir("point_update_delete_audit");
+    let (proj, bundle_id) = new_project_with_bundle(&root);
+    let tier = proj
+        .add_tier(&TierSpec::new(bundle_id, "t", TierType::Point))
+        .unwrap();
+    let id = proj
+        .add_point(&PointSpec {
+            tier_id: tier,
+            time_seconds: 0.1,
+            label: Some("orig".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    proj.update_point(
+        id,
+        &PointSpec {
+            tier_id: tier,
+            time_seconds: 0.2,
+            label: Some("changed".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    proj.delete_point(id).unwrap();
+
+    let conn = rusqlite::Connection::open(root.join("corpus.db")).unwrap();
+    let mut stmt = conn
+        .prepare(
+            "SELECT op FROM audit_log WHERE table_name='annotation_point' AND row_id=?1 ORDER BY id",
+        )
+        .unwrap();
+    let ops: Vec<String> = stmt
+        .query_map([id], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(ops, vec!["insert", "update", "delete"]);
+    let _ = std::fs::remove_dir_all(&root);
+}

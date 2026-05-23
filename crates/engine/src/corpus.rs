@@ -1054,6 +1054,55 @@ impl Project {
         Ok(id)
     }
 
+    /// Replace-all update of a point annotation. Same semantics as
+    /// [`Self::update_interval`]: replaces `(time_seconds, label,
+    /// extra, parent_annotation_id)`; rejects `tier_id` changes;
+    /// re-validates cardinality.
+    pub fn update_point(&self, id: i64, spec: &PointSpec) -> Result<()> {
+        let existing_tier_id: i64 = self.conn.query_row(
+            "SELECT tier_id FROM annotation_point WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        if existing_tier_id != spec.tier_id {
+            return Err(EngineError::Corpus(format!(
+                "update_point: cannot move annotation {id} between tiers \
+                 (was on tier {existing_tier_id}, asked for {})",
+                spec.tier_id
+            )));
+        }
+        let tier = self.get_tier(spec.tier_id)?;
+        if tier.r#type != TierType::Point {
+            return Err(EngineError::Corpus(format!(
+                "tier {} is type {:?}; expected Point",
+                tier.id, tier.r#type
+            )));
+        }
+        self.enforce_cardinality(&tier, "annotation_point", spec.parent_annotation_id)?;
+        self.conn.execute(
+            "UPDATE annotation_point \
+                SET time_seconds = ?2, label = ?3, parent_annotation_id = ?4, extra = ?5 \
+              WHERE id = ?1",
+            rusqlite::params![
+                id,
+                spec.time_seconds,
+                spec.label,
+                spec.parent_annotation_id,
+                spec.extra,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Removes a point annotation by id. Idempotent — returns
+    /// `Ok(())` even when no row matched. The V3 audit trigger
+    /// captures the before row automatically.
+    pub fn delete_point(&self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM annotation_point WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
     /// Lists points for a tier in (time_seconds, id) order.
     pub fn points(&self, tier_id: i64) -> Result<Vec<Point>> {
         let mut stmt = self.conn.prepare(
