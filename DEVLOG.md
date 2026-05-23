@@ -6,6 +6,94 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-23 — Single-writer lock on corpus.db (F10): `.sadda-lock` advisory file, PID + hostname, released on Project drop
+
+Goal: settle the tenth Phase 2 slice. F10 prevents two processes (two app instances, or app + a Python script) from writing to the same `corpus.db` and corrupting the audit trail.
+
+### What F10 must deliver
+
+From the Phase 2 slicing entry: "Two `corpus.db` writers running simultaneously (app + script, or two app instances) would corrupt the audit trail. Use SQLite's WAL + a `BEGIN EXCLUSIVE` advisory pattern, OR a `<project>/.sadda-lock` lockfile written at `Project::open`. Refuses to open a project that's locked, with a clear message naming the holder's PID."
+
+### Mechanism choice
+
+The slicing entry left the SQL-vs-file lock choice open. Decision: **filesystem lockfile**. Reasons:
+
+- A SQLite-level `BEGIN EXCLUSIVE` only protects the duration of the transaction; the GUI holds the connection open continuously, but doesn't keep an exclusive transaction running — that would block every other reader, including the Python wrapper that opens the same `corpus.db` read-only via `pl.scan_parquet`-adjacent code paths.
+- A file lock survives crashes weirdly (some OSes hold flock past process death; others release). An advisory lockfile with the holder's PID + hostname is **self-documenting**: the error message can name *which process* (or which hostname) holds the lock, and stale-lock recovery is a simple manual `rm .sadda-lock` for the user.
+- We've already established `Project::is_project_root` checks lightweight on-disk markers; this adds one more.
+
+### Lockfile shape
+
+`<project_root>/.sadda-lock`, written at `Project::open` and `Project::create` time, containing:
+
+```toml
+pid = 12345
+hostname = "alice-laptop"
+acquired_at = "2026-05-23T15:42:11.789Z"
+```
+
+On `Project::open`:
+
+1. If `.sadda-lock` doesn't exist, create it with our `(pid, hostname, now)` and proceed.
+2. If it exists and the recorded PID is **our own PID**, take ownership (the previous open in this process leaked; not a real conflict).
+3. If it exists and the PID belongs to a **live process on this host**, refuse to open with a clear `EngineError::ProjectLocked { holder_pid, hostname }`.
+4. If it exists but the PID is dead (or on a different host), the lock is stale — write a fresh lockfile and proceed. (Cross-host detection: trust the recorded hostname; if it matches ours, check PID liveness via `kill(pid, 0)` on Unix or `OpenProcess` on Windows. If hostname differs, treat as stale-with-warning to the operator since we can't verify.)
+
+On `Project::drop`: best-effort delete the lockfile. If the process is killed (SIGKILL, panic, etc.) the file persists and the next open detects + cleans the stale lock per step 4.
+
+### Engine surface
+
+- New `EngineError::ProjectLocked { holder_pid: u32, hostname: String, lockfile_path: PathBuf }` variant.
+- `Project::open` and `Project::create` acquire the lock as part of their existing flow.
+- `Project::drop` releases.
+- New `Project::is_locked_by(path) -> Option<(pid, hostname)>` helper for the GUI's welcome-screen recent-projects list (grey-out projects currently held by another process).
+
+### Cross-process detection
+
+Use the `sysinfo` crate? Or libc directly? Libc on Unix is `kill(pid, 0)` returning 0 (process exists) or `ESRCH` (doesn't). Windows is `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, ...)`. Both are ~10 lines of platform-specific code with `#[cfg(unix)]` / `#[cfg(windows)]`. No new dep needed; the existing engine deps don't include sysinfo.
+
+### Confirmed F10 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Mechanism | **Filesystem lockfile** | Survives crashes self-documentingly; doesn't block read-only paths |
+| Filename | **`.sadda-lock` in the project root** | Hidden (UNIX); doesn't crowd the project dir listing |
+| Contents | **TOML with pid + hostname + acquired_at** | Human-readable; matches our existing `project.toml` |
+| Stale detection | **Per-host PID liveness check (kill(0) / OpenProcess)** | Standard pattern; no new dep |
+| Cross-host policy | **Trust + warn — treat as stale, take over** | Without a network ping we can't verify; warning to the operator is enough |
+| Same-PID re-open | **Take ownership silently** | Lets the GUI re-open a project it leaked previously |
+| Release | **Best-effort delete on `Project::drop`** | Crash leaves a stale file; next open cleans it |
+| GUI integration | **Welcome-screen Recent rows show `(locked by PID N)` next to held projects** | Surfaces conflict before the user clicks |
+| Python wrapper | **Goes through `Project::open` too — picks up the lock identically** | One unified path; no special read-only mode for the Python side at v1 |
+| Error type | **New `EngineError::ProjectLocked` variant** | Distinguishable from generic `Corpus` errors so the GUI can render a specific message |
+
+### Layout
+
+- `crates/engine/src/error.rs` — `EngineError::ProjectLocked { holder_pid, hostname, lockfile_path }`.
+- `crates/engine/src/corpus.rs` — `acquire_lock` / `release_lock` helpers; integration into `Project::open` / `Project::create` / `Project::drop`. PID-liveness helper with `cfg(unix)` / `cfg(windows)` branches.
+- `crates/engine/tests/migrations.rs` (or a new `lock.rs`) — integration tests: acquire OK, double-acquire fails, drop releases, stale lock on a non-existent PID is cleared.
+
+### Lossiness / what F10 deliberately doesn't ship
+
+- **Multi-writer with conflict resolution.** Single-writer is the v1 promise. Multi-writer needs operational transformation or a real CRDT; way out of scope.
+- **Read-only mode.** A read-only `Project::open_readonly` that doesn't take the lock could come later for "browse but don't edit" workflows.
+- **Network-aware locking.** No filesystem-network detection; SMB / NFS shared projects work but cross-host crash recovery is operator-judgement.
+- **Lock timeout / auto-release after N minutes.** No timer; users explicitly `rm .sadda-lock` to break a stale lock if the PID-liveness check misjudges.
+- **Wrapping every PyO3 wrapper to surface the lock error specifically.** The error bubbles up as `EngineError::ProjectLocked` and lands in the Python `RuntimeError` text; UX polish for a typed exception is a 0.3 item.
+
+### What this entry doesn't decide
+
+- **Whether to log to stderr when acquiring a lock that was stale.** Probably yes; trivial to add.
+- **Exact wording of the `(locked by PID N)` row decoration on the welcome screen.** Settled in implementation.
+
+### Sources / references
+
+- 2026-05-23 Phase 2 slicing entry (F10 row)
+- 2026-05-23 A1 entry (`Project::is_project_root` helper that F10 mirrors)
+- SQLite locking modes reference: <https://www.sqlite.org/lockingv3.html>
+
+---
+
 ## 2026-05-23 — `sadda.app` in-app namespace (E9): append_to_inittab built-in module, thread-local snapshot, command palette via Ctrl+P
 
 Goal: settle the ninth Phase 2 slice. E9 turns the script panel from a "run pure Python" toy into the in-app scripting host the 2026-05-18 API-surface entry sketched: scripts read the GUI's current selection / active bundle / cursor, and register commands that show up in a palette.
