@@ -687,6 +687,71 @@ impl Project {
         Audio::from_wav_path(self.root.join(rel_path))
     }
 
+    /// Deletes a bundle along with everything that hangs off it:
+    /// tiers, annotation rows on those tiers, `derived_signal`
+    /// sidecar registrations, and `processing_run` audit rows.
+    /// The bundle's WAV under `signals/original/<name>.wav` is
+    /// best-effort removed too. All DB writes happen in one
+    /// transaction; if the SQL fails, the WAV is untouched. If the
+    /// WAV remove fails, the DB still committed (the audit trail
+    /// remains consistent; orphan WAV is recoverable).
+    ///
+    /// Idempotent on missing bundle id — returns `Ok(())`.
+    pub fn delete_bundle(&self, bundle_id: i64) -> Result<()> {
+        // Fetch audio path before deletion so we can clean up the
+        // file after the transaction commits. Missing bundle → no-op.
+        let audio_rel: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT audio_relative_path FROM bundle WHERE id = ?1",
+                [bundle_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(audio_rel) = audio_rel else {
+            return Ok(());
+        };
+
+        let tx = self.conn.unchecked_transaction()?;
+        // Topological cascade: deepest tables first.
+        tx.execute(
+            "DELETE FROM derived_signal \
+              WHERE tier_id IN (SELECT id FROM tier WHERE bundle_id = ?1)",
+            [bundle_id],
+        )?;
+        for child in [
+            "annotation_interval",
+            "annotation_point",
+            "annotation_reference",
+        ] {
+            tx.execute(
+                &format!(
+                    "DELETE FROM {child} \
+                      WHERE tier_id IN (SELECT id FROM tier WHERE bundle_id = ?1)"
+                ),
+                [bundle_id],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM tier WHERE bundle_id = ?1",
+            [bundle_id],
+        )?;
+        tx.execute(
+            "DELETE FROM processing_run WHERE bundle_id = ?1",
+            [bundle_id],
+        )?;
+        tx.execute(
+            "DELETE FROM bundle WHERE id = ?1",
+            [bundle_id],
+        )?;
+        tx.commit()?;
+
+        // Best-effort WAV removal; an orphan file is recoverable
+        // (the user can re-import it as a new bundle).
+        let _ = std::fs::remove_file(self.root.join(audio_rel));
+        Ok(())
+    }
+
     /// Inserts a [`Speaker`] row. Returns the new speaker's id.
     pub fn add_speaker(&self, spec: &SpeakerSpec) -> Result<i64> {
         let id: i64 = self.conn.query_row(

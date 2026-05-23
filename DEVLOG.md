@@ -6,6 +6,162 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-23 — Phase-2 polish (H1): File-menu I/O for TextGrid + EAF, live-recording dialog, bundle context menu, `Project::delete_bundle`
+
+Goal: bring the GUI's I/O surface up to user expectation for a "desktop GUI release." The 2026-05-23 Phase 2 slicing entry's eleven slices delivered the visual editor, scripting host, single-writer lock, and release CI — but the existing engine methods for TextGrid / EAF I/O (D1, D2) and live recording (E1) were left unwired from the GUI menus. First post-0.2 user feedback flagged this as the most obvious gap.
+
+This is a polish slice, not a re-scoping of Phase 2. The slicing entry pinned eleven items; this is a twelfth focused on closing user-discoverability gaps.
+
+### What H1 must deliver
+
+| Action | Engine | GUI wiring before | GUI wiring after |
+|---|---|---|---|
+| Import TextGrid (Praat) | D1 — `Project::import_textgrid` | ✗ | **File → Import → Praat TextGrid…** |
+| Import EAF (ELAN) | D2 — `Project::import_eaf` | ✗ | **File → Import → ELAN .eaf…** |
+| Export TextGrid | D1 — `Project::export_textgrid` | ✗ | **File → Export → Praat TextGrid…** |
+| Export EAF | D2 — `Project::export_eaf` | ✗ | **File → Export → ELAN .eaf…** |
+| Live record from mic | E1 — `LiveSession::start` | ✗ | **File → Record from microphone…** (modal) |
+| Show project on disk | n/a | ✗ | **File → Show project folder** |
+| Delete bundle | **new** — `Project::delete_bundle` | ✗ | **Right-click bundle → Delete** |
+| Show bundle audio on disk | n/a | ✗ | **Right-click bundle → Show in file manager** |
+
+### Engine surface: `Project::delete_bundle`
+
+`Project::delete_bundle(id)` is the one new engine method this slice needs. SQL cascade across the rows that FK to `bundle`:
+
+- `processing_run` (FK `bundle_id REFERENCES bundle(id)`)
+- `tier` (FK `bundle_id`)
+- `annotation_interval` / `annotation_point` / `annotation_reference` (FK `tier_id` → cascaded by deleting tiers)
+- `derived_signal` (FK `tier_id` → same)
+- The bundle's WAV under `signals/original/<name>.wav`
+
+The schema's CHECK + FK constraints don't auto-cascade — SQLite needs `PRAGMA foreign_keys = ON` and explicit `ON DELETE CASCADE` declarations. We don't have either on the current schema (V3 didn't add cascade clauses to the FKs). So `delete_bundle` does explicit deletion in topological order inside a transaction:
+
+1. `DELETE FROM derived_signal WHERE tier_id IN (SELECT id FROM tier WHERE bundle_id = ?)`
+2. `DELETE FROM annotation_interval WHERE tier_id IN (...)`
+3. Same for `annotation_point`, `annotation_reference`
+4. `DELETE FROM tier WHERE bundle_id = ?`
+5. `DELETE FROM processing_run WHERE bundle_id = ?`
+6. `DELETE FROM bundle WHERE id = ?`
+7. Best-effort `std::fs::remove_file(signals/original/<name>.wav)` — leaves WAV behind on disk if the corpus row deleted but the file isn't accessible. Audit trail records the DB deletion regardless.
+
+Audit triggers on each table fire automatically, producing a `'delete'` row each. Deleting a busy bundle generates many audit rows but the corpus stays self-consistent.
+
+### Live-recording modal
+
+`File → Record from microphone…` opens a modal `Window`:
+
+```
+┌─────────────────────────────────────────────┐
+│ Record from microphone                      │
+├─────────────────────────────────────────────┤
+│ Name:     [practice_take_1                ] │
+│ Device:   [▾ default (system mic)       ]   │
+│ Format:   44100 Hz / 1 channel              │
+│                                             │
+│ ┌─ Meter ─────────────────────────────────┐ │
+│ │ peak  ▰▰▰▰▰▰▱▱▱▱▱▱  -8.4 dB-FS         │ │
+│ │ rms   ▰▰▰▱▱▱▱▱▱▱▱▱  -22.1 dB-FS        │ │
+│ └─────────────────────────────────────────┘ │
+│                                             │
+│ Status: idle / recording / stopped          │
+│ Elapsed: 00:00:02.345                       │
+│                                             │
+│ [ ● Record ] [ ■ Stop ] [ Save ] [ Cancel ]  │
+└─────────────────────────────────────────────┘
+```
+
+Lifecycle, using the existing `sadda_engine::live::LiveSession`:
+
+- On open: enumerate devices via cpal (no-op fallback to default-only on enumerate failure). State = `Idle`.
+- Click **Record**: build a `cpal::Stream` against the picked device feeding into `LiveSession`'s push_samples. State → `Recording`. Meter pulls peak/RMS from the result rtrb every frame.
+- Click **Stop**: drop the stream + call `LiveSession::stop()`. State → `Stopped`. Show duration.
+- Click **Save**: `Project::commit_recording(stopped, name, params_json)` → new bundle in the sidebar. Modal closes.
+- Click **Cancel** (or window close at any state): drop the LiveSession; discard via `StoppedSession::discard` if Stopped; modal closes.
+
+State plumbing matches E9's pattern — the cpal Stream stays on the GUI thread, GUI polls atomic counters each frame.
+
+### Bundle row context menu
+
+Right-click on a bundle row in the sidebar pops up:
+
+- **Delete bundle** — confirmation dialog; on confirm, `Project::delete_bundle(id)`. If the deleted bundle was active, clear the selection.
+- **Show audio in file manager** — open the OS file manager at the bundle's WAV path. UNIX: `xdg-open <dir>`; macOS: `open <dir>`; Windows: `explorer.exe <dir>`. Wrapped in a `cfg` block.
+
+### File-menu reshuffle
+
+Existing menu becomes nested:
+
+```
+File
+├── New Project…
+├── Open Project…
+├── Recent Projects ▸
+├── Open Bundle…
+├── ─── (separator)
+├── Import ▸
+│   ├── Praat TextGrid…
+│   └── ELAN .eaf…
+├── Export ▸                 [greyed unless a bundle is selected]
+│   ├── Praat TextGrid…
+│   └── ELAN .eaf…
+├── Record from microphone…
+├── Show project folder
+├── ─── (separator)
+└── Quit
+```
+
+### Confirmed H1 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Engine surface for delete | **New `Project::delete_bundle` with explicit topological cascade** | SQLite's `ON DELETE CASCADE` would need a migration touching every FK; explicit cascade in one method is simpler |
+| Audio file deletion | **Best-effort `std::fs::remove_file`; corpus stays consistent on filesystem failure** | The DB is the source of truth; an orphan WAV is recoverable, an orphan DB row isn't |
+| Confirmation on delete | **Yes — modal Window with "Delete <name>?" + Cancel** | Hard-to-undo action; user typo protection |
+| TextGrid / EAF I/O dialog | **rfd file picker — open for import, save for export** | Same as the existing "Open Bundle…" path |
+| Live-recording device picker | **ComboBox listing cpal input devices; "default" first** | E1's API surface already exposes default + named devices |
+| Live-recording format | **Bundle's sample rate / channels picked from default device config** | Auto-detect for v1; explicit controls land in 0.3 polish |
+| Meter source | **Existing `MeterFrame` on `LiveResults`** | E1 already emits peak/RMS per chunk |
+| Status during recording | **Continuous repaint via `ctx.request_repaint()`** | Same pattern as C5 playback |
+| Show-in-file-manager | **Platform-specific cmd wrapped in cfg branches** | xdg-open / open / explorer.exe |
+| Bundle context menu trigger | **Right-click on bundle row** | Universal convention |
+
+### Layout
+
+- `crates/engine/src/corpus.rs` — `Project::delete_bundle`.
+- `crates/engine/tests/sparse_annotations.rs` — round-trip add → delete cascade tests.
+- `crates/python/src/lib.rs` — `PyProject.delete_bundle` binding (the **three-surface** principle: every new user-facing engine method ships engine + Python + GUI in the same slice).
+- `python/tests/test_corpus.py` — pytest coverage for `delete_bundle` (cascade + idempotent-on-missing-id).
+- `python/sadda/_native/__init__.pyi` — type stub for the new method.
+- `crates/app/src/main.rs` — file-menu reshuffle; import/export menu items; show-project-folder; bundle context menu; show-in-file-manager helper; **recording modal** (inline, not a new file — the state machine fit cleanly alongside the existing modal-window infrastructure).
+
+### Lossiness / what H1 deliberately doesn't ship
+
+- **Export audio as a separate command.** The WAV is at `signals/original/<name>.wav`; "Show in file manager" gets users there. Bundle-as-zip / re-encode-to-FLAC is a 0.3 polish.
+- **Drag-and-drop file import.** Adds when a real user complains.
+- **Bulk import** (folder of TextGrids). Same.
+- **Rename bundle.** Engine doesn't have an update method for bundle name; this would need a small engine extension. Deferred.
+- **Bundle metadata editor** (session / speaker FKs). Deferred.
+- **Open recipe `.py` from the GUI / replay button.** Polish.
+- **Recording: monitoring during recording** (hear yourself with low latency). Same.
+- **Recording: pre-roll buffer / pause/resume.** Same — E1's DEVLOG entry already deferred these.
+
+### What this entry doesn't decide
+
+- **Whether import should auto-create the tier(s)** the imported file references, or only link annotations to existing tiers. The existing `Project::import_textgrid` / `import_eaf` semantics create tiers; we just expose them via the menu.
+- **Whether export should default to the project's `exports/` directory.** Likely yes; settled in code.
+- **Visual treatment of the recording meter** (linear vs log bars). Whatever looks reasonable.
+
+### Sources / references
+
+- 2026-05-23 Phase 2 slicing entry (the eleven slices this polishes)
+- 2026-05-22 D1 entry (TextGrid I/O reused here)
+- 2026-05-22 D2 entry (EAF I/O reused here)
+- 2026-05-22 E1 entry (LiveSession reused for the recording modal)
+- 2026-05-23 G11 entry (release binaries the polish ships in)
+
+---
+
 ## 2026-05-23 — 0.2 release binaries (G11): app-release.yml builds + uploads unsigned macOS arm64 / Linux x86_64 / Windows x86_64 binaries on tag push
 
 Goal: settle the eleventh and final Phase 2 slice. G11 stands up the CI workflow that turns a `v0.2.x` git tag into a GitHub Release with desktop binaries attached. Unsigned per the Phase 2 slicing entry — Apple Developer / EV-cert spend lands in Phase 7.

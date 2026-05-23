@@ -676,6 +676,16 @@ impl PyProject {
             .map_err(engine_err_to_py)
     }
 
+    /// Permanently deletes a bundle and all its tiers, annotations,
+    /// derived signals, and processing-run audit rows. Best-effort
+    /// removes the underlying WAV from disk. No-op if `bundle_id`
+    /// does not exist.
+    fn delete_bundle(&self, bundle_id: i64) -> PyResult<()> {
+        self.inner
+            .delete_bundle(bundle_id)
+            .map_err(engine_err_to_py)
+    }
+
     /// Loads the audio file for a bundle.
     fn load_audio(&self, bundle_id: i64) -> PyResult<PyAudio> {
         self.inner

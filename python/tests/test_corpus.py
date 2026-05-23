@@ -92,6 +92,28 @@ def test_add_bundle_with_session_and_speaker() -> None:
         assert bundles[0].extra == '{"take":2}'
 
 
+def test_delete_bundle_cascades_and_removes_wav() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        proj = sadda.new_project(Path(td) / "p", "demo")
+        wav = Path(td) / "tone.wav"
+        _write_short_wav(wav)
+        bundle_id = proj.add_bundle("greeting", wav)
+        assert len(proj.bundles()) == 1
+        audio_rel = proj.bundles()[0].audio_relative_path
+        audio_abs = Path(proj.root) / audio_rel
+        assert audio_abs.exists()
+        proj.delete_bundle(bundle_id)
+        assert proj.bundles() == []
+        assert not audio_abs.exists()
+
+
+def test_delete_bundle_is_idempotent_on_missing_id() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        proj = sadda.new_project(Path(td) / "p", "demo")
+        # No bundles exist; deleting a non-existent id must not raise.
+        proj.delete_bundle(9_999)
+
+
 def test_audit_user_default_and_setter() -> None:
     with tempfile.TemporaryDirectory() as td:
         proj = sadda.new_project(Path(td) / "p", "demo")
