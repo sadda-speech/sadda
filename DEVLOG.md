@@ -6,6 +6,119 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-23 — Waveform view + bundle sidebar (B2): min/max envelope, fixed-resolution cache, left-sidebar single-select
+
+Goal: settle the second Phase 2 slice. B2 brings the first real content pane — a waveform of the active bundle's audio — and the bundle-selection UI that B3 / B4 / C5 will all share.
+
+### What B2 must deliver
+
+From the Phase 2 slicing entry: "Reads the active bundle's audio via `Project::load_audio`; renders a min/max envelope (better than the Phase-0 step-sampled line). Vertical Y bounds clamped to [-1, 1]. No interaction yet."
+
+Plus: a bundle selector. The slicing entry's A1 "doesn't-decide" note flagged "probably a sidebar tree of bundles unlocked by clicking a project root" as emerging in cluster B; B2 owns it because it's the first slice that needs an active bundle to render anything.
+
+### Sidebar shape
+
+Left side, ~200px wide, resizable down to ~120px, lists every bundle from `Project::bundles()` as a single-select list. Each row shows the bundle name plus a small grey suffix with duration in seconds.
+
+```
+┌───────────────────┬──────────────────────────────────────────┐
+│ Bundles           │                                          │
+│                   │                                          │
+│ ▸ practice_take_1 │             [ waveform here ]            │
+│   speaker_01      │                                          │
+│   greeting_v2     │                                          │
+│                   │                                          │
+│ (3 bundles)       │                                          │
+├───────────────────┴──────────────────────────────────────────┤
+│ Project: vowels  ·  /home/alice/projects/vowels              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+No hierarchy / grouping yet (we don't have bundle-folder semantics in the corpus). Hierarchy lands when sessions / speakers get sidebar treatment in a later slice.
+
+### Min/max envelope
+
+For a plot rendered at `W` pixels wide showing `N` audio samples (mono mixdown):
+
+```
+bucket_size = ceil(N / W)
+for col in 0..W:
+    samples_in_bucket = samples[col * bucket_size .. (col + 1) * bucket_size]
+    envelope[col] = (min(samples_in_bucket), max(samples_in_bucket))
+```
+
+The plot draws one vertical line segment per column, from `(t, min)` to `(t, max)`. Visually equivalent to Audacity's "Waveform" view; peaks survive any zoom factor (whereas Phase-0's `step_by` step-sampling would silently drop them).
+
+For B2 the bucketing is computed **once at fixed resolution** (~2000 buckets) when the user selects a bundle, and the cached array is drawn at any plot width. This is fine while there's no zoom — the plot width doesn't change frame-to-frame. C5 (zoom + scroll + playback) will replace this with a re-buckets-per-frame strategy when zoom lands.
+
+### State changes
+
+```rust
+struct SaddaApp {
+    app_state: AppState,
+    selected_bundle_id: Option<i64>,            // new
+    active_envelope: Option<EnvelopeCache>,     // new
+    persisted: PersistedState,
+    error: Option<String>,
+}
+
+struct EnvelopeCache {
+    bundle_id: i64,
+    sample_rate: u32,
+    duration_seconds: f64,
+    /// Per-bucket (min, max) over the mono mixdown.
+    envelope: Vec<(f32, f32)>,
+}
+```
+
+Selecting a bundle = `Project::load_audio(id)` + build envelope + stash in `active_envelope`. On project change, both fields reset.
+
+### Confirmed B2 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Bundle selector | **Left sidebar, single-select, flat list** | First content pane; gates B3/B4/C5 having an active bundle to render |
+| Sidebar width | **~200px default, resizable to ~120 minimum** | Bundle names of typical length fit; doesn't crowd the waveform |
+| Bundle row label | **`<name>`  ·  `<duration>s` (greyed)** | Quick scanning by duration helps when names collide |
+| Downsampler | **Min/max envelope (Audacity convention)** | Peak-preserving at any zoom; same algorithm we'll keep for C5 |
+| Cache strategy | **Fixed resolution ~2000 buckets at load time** | Cheap, simple, fine without zoom. C5 replaces with per-frame re-bucketing |
+| Channel handling | **Mono mixdown** | Per-channel display is a 0.3 polish item |
+| Y bounds | **Clamped to [-1, 1]** | Matches the engine's `Audio::samples` normalisation contract |
+| Cursor / playback | **Not in B2** | C5 owns the timeline interaction |
+| Empty state | **"Open a bundle via File → Open Bundle…" hint in central panel** | Same hint A1 used, repurposed for "project loaded, no bundle selected" |
+| Selection persistence across launches | **No** | Selection is in-memory only. Cluster F / G can revisit if needed |
+
+### Layout
+
+- `crates/app/src/state.rs` — pure-data extension: `EnvelopeCache` struct + `build_envelope` function. Unit tests covering: empty input, single-bucket constant, alternating sine. Stays free of egui.
+- `crates/app/src/main.rs` — sidebar pane (left), waveform pane (central). The existing `welcome` / `error` / status-bar code is untouched.
+
+### Lossiness / what B2 deliberately doesn't ship
+
+- **Zoom and scroll.** Slice C5.
+- **Cursor.** Slice C5.
+- **Playback.** Slice C5.
+- **Per-channel waveforms.** 0.3 polish.
+- **Bundle reordering / renaming / delete from sidebar.** Engine API doesn't have rename/delete yet; right-click context menus arrive when the editing slices (D6/D7) introduce them on tiers.
+- **Session / speaker grouping in the sidebar.** No bundle-folder semantics; deferred until the corpus model justifies it.
+- **Waveform overlays (pitch, intensity).** Pure DSP overlays will land on the spectrogram pane (B3) where the colour space is more permissive.
+- **Empty-project hint to "create your first bundle".** The greyed-out sidebar + the File menu's enabled "Open Bundle…" is enough signal for a first user.
+
+### What this entry doesn't decide
+
+- **Whether the sidebar collapses to a hamburger icon at small widths.** Egui's resizable side panel handles this for free; the min-width clamp is the only safety net B2 ships.
+- **Bundle-row right-click affordances.** Adds when D-cluster's editing surfaces decide their own context-menu vocabulary.
+- **Sidebar persistence width across launches.** Egui can persist side-panel width via its own internal storage; whether to opt in here vs let the user resize on every launch is settled in implementation.
+
+### Sources / references
+
+- 2026-05-23 Phase 2 slicing entry (B2 row)
+- 2026-05-23 A1 entry (which this extends with the sidebar + bundle selection model)
+- Audacity waveform-rendering reference (min/max envelope algorithm): <https://wiki.audacityteam.org/wiki/Audacity_Source_Code>
+- egui side-panel reference: <https://docs.rs/egui/latest/egui/containers/panel/struct.SidePanel.html>
+
+---
+
 ## 2026-05-23 — App shell + project open/create (A1): welcome screen, persistent recent-projects, greyed Open-Bundle until project loaded
 
 Goal: settle the first Phase 2 slice. A1 replaces the Phase-0 sketch in `crates/app/src/main.rs` (which loaded a bare WAV via file dialog and drew waveform + f0) with a project-aware app shell. Everything cluster B and later builds on this state model.

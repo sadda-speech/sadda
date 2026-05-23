@@ -12,11 +12,15 @@ mod state;
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
+use egui_plot::{Line, Plot, PlotPoints};
 use sadda_engine::Project;
 
-use crate::state::{PersistedState, ThemePref};
+use crate::state::{EnvelopeCache, PersistedState, ThemePref, build_envelope};
 
 const APP_TITLE: &str = "sadda";
+/// Bucket count for the B2 fixed-resolution waveform envelope. C5 will
+/// replace this with per-frame re-bucketing once zoom lands.
+const ENVELOPE_BUCKETS: usize = 2000;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -50,6 +54,12 @@ struct SaddaApp {
     /// Error message currently shown in the bottom banner, or `None`.
     /// Dismissed by user click.
     error: Option<String>,
+    /// Currently-selected bundle. `None` means "no bundle selected;
+    /// show the central-panel placeholder." Reset on project change.
+    selected_bundle_id: Option<i64>,
+    /// Cached waveform envelope for the selected bundle. Rebuilt only
+    /// when the selection changes.
+    active_envelope: Option<EnvelopeCache>,
 }
 
 impl SaddaApp {
@@ -62,6 +72,8 @@ impl SaddaApp {
             app_state: AppState::NoProject,
             persisted,
             error: None,
+            selected_bundle_id: None,
+            active_envelope: None,
         }
     }
 
@@ -77,6 +89,7 @@ impl SaddaApp {
                     root: path,
                     name,
                 };
+                self.clear_bundle_selection();
                 self.error = None;
             }
             Err(e) => self.set_error(format!("Failed to open project: {e}")),
@@ -93,6 +106,7 @@ impl SaddaApp {
                     root: path,
                     name,
                 };
+                self.clear_bundle_selection();
                 self.error = None;
             }
             Err(e) => self.set_error(format!("Failed to create project: {e}")),
@@ -108,13 +122,41 @@ impl SaddaApp {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "bundle".into());
         match project.add_bundle(&bundle_name, &wav_path) {
-            Ok(_id) => {
+            Ok(id) => {
                 self.error = None;
-                // Selection / display of the new bundle is a slice-B
-                // concern; A1 just commits the row.
+                self.select_bundle(id);
             }
             Err(e) => self.set_error(format!("Failed to add bundle: {e}")),
         }
+    }
+
+    /// Loads the bundle's audio, builds the envelope cache, and sets
+    /// it as the active bundle. Errors surface in the bottom banner.
+    fn select_bundle(&mut self, bundle_id: i64) {
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        let audio = match project.load_audio(bundle_id) {
+            Ok(a) => a,
+            Err(e) => {
+                self.set_error(format!("Failed to load bundle audio: {e}"));
+                return;
+            }
+        };
+        let mono: Vec<f32> = audio.mono_samples().collect();
+        let envelope = build_envelope(&mono, ENVELOPE_BUCKETS);
+        self.active_envelope = Some(EnvelopeCache {
+            bundle_id,
+            sample_rate: audio.sample_rate,
+            duration_seconds: audio.duration_seconds(),
+            envelope,
+        });
+        self.selected_bundle_id = Some(bundle_id);
+    }
+
+    fn clear_bundle_selection(&mut self) {
+        self.selected_bundle_id = None;
+        self.active_envelope = None;
     }
 
     fn set_error(&mut self, msg: String) {
@@ -158,14 +200,19 @@ impl eframe::App for SaddaApp {
             });
         }
 
-        egui::CentralPanel::default().show_inside(ui, |ui| match &self.app_state {
-            AppState::NoProject => self.welcome(ui),
-            AppState::ProjectLoaded { .. } => {
-                ui.centered_and_justified(|ui| {
-                    ui.label("Open a bundle via File → Open Bundle…");
-                });
+        match &self.app_state {
+            AppState::NoProject => {
+                egui::CentralPanel::default().show_inside(ui, |ui| self.welcome(ui));
             }
-        });
+            AppState::ProjectLoaded { .. } => {
+                egui::Panel::left("bundle_sidebar")
+                    .resizable(true)
+                    .default_size(200.0)
+                    .min_size(120.0)
+                    .show_inside(ui, |ui| self.bundle_sidebar(ui));
+                egui::CentralPanel::default().show_inside(ui, |ui| self.waveform_pane(ui));
+            }
+        }
     }
 }
 
@@ -289,6 +336,104 @@ impl SaddaApp {
                 ));
             }
         });
+    }
+
+    fn bundle_sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Bundles");
+        ui.add_space(4.0);
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        let bundles = match project.bundles() {
+            Ok(b) => b,
+            Err(e) => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 80, 80),
+                    format!("Failed to list bundles: {e}"),
+                );
+                return;
+            }
+        };
+        if bundles.is_empty() {
+            ui.label(egui::RichText::new("(no bundles yet)").italics());
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new("Add one via File → Open Bundle…").weak());
+            return;
+        }
+        let selected = self.selected_bundle_id;
+        let mut to_select: Option<i64> = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for b in &bundles {
+                let is_selected = selected == Some(b.id);
+                let duration_secs = b.n_frames as f64 / b.sample_rate as f64;
+                let row = ui.selectable_label(
+                    is_selected,
+                    egui::RichText::new(format!("{}  ·  {:.2}s", b.name, duration_secs)),
+                );
+                if row.clicked() && !is_selected {
+                    to_select = Some(b.id);
+                }
+            }
+        });
+        ui.add_space(8.0);
+        ui.label(
+            egui::RichText::new(format!(
+                "({} bundle{})",
+                bundles.len(),
+                if bundles.len() == 1 { "" } else { "s" }
+            ))
+            .weak(),
+        );
+        if let Some(id) = to_select {
+            self.select_bundle(id);
+        }
+    }
+
+    fn waveform_pane(&mut self, ui: &mut egui::Ui) {
+        let Some(env) = &self.active_envelope else {
+            ui.centered_and_justified(|ui| {
+                ui.label(egui::RichText::new("Select a bundle from the sidebar").weak());
+            });
+            return;
+        };
+        if env.envelope.is_empty() {
+            ui.centered_and_justified(|ui| {
+                ui.label(egui::RichText::new("(empty waveform)").italics());
+            });
+            return;
+        }
+        // Caption above the plot summarises the loaded bundle's
+        // header so users see sample-rate / duration at a glance.
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Bundle #{}  ·  {} Hz  ·  {:.3}s",
+                    env.bundle_id, env.sample_rate, env.duration_seconds,
+                ))
+                .weak(),
+            );
+        });
+        // Build (time, min) and (time, max) point arrays once per
+        // frame from the cached envelope, then plot each bucket as a
+        // single vertical line segment from min to max.
+        let n = env.envelope.len() as f64;
+        let dt = env.duration_seconds / n;
+        Plot::new("waveform")
+            .show_axes([true, true])
+            .y_axis_label("amplitude")
+            .x_axis_label("seconds")
+            .include_y(-1.0)
+            .include_y(1.0)
+            .include_x(0.0)
+            .include_x(env.duration_seconds)
+            .show(ui, |plot_ui| {
+                for (i, (mn, mx)) in env.envelope.iter().enumerate() {
+                    let t = (i as f64 + 0.5) * dt;
+                    let segment = PlotPoints::from(vec![[t, *mn as f64], [t, *mx as f64]]);
+                    plot_ui
+                        .line(Line::new("", segment).color(egui::Color32::from_rgb(80, 140, 220)));
+                }
+            });
     }
 
     fn welcome(&mut self, ui: &mut egui::Ui) {
