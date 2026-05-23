@@ -560,6 +560,16 @@ impl Project {
         &self.root
     }
 
+    /// Lightweight check: returns `true` if `path` looks like a sadda
+    /// project root (`project.toml` + `corpus.db` both exist). Does
+    /// **not** open the database — use when the cost of a real
+    /// [`Project::open`] is wasteful, e.g. greying out recent-projects
+    /// rows that have been moved or deleted on disk.
+    pub fn is_project_root(path: impl AsRef<Path>) -> bool {
+        let p = path.as_ref();
+        p.join("project.toml").is_file() && p.join("corpus.db").is_file()
+    }
+
     /// Returns the project's human-readable name (from the singleton row in
     /// the `project` table).
     pub fn name(&self) -> Result<String> {

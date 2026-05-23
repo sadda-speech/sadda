@@ -6,6 +6,160 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-23 — App shell + project open/create (A1): welcome screen, persistent recent-projects, greyed Open-Bundle until project loaded
+
+Goal: settle the first Phase 2 slice. A1 replaces the Phase-0 sketch in `crates/app/src/main.rs` (which loaded a bare WAV via file dialog and drew waveform + f0) with a project-aware app shell. Everything cluster B and later builds on this state model.
+
+### What A1 must deliver
+
+From the Phase 2 slicing entry: window with menu (File → New Project / Open Project / Open Bundle); persistent window state via egui's built-in storage; light/dark from system; loads a `Project` and shows "Project: <name>" in the status bar. **No content panes yet.**
+
+Acceptance: opens a real `Project` created by Phase 1's `sadda.new_project`; recent-projects list survives a relaunch; "Open Bundle" is greyed until a project is loaded; trying to open a non-sadda directory shows a clear error.
+
+### Prior art
+
+| Tool | What we lift | What we leave |
+|---|---|---|
+| **VS Code** | Welcome screen with New / Open + Recent column; folder-as-project model; recent list persists across launches | Multi-folder workspaces; the wider extension ecosystem |
+| **Reaper / Logic / Ableton** | Project-centric workflow; recent-projects in File menu | Auto-reopen-last on launch (too opinionated for a 0.2) |
+| **Praat** | The terminology ("Open", "New") | The object-list paradigm; no project concept |
+| **Audacity** | Single project = single file simplicity | Single-file projects don't fit our directory-tree project layout |
+
+### State model
+
+The app has three top-level states; the central panel renders differently per state:
+
+```
+enum AppState {
+    NoProject,
+    ProjectLoaded { project: Project, root: PathBuf },
+    Error { message: String, since: Instant },  // overlay; dismisses on click
+}
+```
+
+- `NoProject` → welcome card: title, [New Project] button, [Open Project…] button, Recent list (clickable rows).
+- `ProjectLoaded` → status bar populated; central panel says "Open a bundle from File → Open Bundle…" (placeholder for cluster B).
+- `Error` → red banner at the bottom; dismissible.
+
+The state transitions happen on menu actions and click handlers, never inside the render loop's body (no spawning of file dialogs mid-frame — they block).
+
+### Welcome screen layout
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  File  Edit  View  Help                                  │
+├──────────────────────────────────────────────────────────┤
+│                                                          │
+│                   sadda                                  │
+│        speech-analysis toolkit                           │
+│                                                          │
+│        ┌──────────────┐  ┌──────────────┐                │
+│        │ New Project  │  │ Open Project │                │
+│        └──────────────┘  └──────────────┘                │
+│                                                          │
+│        Recent                                            │
+│        • /home/alice/projects/vowels                     │
+│        • /home/alice/projects/connected_speech           │
+│        • /home/alice/projects/practice                   │
+│                                                          │
+│        (No recent projects yet)                          │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+
+Recent list is capped at 5 entries; clicking a row opens it. If a recent row's path no longer exists, the row is rendered greyed with `(missing)` suffix and clicking it removes the entry.
+
+### Persistence
+
+eframe's built-in storage hook (`Storage` trait via `set_value(eframe::APP_KEY, ...)` and `eframe::get_value(...)`) covers everything we persist:
+
+```rust
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct PersistedState {
+    recent_projects: Vec<PathBuf>,    // capped at 5; most-recent first
+    theme_preference: ThemePref,      // System | Light | Dark
+}
+```
+
+Window size + position are persisted by eframe automatically once `persist_window: true` is set on `NativeOptions::viewport`.
+
+### Menus
+
+- **File**
+  - New Project… — folder picker; `Project::create(path, name = path.file_name())`. Errors if the folder already exists per the existing `Project::create` contract.
+  - Open Project… — folder picker; `Project::open(path)`. Errors if the folder isn't a sadda project.
+  - Recent Projects → submenu of up to 5 entries.
+  - Open Bundle… — greyed unless `AppState::ProjectLoaded`. WAV file picker; calls `Project::add_bundle(name = file_stem, source = path)`. Doesn't *select* the bundle yet (selection is a slice-B concern); just registers it.
+  - ─
+  - Quit — Cmd/Ctrl+Q.
+- **Edit**, **View** — placeholder menus, populated by later slices. Empty in A1 so the menu bar shape is set.
+- **Help**
+  - About — version + license + repo link.
+
+### Error model
+
+Engine errors bubble up through the existing `EngineError` hierarchy. The app catches them on menu actions and converts to `AppState::Error { message }`. Recoverable: clicking dismisses the banner and returns to the previous state. Common cases:
+
+- `Project::create` on an existing path → "Project path already exists: {path}"
+- `Project::open` on a non-sadda directory → "Not a sadda project: {path}"
+- `Project::open` on a future-schema project → uses the existing `EngineError::SchemaTooNew` Display impl verbatim.
+
+### Engine-side touchups
+
+Two small additions to `sadda-engine` to support the app cleanly:
+
+- `Project::name() -> Result<String>` — already exists from B1; reused as-is.
+- `Project::is_project_root(path: &Path) -> bool` — new helper that returns true iff `<path>/project.toml` + `<path>/corpus.db` exist. Used to grey-out the Recent rows for moved/deleted projects without doing a full `Project::open`.
+
+### Layout
+
+- `crates/app/Cargo.toml` — adds `serde` (for `PersistedState`) and `directories-next = "2"` (for cross-platform recent-projects storage). Actually, eframe's `Storage` handles platform-appropriate storage already; we just need `serde` (which eframe transitively pulls in but isn't a direct dep yet).
+- `crates/app/src/main.rs` — refactor end-to-end. Phase-0 waveform code goes away.
+- `crates/app/src/state.rs` — `AppState`, `PersistedState`, recent-projects management. Unit-tested.
+- `crates/app/src/ui/welcome.rs` — welcome-card widget.
+- `crates/app/src/ui/menus.rs` — File/Edit/View/Help bar.
+- `crates/engine/src/corpus.rs` — `Project::is_project_root` helper.
+
+### Confirmed A1 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Startup behavior | **Welcome screen with New / Open / Recent** | Most discoverable; matches VS Code / IntelliJ convention |
+| "Open Bundle" semantics | **Greyed until a project is loaded** | Bundles only live inside projects per our data model; no ambiguity about where they go |
+| Recent-projects depth | **5 entries, most-recent first** | Standard; deeper lists rot |
+| Missing recent entries | **Rendered greyed with `(missing)` suffix; click removes** | Self-cleaning without needing a separate "Manage Recent" UI |
+| Theme | **Follow system light/dark by default; manual override in View menu** | Defer the custom palette; egui's defaults are fine |
+| Persistence backend | **eframe's built-in `Storage`** | Cross-platform, no new dep |
+| Auto-reopen-last on launch | **No** | One extra click for repeat users beats the "stale project sitting open" failure mode |
+| Phase-0 waveform code | **Removed** | Comes back in slice B2 reading from `Project` |
+
+### Lossiness / what A1 deliberately doesn't ship
+
+- **Sidebar / project navigator pane.** Empty central panel for now; the bundle picker lives in a menu. Sidebar lands when there's something to browse to (slice B).
+- **Recently-opened *bundles*** (vs projects). Bundles are project-scoped; per-bundle history would live inside the project's persisted state, deferred until cluster B/C exposes selection.
+- **Drag-and-drop project folder onto the app window.** Nice-to-have; egui supports it; doesn't change the slice scope.
+- **Welcome-screen graphics / branding.** Plain text + buttons in A1. A bundled logo lands at 0.2 release-polish time.
+- **Multi-window / multi-project.** Single project per app instance; multi-instance is the single-writer-lock concern (slice F10).
+- **Internationalisation.** All strings English; per the milestone-plan deferral.
+- **Accessibility audit.** Egui's AccessKit integration is young; A1 best-effort, dedicated pass at 1.x per the milestone plan.
+
+### What this entry doesn't decide
+
+- **Exact welcome-card visual proportions.** Settled at implementation time; will iterate based on screenshots.
+- **Whether "About" links open in the system browser or show a modal.** Both are easy; pick whichever feels right when implementing.
+- **Whether `Project::is_project_root` should also check `corpus.db` is openable (not just exists).** Probably overkill — the existence check is cheap; the open-and-validate happens on actual `Project::open`.
+- **Persistence file format / location.** eframe handles it; we just hand it serde-derived structs.
+
+### Sources / references
+
+- 2026-05-23 Phase 2 slicing entry (A1 row + the "single-bundle vs project-navigator" open item this entry settles)
+- 2026-05-18 milestone-plan entry (Phase 2 row)
+- 2026-05-18 Python API surface entry (`sadda.app` namespace; in-app commands)
+- eframe Storage trait: <https://docs.rs/eframe/latest/eframe/trait.Storage.html>
+- VS Code welcome editor: <https://code.visualstudio.com/docs/getstarted/userinterface#_welcome-page>
+
+---
+
 ## 2026-05-23 — Phase 2 slicing: 11 slices in 7 clusters toward 0.2
 
 Goal: sequence Phase 2 — the egui+wgpu desktop GUI — into a concrete commit-by-commit ordering, analogous to the 2026-05-21 Phase 1 slicing entry. The 2026-05-18 milestone-plan entry committed to Phase 2's *scope*; this entry commits to its *cadence and ordering*.
