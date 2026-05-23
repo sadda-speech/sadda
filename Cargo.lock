@@ -4037,6 +4037,7 @@ name = "sadda-app"
 version = "0.1.1"
 dependencies = [
  "colorous",
+ "cpal",
  "eframe",
  "egui_plot",
  "rfd",

@@ -168,11 +168,11 @@ mod tests {
 // Waveform envelope
 // ---------------------------------------------------------------------------
 
-/// Cached min/max envelope of a bundle's mono mixdown, plus the raw
-/// mono samples that B3's spectrogram pipeline reuses on every
-/// (window, hop, colormap, dynamic-range) change. Computed once at
-/// bundle-select time. When C5 lands zoom, this cache gets a
-/// per-frame re-bucketing path on the envelope side.
+/// Bundle audio + metadata cached on selection. B2 originally also
+/// cached a fixed-resolution waveform envelope here; C5 replaced that
+/// with per-frame re-bucketing via [`build_envelope_for_range`], so
+/// the cache now holds only the raw mono samples + the header info
+/// the panes use for axis bounds.
 #[derive(Debug, Clone)]
 pub struct EnvelopeCache {
     /// Bundle this cache was built for; reset when the user selects
@@ -183,12 +183,9 @@ pub struct EnvelopeCache {
     pub sample_rate: u32,
     /// Bundle audio duration in seconds; used for the x-axis bounds.
     pub duration_seconds: f64,
-    /// Per-bucket (min, max). Length = the resolution requested at
-    /// build time (clamped to the sample count for short audio).
-    pub envelope: Vec<(f32, f32)>,
-    /// Mono-mixdown samples. Kept around so the spectrogram cache
-    /// can re-run STFT without re-reading the WAV from disk on every
-    /// toolbar tweak.
+    /// Mono-mixdown samples. Used by the waveform pane's per-frame
+    /// re-bucketer (C5) and by the spectrogram cache's STFT
+    /// (rebuilt on (window, hop, colormap, dynamic-range) change).
     pub mono_samples: Vec<f32>,
 }
 
@@ -517,5 +514,297 @@ mod tier_strip_tests {
         assert_eq!(format_reference_lane_caption(0), "(reference — 0 targets)");
         assert_eq!(format_reference_lane_caption(1), "(reference — 1 target)");
         assert_eq!(format_reference_lane_caption(3), "(reference — 3 targets)");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Timeline state (C5): cursor + view window + zoom + scroll
+// ---------------------------------------------------------------------------
+
+/// Minimum view-range size in seconds; prevents the user from zooming
+/// to a window so small that floats start losing precision.
+const MIN_VIEW_RANGE_SECONDS: f64 = 0.005;
+
+/// Shared timeline state used by every C5+ pane: cursor, view window,
+/// and the bundle duration the window clamps against. Pure-data —
+/// pane render code calls back into this for zoom / scroll / cursor
+/// mutations. Reset on bundle change via [`TimelineState::reset_for_bundle`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimelineState {
+    /// Left edge of the visible time range, in seconds.
+    pub view_start: f64,
+    /// Right edge of the visible time range, in seconds (exclusive).
+    pub view_end: f64,
+    /// Cursor position in seconds. Clamped to `[0, duration]`.
+    pub cursor: f64,
+    /// Bundle duration in seconds. Acts as the upper bound for
+    /// `view_end` and `cursor` clamping.
+    pub duration: f64,
+}
+
+impl Default for TimelineState {
+    fn default() -> Self {
+        Self {
+            view_start: 0.0,
+            view_end: 0.0,
+            cursor: 0.0,
+            duration: 0.0,
+        }
+    }
+}
+
+impl TimelineState {
+    /// Reinitialises the timeline for a freshly-loaded bundle:
+    /// view spans `[0, duration]`, cursor at 0.
+    pub fn reset_for_bundle(&mut self, duration_seconds: f64) {
+        let d = duration_seconds.max(0.0);
+        self.duration = d;
+        self.view_start = 0.0;
+        self.view_end = d.max(MIN_VIEW_RANGE_SECONDS);
+        self.cursor = 0.0;
+    }
+
+    /// Returns `view_end - view_start` (always > 0 for an
+    /// initialised state).
+    pub fn view_range(&self) -> f64 {
+        (self.view_end - self.view_start).max(MIN_VIEW_RANGE_SECONDS)
+    }
+
+    /// Maps a pixel-x within `[0, plot_width_px)` to seconds in the
+    /// current view range.
+    pub fn pixel_to_time(&self, pixel_x: f64, plot_width_px: f64) -> f64 {
+        if plot_width_px <= 0.0 {
+            return self.view_start;
+        }
+        let t = (pixel_x / plot_width_px).clamp(0.0, 1.0);
+        self.view_start + t * self.view_range()
+    }
+
+    /// Sets the cursor, clamped to `[0, duration]`.
+    pub fn set_cursor(&mut self, time_seconds: f64) {
+        self.cursor = time_seconds.clamp(0.0, self.duration);
+    }
+
+    /// Zooms the view around `time_seconds`, by `factor` (e.g. 0.833
+    /// to zoom in, 1.2 to zoom out). Clamps the resulting view to
+    /// `[0, duration]` and prevents the range from shrinking below
+    /// [`MIN_VIEW_RANGE_SECONDS`].
+    pub fn zoom_at(&mut self, time_seconds: f64, factor: f64) {
+        let old_range = self.view_range();
+        let new_range = (old_range * factor).clamp(
+            MIN_VIEW_RANGE_SECONDS,
+            self.duration.max(MIN_VIEW_RANGE_SECONDS),
+        );
+        // Position of `time_seconds` within the old window (0..1):
+        let t_norm = ((time_seconds - self.view_start) / old_range).clamp(0.0, 1.0);
+        // Re-anchor: keep `time_seconds` at the same normalised
+        // position inside the new (smaller / larger) window.
+        let new_start = time_seconds - t_norm * new_range;
+        self.set_view(new_start, new_start + new_range);
+    }
+
+    /// Pans the view by `delta_seconds`, clamped against the bundle's
+    /// bounds. Range size is preserved.
+    pub fn scroll_by(&mut self, delta_seconds: f64) {
+        let range = self.view_range();
+        let new_start = self.view_start + delta_seconds;
+        self.set_view(new_start, new_start + range);
+    }
+
+    /// Ensures the cursor is inside `[view_start, view_end]`. If not,
+    /// shifts the view (preserving range) to put the cursor a quarter
+    /// of the way in from the left edge — the convention that gives
+    /// the user upcoming audio to look at during playback.
+    pub fn ensure_cursor_visible(&mut self) {
+        let range = self.view_range();
+        if self.cursor < self.view_start || self.cursor > self.view_end {
+            let new_start = (self.cursor - range * 0.25).max(0.0);
+            self.set_view(new_start, new_start + range);
+        }
+    }
+
+    /// Internal: clamps a candidate `[start, end]` to the bundle.
+    fn set_view(&mut self, mut start: f64, mut end: f64) {
+        let duration = self.duration.max(MIN_VIEW_RANGE_SECONDS);
+        let range = (end - start).max(MIN_VIEW_RANGE_SECONDS);
+        if start < 0.0 {
+            start = 0.0;
+            end = (start + range).min(duration);
+        }
+        if end > duration {
+            end = duration;
+            start = (end - range).max(0.0);
+        }
+        self.view_start = start;
+        self.view_end = end.max(start + MIN_VIEW_RANGE_SECONDS);
+    }
+}
+
+/// Per-frame waveform downsampler over a time range. Replaces the
+/// fixed-resolution `build_envelope` for C5's zoomable view. Returns
+/// one `(min, max)` bucket per pixel column.
+///
+/// `mono` is the full bundle mono mixdown (from
+/// [`EnvelopeCache::mono_samples`]); `view_start` / `view_end` clamp
+/// to `[0, mono.len() / sample_rate]` automatically.
+pub fn build_envelope_for_range(
+    mono: &[f32],
+    sample_rate: u32,
+    view_start: f64,
+    view_end: f64,
+    target_buckets: usize,
+) -> Vec<(f32, f32)> {
+    if mono.is_empty() || target_buckets == 0 || sample_rate == 0 {
+        return Vec::new();
+    }
+    let sr = sample_rate as f64;
+    let n = mono.len();
+    let start_sample = ((view_start * sr).max(0.0) as usize).min(n);
+    let end_sample = ((view_end * sr).max(0.0) as usize).min(n);
+    if end_sample <= start_sample {
+        return Vec::new();
+    }
+    let slice = &mono[start_sample..end_sample];
+    build_envelope(slice, target_buckets)
+}
+
+#[cfg(test)]
+mod timeline_tests {
+    use super::*;
+
+    fn fresh(duration: f64) -> TimelineState {
+        let mut t = TimelineState::default();
+        t.reset_for_bundle(duration);
+        t
+    }
+
+    #[test]
+    fn reset_for_bundle_spans_full_range() {
+        let t = fresh(5.0);
+        assert_eq!(t.view_start, 0.0);
+        assert_eq!(t.view_end, 5.0);
+        assert_eq!(t.cursor, 0.0);
+        assert_eq!(t.duration, 5.0);
+    }
+
+    #[test]
+    fn reset_clamps_negative_duration() {
+        let mut t = TimelineState::default();
+        t.reset_for_bundle(-1.0);
+        assert_eq!(t.duration, 0.0);
+        assert!(t.view_end >= MIN_VIEW_RANGE_SECONDS);
+    }
+
+    #[test]
+    fn set_cursor_clamps_to_duration() {
+        let mut t = fresh(2.0);
+        t.set_cursor(5.0);
+        assert_eq!(t.cursor, 2.0);
+        t.set_cursor(-1.0);
+        assert_eq!(t.cursor, 0.0);
+        t.set_cursor(1.3);
+        assert_eq!(t.cursor, 1.3);
+    }
+
+    #[test]
+    fn zoom_in_keeps_anchor_at_same_normalised_position() {
+        let mut t = fresh(10.0);
+        // Anchor at the cursor (middle of the view), zoom in 5x.
+        t.zoom_at(5.0, 0.2);
+        // The anchored time should still be at the same normalised
+        // position (0.5) inside the new view, so:
+        let normalised = (5.0 - t.view_start) / t.view_range();
+        assert!((normalised - 0.5).abs() < 1e-9);
+        assert!((t.view_range() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zoom_clamps_to_minimum_range() {
+        let mut t = fresh(10.0);
+        // Try to zoom to a microscopic range.
+        t.zoom_at(5.0, 0.000001);
+        assert!(t.view_range() >= MIN_VIEW_RANGE_SECONDS);
+    }
+
+    #[test]
+    fn zoom_out_past_bundle_clamps_to_full_range() {
+        let mut t = fresh(10.0);
+        t.zoom_at(5.0, 100.0);
+        assert!((t.view_start - 0.0).abs() < 1e-9);
+        assert!((t.view_end - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn scroll_preserves_range_and_clamps_left() {
+        let mut t = fresh(10.0);
+        t.zoom_at(5.0, 0.2); // range 2.0
+        t.scroll_by(-100.0);
+        assert!((t.view_start - 0.0).abs() < 1e-9);
+        assert!((t.view_range() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn scroll_preserves_range_and_clamps_right() {
+        let mut t = fresh(10.0);
+        t.zoom_at(5.0, 0.2); // range 2.0
+        t.scroll_by(100.0);
+        assert!((t.view_end - 10.0).abs() < 1e-9);
+        assert!((t.view_range() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ensure_cursor_visible_shifts_view() {
+        let mut t = fresh(10.0);
+        t.zoom_at(2.0, 0.2); // range 2.0, view about [1, 3]
+        t.cursor = 7.0;
+        t.ensure_cursor_visible();
+        assert!(t.cursor >= t.view_start && t.cursor <= t.view_end);
+        // Range preserved.
+        assert!((t.view_range() - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pixel_to_time_maps_within_view() {
+        let mut t = fresh(10.0);
+        t.view_start = 2.0;
+        t.view_end = 6.0;
+        // Left edge → view_start; right edge → view_end.
+        assert!((t.pixel_to_time(0.0, 100.0) - 2.0).abs() < 1e-9);
+        assert!((t.pixel_to_time(100.0, 100.0) - 6.0).abs() < 1e-9);
+        assert!((t.pixel_to_time(50.0, 100.0) - 4.0).abs() < 1e-9);
+    }
+
+    // ----- build_envelope_for_range -----
+
+    #[test]
+    fn envelope_for_range_empty_input() {
+        let env = build_envelope_for_range(&[], 16_000, 0.0, 1.0, 100);
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn envelope_for_range_zero_sample_rate() {
+        let env = build_envelope_for_range(&[0.1, 0.2], 0, 0.0, 1.0, 100);
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn envelope_for_range_inverted_window() {
+        let env = build_envelope_for_range(&[0.1, 0.2], 16_000, 1.0, 0.0, 100);
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn envelope_for_range_subset() {
+        // 16-sample buffer at 16 kHz → 1 ms long. Take the middle
+        // 0.25–0.75 ms slice (samples 4..12) and bucket to 4.
+        let samples: Vec<f32> = (0..16).map(|i| i as f32 / 16.0).collect();
+        let env = build_envelope_for_range(&samples, 16_000, 0.25e-3, 0.75e-3, 4);
+        // 8 samples bucketed into 4 = 2 per bucket; values
+        // (4/16, 5/16), (6/16, 7/16), (8/16, 9/16), (10/16, 11/16).
+        assert_eq!(env.len(), 4);
+        assert!((env[0].0 - 4.0 / 16.0).abs() < 1e-6);
+        assert!((env[0].1 - 5.0 / 16.0).abs() < 1e-6);
+        assert!((env[3].1 - 11.0 / 16.0).abs() < 1e-6);
     }
 }

@@ -6,6 +6,181 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-23 — Synced cursor + zoom + scroll + playback (C5): shared timeline state, mouse-position-centered zoom, cpal output with linear resample, view follows cursor
+
+Goal: settle the fifth Phase 2 slice. C5 is the slice that turns three independent panes into a coordinated editor — they all share one timeline state, scrub in lockstep, and respond to a single transport. It's also the biggest single slice in Phase 2; budget realistically ~1200–1500 LOC.
+
+### What C5 must deliver
+
+From the Phase 2 slicing entry: "Single shared timeline state across the three view panes. Spacebar plays/stops from the cursor via cpal *output* (reusing the existing cpal dep from E1 input). Click moves cursor. Mouse-wheel zooms; shift-wheel scrolls. Acceptance: scrub through a recording with the spectrogram cursor and tier-strip cursor staying in lockstep."
+
+### Timeline state
+
+One struct, owned by `SaddaApp`, plumbed into each pane render:
+
+```rust
+pub struct TimelineState {
+    /// View window in seconds: [view_start, view_end). Resets on
+    /// bundle change to [0, duration_seconds].
+    pub view_start: f64,
+    pub view_end: f64,
+    /// Cursor position in seconds. Clamped to [0, duration].
+    pub cursor: f64,
+    /// Total bundle duration in seconds; needed for clamping.
+    pub duration: f64,
+}
+```
+
+Three operations the panes call back into:
+
+- `zoom_at(time, factor)` — multiplies the view range by `factor` (e.g. 1/1.2 zoom-in, 1.2 zoom-out), centred on the time the mouse is over.
+- `scroll_by(delta_seconds)` — shifts the window; clamps to `[0, duration]` without changing the range size.
+- `set_cursor(time)` — clamps + sets.
+
+All of those are pure-data — unit-testable in `state.rs` without spinning up a single egui frame.
+
+### Interaction model
+
+| Event | Result |
+|---|---|
+| Click on waveform / spectrogram | `set_cursor(click_time)` |
+| Click on tier-strip annotation | Select annotation (B4) + `set_cursor(annotation_start)` |
+| Click on tier-strip background | Deselect (B4) — cursor unchanged |
+| Mouse wheel up/down on any pane | `zoom_at(mouse_time, 1.0/1.2)` / `zoom_at(mouse_time, 1.2)` |
+| Shift + wheel | `scroll_by(±0.1 × view_range)` |
+| Spacebar (anywhere in the app) | Toggle playback |
+
+Mouse-position-centred zoom matches Praat / Audacity / WaveSurfer.js / every map app. Shift+wheel for horizontal scroll matches GIMP / Inkscape / IDE editors.
+
+### Per-frame re-bucketing in the waveform
+
+B2's `EnvelopeCache` baked a 2000-bucket envelope over the full bundle at load time. At full zoom that's fine; zoomed in it'd render the same buckets at lower density, losing the spike-preserving property the min/max envelope existed for. C5 replaces the cached envelope with a per-frame call against the visible range:
+
+```rust
+fn render_waveform(env: &EnvelopeCache, timeline: &TimelineState, plot_width_px: usize) {
+    let buckets = build_envelope_for_range(
+        &env.mono_samples,
+        env.sample_rate,
+        timeline.view_start,
+        timeline.view_end,
+        plot_width_px,  // one bucket per pixel column
+    );
+    // draw vertical lines per bucket as before
+}
+```
+
+This is the "per-frame re-bucketing" promised in the B2 entry. Cost is `O(visible_samples)` per frame, which is bounded — even fully zoomed out on a 10-minute file at 44.1 kHz that's ~26M iterations, well under a 16 ms frame budget.
+
+The cached `EnvelopeCache.envelope` field stays for now (used as a fallback if width is 0 — defensive) but the rendering path no longer reads it.
+
+### Spectrogram: no work to do
+
+The B3 texture covers the full bundle. Narrowing the plot bounds (`Plot::include_x(view_start)…(view_end)`) lets egui_plot crop the displayed region for free. No re-render, no re-upload. The 4096-column cap means even at full zoom-out, one screen pixel maps to multiple texture columns; zooming in, the texture columns spread out — visually fine for a viewer (it's not a per-pixel scientific output).
+
+Future polish: at extreme zoom-in, the spectrogram resolution can look chunky if the visible range is `< 4096 × hop_seconds`. A multi-resolution texture cache could fix that; not C5 scope.
+
+### Playback
+
+Embedded directly on `SaddaApp` as `Option<Playback>`:
+
+```rust
+struct Playback {
+    _stream: cpal::Stream,            // !Send on Linux ALSA; OK because SaddaApp stays on the main thread
+    state: Arc<PlaybackState>,
+}
+
+struct PlaybackState {
+    samples: Vec<f32>,                // mono mixdown, possibly resampled to the device rate
+    device_sample_rate: u32,
+    bundle_sample_rate: u32,          // to convert atomic cursor back to bundle time
+    cursor_samples: AtomicUsize,      // current sample position; audio thread advances; GUI reads
+    finished: AtomicBool,             // set true when cursor reaches the end
+}
+```
+
+Flow on spacebar (when stopped):
+
+1. Pull mono samples + sample rate from `active_envelope`.
+2. Build output stream on the default device. Get device's preferred sample rate.
+3. If device rate ≠ bundle rate, linear-resample the samples once into a fresh `Vec<f32>`. Quality is acceptable for monitoring playback; not for studio output.
+4. Build `Arc<PlaybackState>` with `cursor_samples` initialised from the current `timeline.cursor`.
+5. Build cpal output stream with a callback that reads from `state.samples` advancing the atomic.
+6. `stream.play()`.
+7. Store `Playback` in `SaddaApp.playback`.
+
+On spacebar (when playing) or at end of audio: drop the `Playback`. cpal's Drop impl stops the stream cleanly.
+
+On each frame: if playback exists, read `cursor_samples` and update `timeline.cursor`. If cursor went off-screen, auto-scroll the view to keep cursor visible (re-centre at cursor when it leaves the right edge during playback).
+
+### Threading
+
+cpal's output callback runs on a real-time audio thread. Same rules as E1 input: no allocations, no locks, no GIL. The callback reads `samples` (immutable shared `Arc<Vec<f32>>` via `PlaybackState`) and advances an `AtomicUsize` — both lock-free. End-of-audio is signalled to the GUI via an `AtomicBool` that the main thread polls each frame.
+
+No `rtrb` for output: the callback doesn't need a queue because the entire sample buffer is in memory. The pattern is closer to "play a static buffer with a moving read head" than to E1's "stream samples through a ring."
+
+### Confirmed C5 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Timeline state location | **One `TimelineState` on `SaddaApp`, plumbed into each pane** | Single source of truth; pure-data; testable in isolation |
+| Reset on bundle change | **`[0, duration]` + cursor at 0** | Sensible default; preserves view state across re-selects of the *same* bundle |
+| Zoom centre | **Mouse position** | Universal convention; Praat / Audacity / map apps |
+| Zoom factor per wheel notch | **1.2× (out) / 0.833× (in)** | Standard geometric step; ~7 notches per 10× zoom |
+| Scroll | **Shift + wheel; ±10% of view range per notch** | Familiar from GIMP / IDEs; proportional pan matches zoom level |
+| Click-positions-cursor scope | **Waveform + spectrogram. Tier-strip clicks select + position cursor at annotation start** | Tier-strip clicks have to do double duty: existing B4 selection + new cursor positioning |
+| Cursor visualisation | **1-px red vertical line on all three panes** | High contrast against viridis/magma/greyscale; minimal visual weight |
+| Spacebar binding | **Global at the app level (anywhere)** | Universal transport convention; `egui::Context::input` consumes the key so it doesn't double-fire |
+| Waveform re-bucketing | **Per-frame over the visible range; one bucket per pixel column** | The fix B2 promised; cheap; preserves the min/max property at any zoom |
+| Spectrogram on zoom | **Just narrow plot bounds against the existing texture** | Re-rendering on every zoom would be ruinous; bound-crop is free |
+| Playback device | **`cpal::default_host().default_output_device()`** | No device picker yet; users on multi-output systems can change the OS default |
+| Sample-rate mismatch | **One-shot linear resample at playback start** | Sufficient quality for monitoring; avoids dragging in a real SRC library at v1 |
+| Resampling library | **None — hand-rolled linear interp** | ~15 LOC; v1 monitoring quality is fine; can swap in `rubato` later if needed |
+| End-of-audio behaviour | **Auto-stop; cursor stays at end** | Matches Praat; loop mode is a 0.3 polish item |
+| View-follows-cursor during playback | **Yes — re-centre when cursor crosses the right edge** | The most common scrubbing UX; user can still drag the wheel mid-playback |
+| Cursor advance smoothness | **Read `AtomicUsize` per frame; convert to seconds** | At 60 fps with audio buffers ~10 ms, motion looks smooth |
+
+### State changes on `SaddaApp`
+
+- **New**: `timeline: TimelineState`, `playback: Option<Playback>`.
+- **Reset** in `clear_bundle_selection` and `select_bundle`: timeline resets to the bundle's full range, cursor to 0; playback drops.
+
+### Layout
+
+- `crates/app/src/state.rs` — `TimelineState` + `build_envelope_for_range` + unit tests for zoom/scroll/clamp/cursor/per-range bucket counts.
+- `crates/app/src/playback.rs` — new module. `Playback`, `PlaybackState`, `start_playback(env, timeline) -> Result<Playback, String>`, linear resample, cpal stream wiring.
+- `crates/app/src/main.rs` — wire `timeline` into the three pane renderers, add the spacebar handler, drive the per-frame cursor advance from `Playback`.
+
+### Lossiness / what C5 deliberately doesn't ship
+
+- **Loop / region playback.** Selecting a time range to loop is the natural extension; 0.3+ polish.
+- **Output-device picker.** Default device only at v1. Users who want a specific output change the OS default. Adds when a real workflow asks.
+- **High-quality resampler.** Linear interpolation is "fine for monitoring." Swap to `rubato` if a real complaint surfaces.
+- **Multi-channel playback.** Mono mixdown only; matches the rest of the GUI.
+- **Latency calibration.** cpal default buffer sizes — typically 5–20 ms. No correction for output latency in the cursor display. Sub-frame precision isn't a 0.2 concern.
+- **Visible-region cursor follow (smooth-scroll instead of re-centre).** Smooth-scroll is nicer; re-centre is simpler; choose simpler for v1.
+- **Keyboard nav** (←/→ to step, Home/End, etc). 0.3 polish.
+- **Touch-pad pinch-to-zoom.** Not in scope; mouse-wheel only.
+- **Two-finger scroll on macOS trackpads (Ctrl+wheel zoom convention).** Egui handles wheel events platform-agnostically; if natural-scroll directions feel inverted, fix in a polish slice.
+
+### What this entry doesn't decide
+
+- **Whether the cursor should hide when not in focus on any pane.** Just always-on for v1.
+- **Whether to show a transport bar with explicit play/stop buttons.** Spacebar only at v1; a transport widget can come later if mouse-only users complain.
+- **What happens if the bundle changes while playback is running.** Drop the playback in `select_bundle`; settled in code.
+- **Whether resample latency at playback start is worth a progress indicator.** ~10 ms for a 1-minute file; not worth UI.
+
+### Sources / references
+
+- 2026-05-23 Phase 2 slicing entry (C5 row)
+- 2026-05-23 B2 entry (per-frame re-bucketing promise this slice fulfils)
+- 2026-05-23 B3 entry (spectrogram texture-bound semantics this slice exploits)
+- 2026-05-23 B4 entry (annotation-selection model this slice extends with cursor-positioning)
+- 2026-05-22 E1 entry (cpal input + atomic-cursor + thread-model patterns reused on the output side)
+- cpal output examples: <https://github.com/RustAudio/cpal/tree/master/examples>
+- WaveSurfer.js zoom + cursor reference: <https://wavesurfer-js.org/docs/options>
+
+---
+
 ## 2026-05-23 — Tier-strip view (B4): three-pane vertical split, per-tier-type lane vocabulary, clickable selection
 
 Goal: settle the fourth Phase 2 slice. B4 adds the tier-strip pane below the spectrogram, completing the Praat-style waveform / spectrogram / tier-strip visual stack. Plus the basic annotation-selection state that C5 (cursor sync) and D-cluster (editing) will both reach into.
