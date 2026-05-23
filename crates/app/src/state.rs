@@ -34,6 +34,9 @@ pub struct PersistedState {
     /// Theme preference; defaults to `System`.
     #[serde(default)]
     pub theme: ThemePref,
+    /// Last-used spectrogram window / hop / colormap / dB-range.
+    #[serde(default)]
+    pub spectrogram: SpectrogramConfig,
 }
 
 impl PersistedState {
@@ -165,22 +168,28 @@ mod tests {
 // Waveform envelope
 // ---------------------------------------------------------------------------
 
-/// Cached min/max envelope of a bundle's mono mixdown. Computed once
-/// at bundle-select time and reused across frames at any plot width
-/// (B2 has no zoom yet — when C5 lands zoom, this cache gets a
-/// per-frame re-bucketing path).
+/// Cached min/max envelope of a bundle's mono mixdown, plus the raw
+/// mono samples that B3's spectrogram pipeline reuses on every
+/// (window, hop, colormap, dynamic-range) change. Computed once at
+/// bundle-select time. When C5 lands zoom, this cache gets a
+/// per-frame re-bucketing path on the envelope side.
 #[derive(Debug, Clone)]
 pub struct EnvelopeCache {
     /// Bundle this cache was built for; reset when the user selects
     /// a different bundle.
     pub bundle_id: i64,
-    /// Bundle audio sample rate; used for the x-axis tick labels.
+    /// Bundle audio sample rate; used for the x-axis tick labels and
+    /// for sample-count → time conversions in B3's STFT call.
     pub sample_rate: u32,
     /// Bundle audio duration in seconds; used for the x-axis bounds.
     pub duration_seconds: f64,
     /// Per-bucket (min, max). Length = the resolution requested at
     /// build time (clamped to the sample count for short audio).
     pub envelope: Vec<(f32, f32)>,
+    /// Mono-mixdown samples. Kept around so the spectrogram cache
+    /// can re-run STFT without re-reading the WAV from disk on every
+    /// toolbar tweak.
+    pub mono_samples: Vec<f32>,
 }
 
 /// Computes a min/max envelope over `samples` at `target_buckets`
@@ -214,4 +223,222 @@ pub fn build_envelope(samples: &[f32], target_buckets: usize) -> Vec<(f32, f32)>
         out.push((mn, mx));
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Spectrogram (B3): config + pure-data helpers
+// ---------------------------------------------------------------------------
+
+/// Which colormap the spectrogram pane uses to map normalised power
+/// values into RGB. Default is `Viridis` (perceptually uniform).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ColormapKind {
+    /// Modern perceptually-uniform default; dark purple → blue → green → yellow.
+    #[default]
+    Viridis,
+    /// Dark-mode-friendly perceptually-uniform alternate; black → purple → red → yellow.
+    Magma,
+    /// Classic black-and-white spectrogram; Praat refugees.
+    Greyscale,
+}
+
+impl ColormapKind {
+    /// Human-readable label for the toolbar `ComboBox`.
+    pub fn label(self) -> &'static str {
+        match self {
+            ColormapKind::Viridis => "Viridis",
+            ColormapKind::Magma => "Magma",
+            ColormapKind::Greyscale => "Greyscale",
+        }
+    }
+}
+
+/// Toolbar-controlled spectrogram configuration. Lives in
+/// [`PersistedState`] so the user's last-used settings survive a
+/// relaunch.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SpectrogramConfig {
+    /// STFT window length in milliseconds.
+    pub window_ms: f32,
+    /// STFT hop length in milliseconds.
+    pub hop_ms: f32,
+    /// Colour scheme.
+    pub colormap: ColormapKind,
+    /// Dynamic-range floor in dB. Values below `-dynamic_range_db`
+    /// (relative to the maximum) clamp to black/the lowest colormap
+    /// entry.
+    pub dynamic_range_db: f32,
+}
+
+impl Default for SpectrogramConfig {
+    fn default() -> Self {
+        Self {
+            window_ms: 25.0,
+            hop_ms: 5.0,
+            colormap: ColormapKind::Viridis,
+            dynamic_range_db: 70.0,
+        }
+    }
+}
+
+/// Floor for converting linear power to dB-FS without blowing up on
+/// silent frames. Matches the floor [`crate::state::power_to_db_normalized`]
+/// applies when `power == 0`.
+const POWER_DB_FLOOR: f32 = -200.0;
+
+/// Converts linear power values into `[0, 1]` normalised dB-FS,
+/// suitable for direct colormap indexing.
+///
+/// Pipeline per cell:
+/// 1. `db = 10 · log10(power)` (or `POWER_DB_FLOOR` for silent cells).
+/// 2. Find the global max across the buffer.
+/// 3. Re-reference: `db_rel = db - max_db`.
+/// 4. Clamp to `[-dynamic_range_db, 0]`.
+/// 5. Normalise to `[0, 1]`: `(db_rel + dynamic_range_db) / dynamic_range_db`.
+///
+/// Returns an empty vector for empty input. `dynamic_range_db` must
+/// be `> 0`; values `<=0` are treated as `1.0` to avoid div-by-zero.
+pub fn power_to_db_normalized(power: &[f32], dynamic_range_db: f32) -> Vec<f32> {
+    if power.is_empty() {
+        return Vec::new();
+    }
+    let dr = if dynamic_range_db > 0.0 {
+        dynamic_range_db
+    } else {
+        1.0
+    };
+    // 1. power → dB (with floor for zeros).
+    let mut db: Vec<f32> = power
+        .iter()
+        .map(|&p| {
+            if p > 0.0 {
+                10.0 * p.log10()
+            } else {
+                POWER_DB_FLOOR
+            }
+        })
+        .collect();
+    // 2. global max.
+    let max_db = db.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    // 3–5. re-reference, clamp, normalise. In-place to save the alloc.
+    for d in db.iter_mut() {
+        let rel = (*d - max_db).clamp(-dr, 0.0);
+        *d = (rel + dr) / dr;
+    }
+    db
+}
+
+/// Bakes a normalised `[0, 1]` freq-major buffer into a row-major
+/// `RGBA8` image suitable for `egui::ColorImage::from_rgba_unmultiplied`.
+///
+/// `power` is laid out as `height` rows of `width` columns (a
+/// freq-major spectrogram, `[freq_bin * width + frame]`). The output
+/// flips the y-axis so frequency increases bottom→top in image
+/// coordinates, which is the convention every spectrogram viewer
+/// uses.
+pub fn colormap_bake(
+    power: &[f32],
+    width: usize,
+    height: usize,
+    colormap: ColormapKind,
+) -> Vec<u8> {
+    debug_assert_eq!(power.len(), width * height, "colormap_bake: shape mismatch");
+    let mut out = vec![0u8; width * height * 4];
+    for y in 0..height {
+        // Flip: image row 0 is at the top, which should show the
+        // highest frequency bin (`height - 1`).
+        let bin = height - 1 - y;
+        for x in 0..width {
+            let v = power[bin * width + x].clamp(0.0, 1.0);
+            let (r, g, b) = sample_colormap(colormap, v);
+            let i = (y * width + x) * 4;
+            out[i] = r;
+            out[i + 1] = g;
+            out[i + 2] = b;
+            out[i + 3] = 255;
+        }
+    }
+    out
+}
+
+fn sample_colormap(kind: ColormapKind, t: f32) -> (u8, u8, u8) {
+    let t = t.clamp(0.0, 1.0) as f64;
+    match kind {
+        ColormapKind::Viridis => {
+            let c = colorous::VIRIDIS.eval_continuous(t);
+            (c.r, c.g, c.b)
+        }
+        ColormapKind::Magma => {
+            let c = colorous::MAGMA.eval_continuous(t);
+            (c.r, c.g, c.b)
+        }
+        ColormapKind::Greyscale => {
+            let v = (t * 255.0).round() as u8;
+            (v, v, v)
+        }
+    }
+}
+
+#[cfg(test)]
+mod spectrogram_tests {
+    use super::*;
+
+    #[test]
+    fn power_to_db_normalized_empty_returns_empty() {
+        assert!(power_to_db_normalized(&[], 70.0).is_empty());
+    }
+
+    #[test]
+    fn power_to_db_normalized_constant_input_returns_ones() {
+        // All cells equal → all re-referenced to 0 dB → normalised to 1.
+        let out = power_to_db_normalized(&[1.0, 1.0, 1.0, 1.0], 70.0);
+        for v in out {
+            assert!((v - 1.0).abs() < 1e-6, "expected 1.0, got {v}");
+        }
+    }
+
+    #[test]
+    fn power_to_db_normalized_clamps_below_dynamic_range() {
+        // Max is 1.0 (0 dB); silent cell is at POWER_DB_FLOOR (very
+        // negative), should clamp to the bottom of the range (= 0.0).
+        let out = power_to_db_normalized(&[1.0, 0.0, 0.0, 0.0], 70.0);
+        assert!((out[0] - 1.0).abs() < 1e-6);
+        for &v in &out[1..] {
+            assert!(v.abs() < 1e-6, "silent cell should clamp to 0.0, got {v}");
+        }
+    }
+
+    #[test]
+    fn power_to_db_normalized_midpoint_is_half_at_floor_minus_half() {
+        // Cell at -35 dB relative to max with 70 dB range → 0.5 after
+        // normalisation.
+        // power that gives -35 dB relative: 10^(-3.5) ≈ 0.000316.
+        let out = power_to_db_normalized(&[1.0, 10f32.powf(-3.5)], 70.0);
+        assert!((out[1] - 0.5).abs() < 1e-3, "got {}", out[1]);
+    }
+
+    #[test]
+    fn colormap_bake_shape_is_rgba_height_times_width() {
+        let power = vec![0.5_f32; 6]; // 2 freq bins × 3 frames
+        let rgba = colormap_bake(&power, 3, 2, ColormapKind::Greyscale);
+        assert_eq!(rgba.len(), 3 * 2 * 4);
+        // Greyscale @ 0.5 ≈ (128, 128, 128, 255).
+        for chunk in rgba.chunks_exact(4) {
+            assert!((chunk[0] as i32 - 128).abs() < 2);
+            assert_eq!(chunk[0], chunk[1]);
+            assert_eq!(chunk[0], chunk[2]);
+            assert_eq!(chunk[3], 255);
+        }
+    }
+
+    #[test]
+    fn colormap_bake_flips_y_axis_so_highest_freq_is_at_top() {
+        // 2 freq bins × 1 frame. bin 0 (low) = 0.0, bin 1 (high) = 1.0.
+        let power = vec![0.0_f32, 1.0_f32];
+        let rgba = colormap_bake(&power, 1, 2, ColormapKind::Greyscale);
+        // Image row 0 (top) should reflect the high freq (1.0 → 255).
+        assert_eq!(rgba[0], 255, "image top row should be the high-freq cell");
+        // Image row 1 (bottom) should reflect the low freq (0.0 → 0).
+        assert_eq!(rgba[4], 0, "image bottom row should be the low-freq cell");
+    }
 }
