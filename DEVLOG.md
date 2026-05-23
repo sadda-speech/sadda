@@ -6,6 +6,157 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-23 — Phase 2 slicing: 11 slices in 7 clusters toward 0.2
+
+Goal: sequence Phase 2 — the egui+wgpu desktop GUI — into a concrete commit-by-commit ordering, analogous to the 2026-05-21 Phase 1 slicing entry. The 2026-05-18 milestone-plan entry committed to Phase 2's *scope*; this entry commits to its *cadence and ordering*.
+
+### What ships at 0.2 (from the milestone plan)
+
+> Egui+wgpu app shell + project navigator + waveform/spectrogram/tier-strip with sync cursor + interval/point tier editing + embedded CPython in app + `sadda.app` basics (selection, register_command) + single-writer lock.
+
+Plus, from this entry's design conversation: **audio playback** (bundled with the Sync slice) and **unsigned binaries** at 0.2 (macOS/Linux/Windows; signing is Phase 7 work).
+
+### What changes from Phase 1
+
+| | Phase 1 | Phase 2 |
+|---|---|---|
+| Slices | 12 | 11 |
+| Each slice ends in | a usable Python entry point | a clickable feature you can demo |
+| Layers crossed per slice | engine + PyO3 + tests | engine (small) + app + manual GUI verification |
+| Release at end | 0.1 — Python library on PyPI | 0.2 — desktop binaries on the GitHub Releases page |
+| Testability | unit + integration in CI | mix of unit-testable layers (state, controllers, downsamplers) + manual screenshot verification |
+
+The GUI couples directly to `sadda_engine::Project` (not via PyO3). Python and the GUI share `corpus.db` via the new single-writer lock landing in cluster F.
+
+### Prior-art shape
+
+| Tool | What we lift | What we leave |
+|---|---|---|
+| **Praat** | Bottom-up tier strips below the spectrogram; per-bundle "Edit" panel | Modal sub-windows per object; the byzantine info-list pane; the menu sprawl |
+| **Audacity** | Selection-handle visual vocabulary; spacebar transport; click-to-position cursor | Linear waveform-only view; no tier model |
+| **ELAN** | Multi-pane tier editor with stacked lanes; tier-hierarchy visualisation | Video-first layout; no DSP integration |
+| **WaveSurfer.js** | Region-selection handles; smooth zoom + pan | Browser stack; no corpus model |
+| **librosa display** | The waveform / spectrogram / pitch stacked layout convention | Read-only; no editing affordances |
+
+### Decomposition: 7 clusters
+
+**Cluster A — Shell** (lands first; gates the rest)
+
+1. **App shell + project open/create.** Replace the Phase-0 `main.rs` sketch (which loads a bare WAV) with a project-aware app shell: window with menu (File → New Project / Open Project / Open Bundle); persistent window state via egui's built-in storage; light/dark from system; loads a `Project` and shows "Project: <name>" in the status bar. No content panes yet. Acceptance: opens a real `Project` created by Phase 1's `sadda.new_project`.
+
+**Cluster B — Views** (independent of each other; can interleave; each ends in a visible pane)
+
+2. **Waveform view.** Reads the active bundle's audio via `Project::load_audio`; renders a min/max envelope (better than the Phase-0 step-sampled line). Vertical Y bounds clamped to [-1, 1]. No interaction yet.
+3. **Spectrogram view.** Uses C1's `sadda::dsp::spectrogram`; renders via egui's `TextureHandle` + a viridis-ish colormap. Configurable hop / window via a panel-local control row.
+4. **Tier-strip view.** Reads tier rows via `Project::tiers(Some(bundle_id))` + `intervals/points/references_for`. Renders each tier as a horizontal lane below the spectrogram; intervals as filled rectangles, points as vertical ticks; clicking a row selects the annotation.
+
+**Cluster C — Sync + playback**
+
+5. **Synced cursor + zoom + scroll + playback.** Single shared timeline state across the three view panes. Spacebar plays/stops from the cursor via cpal *output* (reusing the existing cpal dep from E1 input). Click moves cursor. Mouse-wheel zooms; shift-wheel scrolls. Acceptance: scrub through a recording with the spectrogram cursor and tier-strip cursor staying in lockstep.
+
+**Cluster D — Editing**
+
+6. **Interval-tier editing.** Drag in empty space to create a new interval; drag a boundary to resize; double-click to edit label inline; delete key removes the selected interval. Writes via `Project::add_interval`; engine API extended with `update_interval / delete_interval` (these don't exist yet — small engine surface addition lands in this slice).
+7. **Point-tier editing.** Click to add a point; drag to move; delete to remove. Same engine-surface extension pattern (`update_point / delete_point`).
+
+**Cluster E — Scripting**
+
+8. **Embedded CPython script panel.** Reuse Phase 0's `crates/script-engine` for the embed. Egui text editor + Run button + output pane. Scripts can `import sadda` and get the active project handle via `sadda.app.active_project`.
+9. **`sadda.app` API: current_selection, active_bundle, register_command.** Lands the in-app `sadda.app` namespace per the 2026-05-18 API-surface entry. `register_command` adds the user's function to a command palette accessible via Ctrl+P or a menu. Scripts that don't touch `sadda.app` work identically whether run inside the app or via `sadda` from a terminal.
+
+**Cluster F — Safety**
+
+10. **Single-writer lock.** Two `corpus.db` writers running simultaneously (app + script, or two app instances) would corrupt the audit trail. Use SQLite's WAL + a `BEGIN EXCLUSIVE` advisory pattern, OR a `<project>/.sadda-lock` lockfile written at `Project::open`. Refuses to open a project that's locked, with a clear message naming the holder's PID. The Phase-1 `Project::open` API picks up the lock without breaking existing callers (PyO3 + tests).
+
+**Cluster G — Release**
+
+11. **0.2 binaries.** GitHub Actions workflow building **unsigned** desktop binaries on tag push for macOS arm64 / Linux x86_64 / Windows x86_64; upload as GitHub Release artifacts; update README with download links. macOS users see an "unidentified developer" warning; Linux + Windows are clean. Apple Developer / EV-cert signing is Phase 7 scope per the milestone plan.
+
+### Dependency graph
+
+```
+A1 ─┬─→ B1 (waveform) ────┐
+    ├─→ B2 (spectrogram) ─┤
+    ├─→ B3 (tier strip) ──┴─→ C5 (sync + playback) ─┬─→ D6 (interval edit)
+    │                                                 └─→ D7 (point edit)
+    │
+    ├─→ F10 (single-writer lock; can land any time after A1)
+    │
+    └─→ E8 (embed) ─→ E9 (sadda.app API) ─→ G11 (binaries last)
+```
+
+E8 (embed) needs A1's project model; E9 needs D-cluster's selection model. G11 is gated on everything else.
+
+### Vertical-slice interpretation for Phase 2
+
+Phase 1's vertical-slice rule was "each slice ends in a usable Python entry point." Phase 2's rule is **"each slice ends in a clickable feature you can demo."** That means:
+
+- Every Phase 2 slice merges with a screenshot or a 10-second screen recording added to a `docs/changelog-media/` directory (which the docs site can pull in later).
+- Unit tests cover state/controller/downsampler logic; GUI behaviour is verified manually per slice (no Selenium-for-egui equivalent worth wiring at this scale).
+- CI builds and lints the app crate every commit but does not exercise the egui surface (already true in the Phase 1 ci.yml).
+
+### Confirmed scope decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Audio playback | **In 0.2, bundled with the Sync slice (C5)** | Without playback, the GUI is visualization-only; feels half-finished for a Praat replacement. cpal output is the same dep as E1 input |
+| Embedded CPython timing | **Late in Phase 2 (cluster E)** | Ship the visual editor first; add the script panel once `sadda.app`'s selection model is settled. Lowest risk of churning the embed API |
+| 0.2 binary distribution | **Unsigned on the GitHub Releases page** | Skips the Apple Developer / EV-cert spend until 1.0; "unidentified developer" warning is acceptable for a 0.2 |
+| GUI ↔ engine coupling | **Direct: app crate uses `sadda_engine::Project`** | Simplest, fastest, no IPC. Python and the GUI share `corpus.db` via the new single-writer lock |
+| Tier hierarchy in the strip view | **Hierarchical (parent above child)** | EAF tiers carry parent_id since D2; the strip should reflect that. Matches ELAN |
+| Spectrogram colormap | **Viridis-ish (perceptually uniform)** | Modern default; better than jet; avoids the colormap-as-data-distortion footgun |
+| Editing model | **Direct manipulation (drag handles)** | Praat / Audacity / WaveSurfer.js convention; less modal than ELAN |
+| Command palette | **Ctrl+P (Cmd+P on macOS)** | VS Code / Sublime / IntelliJ convention; familiar to the target audience |
+| First slice | **A1 (app shell)** | Infrastructure-first, matches Phase 1's A1 cadence. Replaces the Phase-0 sketch in `main.rs` |
+
+### Parallel risk spikes
+
+Smaller list than Phase 1 since most cross-cutting unknowns settled in Phase 0 (`crates/script-engine` validated the embed) or Phase 1 (cpal, packaging baseline).
+
+| Spike | Concurrent with | Purpose |
+|---|---|---|
+| **Embedded CPython packaging on Linux/Windows** | Slices A–C | The Phase-1 spike was macOS only. Validate Linux (ELF + libpython.so lookup) + Windows (DLL search path) before E8 commits to the embed. |
+| **Spectrogram render performance on a 10-minute file** | Slice B2 | Render time for a long file is the most likely "felt" bottleneck. Spike the texture-upload + segmented-render strategy before B2's design pass. |
+
+### Cut lines if timeline pressure hits
+
+In priority order of what to defer first:
+
+1. **Cluster E (embed + sadda.app)** → defer to 0.3. The visual editor is 0.2's headline; the script panel can layer in later.
+2. **Spectrogram view (B2)** → defer to 0.3. Waveform + tier strip alone is a usable Praat-replacement for a labelling workflow. Loses the visualization differentiator.
+3. **Point-tier editing (D7)** → ship interval editing only at 0.2; point tiers stay read-only. Most labelling workflows are interval-first.
+4. **Windows binary (G11 subset)** → macOS + Linux only at 0.2; Windows later. Loses ~30% of the desktop audience.
+
+**Not cuttable**: app shell (A1), at least one view (B1 or B3), single-writer lock (F10), any binary at all for at least one OS (G11 subset).
+
+### What this entry doesn't decide
+
+- **Project navigator vs single-bundle focus at A1.** The milestone plan says "project navigator"; the A1 acceptance criterion above starts with single-bundle. Settled inside A1's design pass — probably a sidebar tree of bundles unlocked by clicking a project root.
+- **Persistent UI state beyond window size.** Recent files, last-open project, last-selected bundle. Egui's built-in storage covers it; the question is what to persist. Settled per slice as the need surfaces.
+- **Keyboard shortcuts beyond the playback spacebar + delete-to-remove + Ctrl+P palette.** Mapping table emerges through Phase 2; first cut in A1.
+- **Theme palette beyond "follow system light/dark".** Custom colour overrides for the spectrogram / tier-strip lanes happen inside B2/B3.
+- **Whether `sadda.app.register_panel`** (arbitrary widget panels) ships in 0.2 or waits — the milestone plan punts the heavier panel API to 1.0. The cut-line list keeps `register_command` only.
+- **Crash-reporting / telemetry.** Out of v1 entirely unless a real downstream need surfaces.
+
+### Pace and revisit cadence
+
+- Milestone plan estimates Phase 2 at 3–4 months solo part-time. 11 slices over ~14 weeks ≈ one slice every 1–2 weeks (same cadence as Phase 1).
+- Revisit this entry after slice 5 (C5, the sync+playback slice — the first one with real interaction). If the interaction model fights the rest of the plan, re-slice D6/D7.
+- After 0.2 ships: real GUI users land. Their feedback reshapes Phase 3+ scope per the milestone plan's "after-0.2" revisit point.
+
+### Sources / references
+
+- 2026-05-18 milestone-plan entry (Phase 2 row; "after-0.2" revisit point)
+- 2026-05-18 Python API surface entry (`sadda.app` namespace; register_command shape)
+- 2026-05-21 Phase 1 slicing entry (analogous structure)
+- 2026-05-22 G12 entry (binary-distribution baseline)
+- eframe (egui native shell): <https://github.com/emilk/egui/tree/main/crates/eframe>
+- egui_plot: <https://github.com/emilk/egui_plot>
+- cpal output examples: <https://github.com/RustAudio/cpal/tree/master/examples>
+- WaveSurfer.js (region-selection vocabulary): <https://wavesurfer-js.org/>
+
+---
+
 ## 2026-05-22 — Release 0.1.0 (G12): PyPI Python-only, cibuildwheel matrix, mkdocs-material on GitHub Pages
 
 Goal: close Phase 1. G12 puts the Python library on PyPI as `sadda 0.1.0` and stands up the docs site at GitHub Pages. The slicing entry pinned this as "claim the name + first quickstart tutorial + mkdocs-material with mkdocstrings auto-rendering"; the 2026-05-21 docs-strategy entry pinned this as the docs-site start point. This entry settles the cuts.
