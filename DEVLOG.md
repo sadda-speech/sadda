@@ -6,6 +6,95 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-23 — 0.2 release binaries (G11): app-release.yml builds + uploads unsigned macOS arm64 / Linux x86_64 / Windows x86_64 binaries on tag push
+
+Goal: settle the eleventh and final Phase 2 slice. G11 stands up the CI workflow that turns a `v0.2.x` git tag into a GitHub Release with desktop binaries attached. Unsigned per the Phase 2 slicing entry — Apple Developer / EV-cert spend lands in Phase 7.
+
+### What G11 must deliver
+
+From the Phase 2 slicing entry: "GitHub Actions workflow building **unsigned** desktop binaries on tag push for macOS arm64 / Linux x86_64 / Windows x86_64; upload as GitHub Release artifacts; update README with download links."
+
+### Tag scheme
+
+The 0.1.x Python releases use `v0.1.0` / `v0.1.1` tags consumed by `release.yml`. To avoid double-firing every workflow on every tag, **the app workflow uses a separate tag prefix**: `v0.2.0-app`, `v0.2.1-app`, etc. (or in general `v*.*.*-app`). Python releases keep `v*.*.*`. Both workflows have explicit `on.push.tags` filters; neither runs on the other's tags.
+
+Alternative: gate by tag content. Cleaner shape: separate tag namespace. The DEVLOG entry picks the separation.
+
+### Matrix
+
+Three runners, three OS triples:
+
+| Runner image | Target triple | Output name |
+|---|---|---|
+| `ubuntu-latest` | `x86_64-unknown-linux-gnu` | `sadda-app-linux-x86_64` |
+| `macos-14` (arm64) | `aarch64-apple-darwin` | `sadda-app-macos-arm64` |
+| `windows-latest` | `x86_64-pc-windows-msvc` | `sadda-app-windows-x86_64.exe` |
+
+cibuildwheel is **not** used — that's wheel-specific. Plain `cargo build --release --bin sadda-app` on each runner.
+
+### Per-platform native deps
+
+- **Linux**: ALSA dev headers (`libasound2-dev`) for cpal, libpython for the script-engine. The Ubuntu CI image ships both via apt; we install them explicitly. Plus the `LD_LIBRARY_PATH` workaround for libpython at runtime — for the *user*'s machine, we instead set `LD_RUN_PATH` at link time so the binary records its libpython search path, AND we bundle the OS's libpython location in the README's "what you need installed" note.
+- **macOS**: CoreAudio is a system framework; no install needed. libpython ships with system Python; no install needed.
+- **Windows**: WASAPI is system; no install. libpython needs to be findable at runtime — Python is usually on the PATH on Windows dev boxes; document the "install Python 3.11 from python.org" requirement in the release notes.
+
+The libpython runtime requirement is awkward for end users — the cleanest fix is the Phase-7 packaging-with-embedded-libpython work the milestone plan calls out. v0.2 ships "needs a Python install on PATH" as a known limitation in the release notes; the script panel + `sadda.app` work without Python only if you also install a matching libpython.
+
+Actually — for 0.2 simplicity, document it as: "requires Python 3.11 or 3.12 installed on the system; if you don't have one, the script panel won't work but everything else will."
+
+### Release flow
+
+1. User bumps `workspace.package.version` in Cargo.toml + commits.
+2. User tags `git tag v0.2.0-app` and pushes.
+3. CI builds three binaries in parallel; each uploads its single binary as a job artifact.
+4. A final `publish` job downloads all three artifacts, creates the GitHub Release, attaches the binaries.
+
+Trusted publishing isn't relevant — these are GitHub Release artifacts, not PyPI uploads. No secrets needed; `GITHUB_TOKEN` (always present in Actions) is sufficient.
+
+### Confirmed G11 decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| Tag scheme | **`v*.*.*-app` for app releases; `v*.*.*` continues to mean Python wheels** | Avoids both workflows firing on every tag |
+| Build tool | **Plain `cargo build --release --bin sadda-app`** | cibuildwheel is wheel-specific; not relevant |
+| Signing | **No signing at v0.2** | Phase-7 work per the milestone plan |
+| Binary naming | **`sadda-app-<os>-<arch>[.exe]`** | Standard release-artifact convention |
+| Linux ALSA deps | **`apt install libasound2-dev`** | Same as the Python wheel workflow |
+| Python runtime | **Document as user requirement in release notes** | Bundling libpython is Phase-7 packaging work |
+| Permissions | **`contents: write`** so the publish job can create releases | Minimum scope |
+| Failure mode | **fail-fast: false** on the matrix | Want partial-success (e.g. macOS works even if Windows breaks) |
+| Workflow_dispatch trigger | **Yes** | Dry-run pattern: builds + uploads to Actions artefacts but skips the publish job (gated on `github.event_name == 'push'`) |
+| README link | **Single "Latest desktop binaries" link to the GitHub Releases page** | Doesn't go stale; users browse the page for their OS |
+
+### Layout
+
+- `.github/workflows/app-release.yml` (new) — matrix build, artifact upload, publish job.
+- `README.md` — add a brief "Desktop app" section pointing at the GitHub Releases page.
+
+### Lossiness / what G11 deliberately doesn't ship
+
+- **Code signing.** macOS gatekeeper warning. Phase 7.
+- **Auto-update mechanism inside the app** — release-page download only.
+- **Installer packages** (DMG, MSI, AppImage, .deb). Tarball / zip / bare-exe at v0.2.
+- **Bundled libpython.** Users must have Python installed for the script panel to work.
+- **Per-tag release notes generation.** Empty notes / user-edited via the Releases UI.
+- **Smoke-test on the built binary in CI.** GUI binaries are awkward to smoke-test headlessly; the test suite covers everything reachable from non-GUI code.
+
+### What this entry doesn't decide
+
+- **Whether to also build for Linux aarch64 / macOS x86_64.** Same matrix decision as the Python wheel release; can layer in later.
+- **Whether to ship a tarball of the asset alongside the bare binary.** Bare binary for v0.2; tarball is a nice-to-have polish.
+
+### Sources / references
+
+- 2026-05-23 Phase 2 slicing entry (G11 row)
+- 2026-05-22 G12 entry (Python wheel release workflow — symmetric pattern this slice extends)
+- 2026-05-18 milestone-plan entry (Phase-7 signing + packaging cut-line)
+- GitHub Actions release-uploading reference: <https://docs.github.com/en/actions/publishing-packages/publishing-docker-images>
+- `cargo build --release` cross-platform reference: standard
+
+---
+
 ## 2026-05-23 — Single-writer lock on corpus.db (F10): `.sadda-lock` advisory file, PID + hostname, released on Project drop
 
 Goal: settle the tenth Phase 2 slice. F10 prevents two processes (two app instances, or app + a Python script) from writing to the same `corpus.db` and corrupting the audit trail.
