@@ -7,6 +7,7 @@
 //! (A1)" for the design rationale and the cut-list for what
 //! deliberately doesn't ship at A1.
 
+mod playback;
 mod state;
 
 use std::path::{Path, PathBuf};
@@ -15,9 +16,11 @@ use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
 use sadda_engine::{Project, TierType};
 
+use crate::playback::Playback;
 use crate::state::{
-    ColormapKind, EnvelopeCache, PersistedState, SpectrogramConfig, ThemePref, build_envelope,
-    colormap_bake, format_reference_lane_caption, power_to_db_normalized, truncate_label,
+    ColormapKind, EnvelopeCache, PersistedState, SpectrogramConfig, ThemePref, TimelineState,
+    build_envelope_for_range, colormap_bake, format_reference_lane_caption, power_to_db_normalized,
+    truncate_label,
 };
 
 /// Maximum characters drawn inside an interval rectangle or above a
@@ -29,9 +32,6 @@ const TIER_LANE_HEIGHT: f32 = 28.0;
 const TIER_LABEL_GUTTER: f32 = 120.0;
 
 const APP_TITLE: &str = "sadda";
-/// Bucket count for the B2 fixed-resolution waveform envelope. C5 will
-/// replace this with per-frame re-bucketing once zoom lands.
-const ENVELOPE_BUCKETS: usize = 2000;
 /// Cap on spectrogram texture width. egui's typical max texture size
 /// is 8192; 4096 keeps headroom and gives roughly 1px per ~150 ms at
 /// 10 minutes — fine resolution for the long-recording case the B3
@@ -83,6 +83,13 @@ struct SaddaApp {
     /// only — clears on bundle change. Reached by C5 (cursor sync)
     /// and D6/D7 (editing) when those slices land.
     selected_annotation: Option<AnnotationSelection>,
+    /// Shared timeline state — cursor, view window, duration —
+    /// plumbed into every C5+ pane. Reset on bundle change.
+    timeline: TimelineState,
+    /// Live playback handle. `Some` while audio is playing; the
+    /// app polls `is_finished()` each frame and drops it on
+    /// completion (or on a second spacebar press).
+    playback: Option<Playback>,
 }
 
 /// Identifies the currently-selected annotation in the tier strip.
@@ -122,6 +129,8 @@ impl SaddaApp {
             active_envelope: None,
             active_spectrogram: None,
             selected_annotation: None,
+            timeline: TimelineState::default(),
+            playback: None,
         }
     }
 
@@ -194,17 +203,18 @@ impl SaddaApp {
             }
         };
         let mono: Vec<f32> = audio.mono_samples().collect();
-        let envelope = build_envelope(&mono, ENVELOPE_BUCKETS);
         self.active_envelope = Some(EnvelopeCache {
             bundle_id,
             sample_rate: audio.sample_rate,
             duration_seconds: audio.duration_seconds(),
-            envelope,
             mono_samples: mono,
         });
         self.selected_bundle_id = Some(bundle_id);
         self.active_spectrogram = None;
         self.selected_annotation = None;
+        self.playback = None;
+        self.timeline
+            .reset_for_bundle(self.active_envelope.as_ref().unwrap().duration_seconds);
     }
 
     fn clear_bundle_selection(&mut self) {
@@ -212,6 +222,40 @@ impl SaddaApp {
         self.active_envelope = None;
         self.active_spectrogram = None;
         self.selected_annotation = None;
+        self.playback = None;
+        self.timeline = TimelineState::default();
+    }
+
+    /// Spacebar toggle: start playback from the current cursor, or
+    /// stop if already playing. Surfaces cpal errors in the
+    /// error banner.
+    fn toggle_playback(&mut self) {
+        if self.playback.is_some() {
+            self.playback = None;
+            return;
+        }
+        let Some(env) = &self.active_envelope else {
+            return;
+        };
+        match Playback::start(&env.mono_samples, env.sample_rate, self.timeline.cursor) {
+            Ok(p) => self.playback = Some(p),
+            Err(e) => self.set_error(format!("Playback failed: {e}")),
+        }
+    }
+
+    /// Per-frame playback bookkeeping: pull the audio thread's
+    /// atomic cursor into `timeline.cursor`, scroll the view if the
+    /// cursor went offscreen, and drop the stream when it finishes.
+    fn poll_playback(&mut self) {
+        let Some(p) = &self.playback else {
+            return;
+        };
+        let new_cursor = p.cursor_seconds();
+        self.timeline.set_cursor(new_cursor);
+        self.timeline.ensure_cursor_visible();
+        if p.is_finished() {
+            self.playback = None;
+        }
     }
 
     /// Rebuilds the spectrogram cache if stale (i.e. cached bundle id
@@ -315,6 +359,61 @@ fn build_spectrogram_texture(
 }
 
 // ---------------------------------------------------------------------------
+// Shared C5 plot helpers: cursor line + wheel-driven zoom / scroll
+// ---------------------------------------------------------------------------
+
+/// Draws the synced playback cursor on a plot. Bound the segment
+/// by `[y_min, y_max]` so it spans the visible y-axis (e.g.
+/// -1..1 for the waveform, 0..nyquist for the spectrogram).
+fn draw_cursor_line(plot_ui: &mut egui_plot::PlotUi<'_>, cursor: f64, y_min: f64, y_max: f64) {
+    let points = PlotPoints::from(vec![[cursor, y_min], [cursor, y_max]]);
+    plot_ui.line(
+        Line::new("cursor", points)
+            .color(egui::Color32::from_rgb(230, 70, 70))
+            .width(1.0),
+    );
+}
+
+/// Wheel-driven zoom + shift-wheel scroll. Reads raw scroll deltas
+/// from the response's hover state — egui_plot's own zoom/scroll is
+/// disabled in every C5 pane so we own the input vocabulary.
+fn handle_zoom_and_scroll(response: &egui::Response, timeline: &mut TimelineState) {
+    if !response.hovered() {
+        return;
+    }
+    let (scroll, modifiers, pointer) = response
+        .ctx
+        .input(|i| (i.smooth_scroll_delta, i.modifiers, i.pointer.hover_pos()));
+    let dy = scroll.y;
+    if dy == 0.0 {
+        return;
+    }
+    // Estimate the time the pointer is over so zoom centres on it.
+    // Egui doesn't expose plot-space coords outside of `show`, so we
+    // approximate using the response rect + the timeline range.
+    let pointer_time = pointer
+        .map(|p| {
+            let rect = response.rect;
+            let width = rect.width().max(1.0) as f64;
+            let rel = ((p.x - rect.left()) as f64).clamp(0.0, width);
+            timeline.pixel_to_time(rel, width)
+        })
+        .unwrap_or(timeline.cursor);
+
+    if modifiers.shift {
+        // Shift+wheel: pan horizontally. Positive scroll = pan
+        // right (matches IDE / GIMP convention on most platforms).
+        let pan_secs = -(dy as f64 / 60.0) * 0.1 * timeline.view_range();
+        timeline.scroll_by(pan_secs);
+    } else {
+        // Wheel only: zoom around the pointer. Positive scroll
+        // (wheel up) zooms in; negative zooms out.
+        let factor = if dy > 0.0 { 1.0 / 1.2 } else { 1.2 };
+        timeline.zoom_at(pointer_time, factor);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tier-strip lane renderers
 // ---------------------------------------------------------------------------
 
@@ -322,26 +421,30 @@ fn build_spectrogram_texture(
 fn render_interval_lane(
     painter: &egui::Painter,
     rect: egui::Rect,
-    duration: f64,
+    view_start: f64,
+    view_end: f64,
     tier_id: i64,
     rows: &[sadda_engine::Interval],
     selection: Option<AnnotationSelection>,
     response: &egui::Response,
     new_selection: &mut Option<AnnotationSelection>,
+    new_cursor: &mut Option<f64>,
 ) {
-    if duration <= 0.0 {
-        return;
-    }
+    let view_range = (view_end - view_start).max(1e-6);
     let lane_width = rect.width() as f64;
-    let x_per_second = lane_width / duration;
+    let x_per_second = lane_width / view_range;
     let base_fill = egui::Color32::from_rgb(82, 138, 198);
     let selected_fill = egui::Color32::from_rgb(160, 200, 250);
     let text_color = egui::Color32::WHITE;
     let click_pos = response.interact_pointer_pos();
 
     for r in rows {
-        let x0 = rect.left() + (r.start_seconds * x_per_second) as f32;
-        let x1 = rect.left() + (r.end_seconds * x_per_second) as f32;
+        // Cull intervals entirely outside the view.
+        if r.end_seconds < view_start || r.start_seconds > view_end {
+            continue;
+        }
+        let x0 = rect.left() + ((r.start_seconds - view_start) * x_per_second) as f32;
+        let x1 = rect.left() + ((r.end_seconds - view_start) * x_per_second) as f32;
         let item_rect = egui::Rect::from_min_max(
             egui::Pos2::new(x0.max(rect.left()), rect.top() + 2.0),
             egui::Pos2::new(x1.min(rect.right()), rect.bottom() - 2.0),
@@ -387,6 +490,10 @@ fn render_interval_lane(
                 tier_id,
                 annotation_id: r.id,
             });
+            // Per the C5 design: clicking an annotation also moves
+            // the cursor to its start, so the cluster of panes all
+            // re-centre on the selection.
+            *new_cursor = Some(r.start_seconds);
         }
     }
 }
@@ -395,18 +502,18 @@ fn render_interval_lane(
 fn render_point_lane(
     painter: &egui::Painter,
     rect: egui::Rect,
-    duration: f64,
+    view_start: f64,
+    view_end: f64,
     tier_id: i64,
     rows: &[sadda_engine::Point],
     selection: Option<AnnotationSelection>,
     response: &egui::Response,
     new_selection: &mut Option<AnnotationSelection>,
+    new_cursor: &mut Option<f64>,
 ) {
-    if duration <= 0.0 {
-        return;
-    }
+    let view_range = (view_end - view_start).max(1e-6);
     let lane_width = rect.width() as f64;
-    let x_per_second = lane_width / duration;
+    let x_per_second = lane_width / view_range;
     let base_color = egui::Color32::from_rgb(230, 180, 70);
     let selected_color = egui::Color32::from_rgb(255, 220, 120);
     let click_pos = response.interact_pointer_pos();
@@ -414,10 +521,10 @@ fn render_point_lane(
     let click_tolerance_px = 6.0;
 
     for p in rows {
-        let x = rect.left() + (p.time_seconds * x_per_second) as f32;
-        if x < rect.left() || x > rect.right() {
+        if p.time_seconds < view_start || p.time_seconds > view_end {
             continue;
         }
+        let x = rect.left() + ((p.time_seconds - view_start) * x_per_second) as f32;
         let is_selected = matches!(
             selection,
             Some(AnnotationSelection::Point { tier_id: t, annotation_id: a })
@@ -456,6 +563,7 @@ fn render_point_lane(
                 tier_id,
                 annotation_id: p.id,
             });
+            *new_cursor = Some(p.time_seconds);
         }
     }
 }
@@ -467,6 +575,24 @@ impl eframe::App for SaddaApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.apply_theme(ui.ctx());
+
+        // Drive the playback-cursor advance before any pane
+        // renders, so they all see the same `timeline.cursor` this
+        // frame. Repaint continuously while playing so the cursor
+        // line stays in sync without user input.
+        self.poll_playback();
+        if self.playback.is_some() {
+            ui.ctx().request_repaint();
+        }
+
+        // Spacebar toggles transport. `consume_key` ensures the
+        // press doesn't fall through to any focused widget.
+        if ui
+            .ctx()
+            .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
+        {
+            self.toggle_playback();
+        }
 
         egui::Panel::top("menu").show_inside(ui, |ui| self.menu_bar(ui));
 
@@ -726,44 +852,85 @@ impl SaddaApp {
             });
             return;
         };
-        if env.envelope.is_empty() {
+        if env.mono_samples.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.label(egui::RichText::new("(empty waveform)").italics());
             });
             return;
         }
-        // Caption above the plot summarises the loaded bundle's
-        // header so users see sample-rate / duration at a glance.
+
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new(format!(
-                    "Bundle #{}  ·  {} Hz  ·  {:.3}s",
-                    env.bundle_id, env.sample_rate, env.duration_seconds,
+                    "Bundle #{}  ·  {} Hz  ·  {:.3}s  ·  view {:.3}–{:.3}s",
+                    env.bundle_id,
+                    env.sample_rate,
+                    env.duration_seconds,
+                    self.timeline.view_start,
+                    self.timeline.view_end,
                 ))
                 .weak(),
             );
         });
-        // Build (time, min) and (time, max) point arrays once per
-        // frame from the cached envelope, then plot each bucket as a
-        // single vertical line segment from min to max.
-        let n = env.envelope.len() as f64;
-        let dt = env.duration_seconds / n;
-        Plot::new("waveform")
+
+        let plot_width_px = ui.available_width().max(1.0) as usize;
+        // One bucket per pixel column of the visible range — the
+        // per-frame re-bucketing the B2 entry promised C5 would
+        // land. Cost scales with `visible_samples`, not the full
+        // bundle.
+        let buckets = build_envelope_for_range(
+            &env.mono_samples,
+            env.sample_rate,
+            self.timeline.view_start,
+            self.timeline.view_end,
+            plot_width_px,
+        );
+        let n_buckets = buckets.len();
+        let view_range = self.timeline.view_range();
+        let view_start = self.timeline.view_start;
+        let cursor = self.timeline.cursor;
+        let mut clicked_time: Option<f64> = None;
+
+        let plot_response = Plot::new("waveform")
             .show_axes([true, true])
             .y_axis_label("amplitude")
             .x_axis_label("seconds")
             .include_y(-1.0)
             .include_y(1.0)
-            .include_x(0.0)
-            .include_x(env.duration_seconds)
+            .include_x(self.timeline.view_start)
+            .include_x(self.timeline.view_end)
+            .allow_drag(false)
+            .allow_zoom(false)
+            .allow_scroll(false)
             .show(ui, |plot_ui| {
-                for (i, (mn, mx)) in env.envelope.iter().enumerate() {
-                    let t = (i as f64 + 0.5) * dt;
-                    let segment = PlotPoints::from(vec![[t, *mn as f64], [t, *mx as f64]]);
-                    plot_ui
-                        .line(Line::new("", segment).color(egui::Color32::from_rgb(80, 140, 220)));
+                if n_buckets > 0 {
+                    let dt = view_range / n_buckets as f64;
+                    for (i, (mn, mx)) in buckets.iter().enumerate() {
+                        let t = view_start + (i as f64 + 0.5) * dt;
+                        let segment = PlotPoints::from(vec![[t, *mn as f64], [t, *mx as f64]]);
+                        plot_ui.line(
+                            Line::new("", segment).color(egui::Color32::from_rgb(80, 140, 220)),
+                        );
+                    }
                 }
-            });
+                draw_cursor_line(plot_ui, cursor, -1.0, 1.0);
+
+                // Click in the plot positions the cursor; map the
+                // pointer-coord (in plot space) directly.
+                let resp = plot_ui.response();
+                if resp.clicked() {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let tx = plot_ui.plot_from_screen(pos);
+                        clicked_time = Some(tx.x);
+                    }
+                }
+            })
+            .response;
+
+        if let Some(t) = clicked_time {
+            self.timeline.set_cursor(t);
+        }
+        handle_zoom_and_scroll(&plot_response, &mut self.timeline);
     }
 
     fn spectrogram_pane(&mut self, ui: &mut egui::Ui) {
@@ -786,16 +953,20 @@ impl SaddaApp {
 
         let duration = sc.duration_seconds;
         let nyquist = sc.nyquist_hz as f64;
+        // Image still covers the full bundle; the plot's
+        // include_x bounds crop the visible region for free.
         let centre = egui_plot::PlotPoint::new(duration / 2.0, nyquist / 2.0);
         let size = egui::Vec2::new(duration as f32, nyquist as f32);
         let texture_id = sc.texture.id();
+        let cursor = self.timeline.cursor;
+        let mut clicked_time: Option<f64> = None;
 
-        Plot::new("spectrogram")
+        let plot_response = Plot::new("spectrogram")
             .show_axes([true, true])
             .y_axis_label("Hz")
             .x_axis_label("seconds")
-            .include_x(0.0)
-            .include_x(duration)
+            .include_x(self.timeline.view_start)
+            .include_x(self.timeline.view_end)
             .include_y(0.0)
             .include_y(nyquist)
             .allow_drag(false)
@@ -808,7 +979,22 @@ impl SaddaApp {
                     centre,
                     size,
                 ));
-            });
+                draw_cursor_line(plot_ui, cursor, 0.0, nyquist);
+
+                let resp = plot_ui.response();
+                if resp.clicked() {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let tx = plot_ui.plot_from_screen(pos);
+                        clicked_time = Some(tx.x);
+                    }
+                }
+            })
+            .response;
+
+        if let Some(t) = clicked_time {
+            self.timeline.set_cursor(t);
+        }
+        handle_zoom_and_scroll(&plot_response, &mut self.timeline);
     }
 
     fn spectrogram_toolbar(&mut self, ui: &mut egui::Ui) {
@@ -874,7 +1060,9 @@ impl SaddaApp {
             return;
         };
         let bundle_id = env.bundle_id;
-        let duration = env.duration_seconds;
+        let view_start = self.timeline.view_start;
+        let view_end = self.timeline.view_end;
+        let cursor = self.timeline.cursor;
         let tiers = match project.tiers(Some(bundle_id)) {
             Ok(t) => t,
             Err(e) => {
@@ -896,6 +1084,9 @@ impl SaddaApp {
         let mut new_selection = self.selected_annotation;
         // Same idea for the error banner.
         let mut new_error: Option<String> = None;
+        // Click on a lane (background or annotation) can also move
+        // the playback cursor, kept here so we apply at the end.
+        let mut new_cursor: Option<f64> = None;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             for tier in &tiers {
@@ -929,12 +1120,14 @@ impl SaddaApp {
                             Ok(rows) => render_interval_lane(
                                 &painter,
                                 rect,
-                                duration,
+                                view_start,
+                                view_end,
                                 tier.id,
                                 &rows,
                                 self.selected_annotation,
                                 &response,
                                 &mut new_selection,
+                                &mut new_cursor,
                             ),
                             Err(e) => {
                                 new_error = Some(format!(
@@ -947,12 +1140,14 @@ impl SaddaApp {
                             Ok(rows) => render_point_lane(
                                 &painter,
                                 rect,
-                                duration,
+                                view_start,
+                                view_end,
                                 tier.id,
                                 &rows,
                                 self.selected_annotation,
                                 &response,
                                 &mut new_selection,
+                                &mut new_cursor,
                             ),
                             Err(e) => {
                                 new_error = Some(format!(
@@ -992,19 +1187,50 @@ impl SaddaApp {
                         }
                     }
 
+                    // Draw the synced cursor over every lane (incl.
+                    // reference / dense captions) at this frame's
+                    // timeline.cursor — clipped to the lane rect.
+                    let view_range = (view_end - view_start).max(1e-6);
+                    if cursor >= view_start && cursor <= view_end {
+                        let x_per_second = rect.width() as f64 / view_range;
+                        let cx = rect.left() + ((cursor - view_start) * x_per_second) as f32;
+                        painter.line_segment(
+                            [
+                                egui::Pos2::new(cx, rect.top()),
+                                egui::Pos2::new(cx, rect.bottom()),
+                            ],
+                            egui::Stroke::new(1.0, egui::Color32::from_rgb(230, 70, 70)),
+                        );
+                    }
+
                     // Click on the lane background (not on a hit
-                    // item) deselects.
+                    // item) deselects and moves the cursor to the
+                    // click position. Detect by: response.clicked()
+                    // AND new_selection hasn't changed AND the
+                    // click pos maps inside the lane.
                     if response.clicked()
                         && new_selection == self.selected_annotation
-                        && self.selected_annotation.is_some()
+                        && new_cursor.is_none()
                     {
-                        new_selection = None;
+                        if let Some(p) = response.interact_pointer_pos() {
+                            if rect.contains(p) {
+                                let x_per_second = rect.width() as f64 / view_range;
+                                let t = view_start + ((p.x - rect.left()) as f64) / x_per_second;
+                                new_cursor = Some(t);
+                                if self.selected_annotation.is_some() {
+                                    new_selection = None;
+                                }
+                            }
+                        }
                     }
                 });
             }
         });
 
         self.selected_annotation = new_selection;
+        if let Some(t) = new_cursor {
+            self.timeline.set_cursor(t);
+        }
         if let Some(msg) = new_error {
             self.set_error(msg);
         }
