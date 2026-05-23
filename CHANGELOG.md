@@ -4,6 +4,37 @@ All notable changes to sadda are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-05-22
+
+Packaging-only release. No code changes from 0.1.0; ships the sdist
+that 0.1.0 was missing.
+
+### Fixed
+
+- **sdist now uploads to PyPI.** 0.1.0's sdist failed PyPI's PEP 639
+  license-file validation because the deprecated `license = { text
+  = ... }` form combined with two on-disk license files
+  (`LICENSE-APACHE` + `LICENSE-MIT`) confused maturin's sdist
+  generator — the `License-File: LICENSE-APACHE` metadata line had
+  no matching file in the tarball. Switched to the PEP 639 SPDX
+  expression form (`license = "Apache-2.0 OR MIT"`) with explicit
+  `license-files = ["LICENSE-APACHE", "LICENSE-MIT"]`. Both files
+  now ship in the sdist and are listed in METADATA consistently.
+- **Dropped redundant `License ::` classifiers.** PEP 639 forbids
+  using both the SPDX `license` field and the legacy
+  `License :: OSI Approved :: ...` classifiers; PyPI rejects the
+  combination.
+
+### Notes
+
+0.1.0 stays on PyPI as wheels-only — PyPI doesn't allow re-uploading
+the same version. The 12 wheels from 0.1.0 install fine; 0.1.1 adds
+the matching sdist plus an equivalent wheel set built from the
+post-fix sources. Users on the supported wheel matrix can install
+either; users compiling from source need 0.1.1.
+
+[0.1.1]: https://github.com/sadda-speech/sadda/releases/tag/v0.1.1
+
 ## [0.1.0] — 2026-05-22
 
 First PyPI release. Closes Phase 1 of the project plan; brings the
