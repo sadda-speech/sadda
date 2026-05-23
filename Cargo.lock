@@ -4040,6 +4040,7 @@ dependencies = [
  "cpal",
  "eframe",
  "egui_plot",
+ "pyo3",
  "rfd",
  "sadda-engine",
  "sadda-script-engine",
