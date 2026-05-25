@@ -176,6 +176,18 @@ struct SaddaApp {
     /// Pending bundle rename. `Some` while the rename modal is open;
     /// `name` is the editable buffer, seeded with the current name.
     pending_rename: Option<PendingBundleRename>,
+    /// A1: open provenance/citations modal. `Some` holds the snapshot
+    /// of the bundle's processing runs + citations, loaded once when
+    /// the modal opens.
+    provenance: Option<ProvenanceView>,
+}
+
+/// A1: a one-shot snapshot of a bundle's provenance timeline and the
+/// citations for the analyses it used, rendered in a read-only modal.
+struct ProvenanceView {
+    name: String,
+    runs: Vec<sadda_engine::ProcessingRunRow>,
+    citations: Vec<sadda_engine::Citation>,
 }
 
 /// H1: identifies a bundle the user has requested be deleted,
@@ -520,6 +532,7 @@ impl SaddaApp {
             record_dialog: None,
             pending_delete: None,
             pending_rename: None,
+            provenance: None,
         }
     }
 
@@ -852,6 +865,99 @@ impl SaddaApp {
                 self.set_info(format!("Renamed bundle to “{new_name}”."));
             }
             Err(e) => self.set_error(format!("Rename failed: {e}")),
+        }
+    }
+
+    /// A1: loads a bundle's provenance timeline + citations into a
+    /// modal snapshot. One-shot query; the modal renders the snapshot
+    /// without re-querying each frame.
+    fn open_provenance_view(&mut self, bundle_id: i64, name: String) {
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        let runs = match project.processing_runs(bundle_id) {
+            Ok(r) => r,
+            Err(e) => return self.set_error(format!("Failed to load provenance: {e}")),
+        };
+        let citations = match project.citations(bundle_id) {
+            Ok(c) => c,
+            Err(e) => return self.set_error(format!("Failed to load citations: {e}")),
+        };
+        self.provenance = Some(ProvenanceView {
+            name,
+            runs,
+            citations,
+        });
+    }
+
+    /// A1: renders the provenance/citations modal (read-only). Lists the
+    /// bundle's processing runs and the deduplicated citation list, with
+    /// a button to copy the references to the clipboard.
+    fn render_provenance_view(&mut self, ctx: &egui::Context) {
+        let Some(view) = self.provenance.as_ref() else {
+            return;
+        };
+        let mut keep_open = true;
+        let mut copy_citations = false;
+        egui::Window::new(format!("Provenance — {}", view.name))
+            .open(&mut keep_open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new("Processing runs").strong());
+                if view.runs.is_empty() {
+                    ui.label(egui::RichText::new("(no recorded analyses yet)").weak());
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(220.0)
+                        .show(ui, |ui| {
+                            for r in &view.runs {
+                                let ts = r.finished_at.as_deref().unwrap_or(&r.started_at);
+                                ui.label(format!(
+                                    "{} · {} · {} · {}",
+                                    ts, r.kind, r.processor_id, r.status
+                                ));
+                            }
+                        });
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Citations").strong());
+                    if !view.citations.is_empty() && ui.button("Copy references").clicked() {
+                        copy_citations = true;
+                    }
+                });
+                if view.citations.is_empty() {
+                    ui.label(egui::RichText::new("(no citeable analyses on this bundle)").weak());
+                } else {
+                    for c in &view.citations {
+                        ui.label(&c.reference);
+                        if let Some(doi) = &c.doi {
+                            ui.hyperlink_to(format!("doi:{doi}"), format!("https://doi.org/{doi}"));
+                        }
+                        ui.add_space(4.0);
+                    }
+                }
+            });
+
+        if copy_citations {
+            let text = view
+                .citations
+                .iter()
+                .map(|c| match &c.doi {
+                    Some(doi) => format!("{} https://doi.org/{doi}", c.reference),
+                    None => c.reference.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            ctx.copy_text(text);
+            self.set_info("Citations copied to clipboard.".into());
+        }
+        if !keep_open {
+            self.provenance = None;
         }
     }
 
@@ -2070,6 +2176,9 @@ impl eframe::App for SaddaApp {
         // Bundle-rename modal.
         self.render_pending_rename(ui.ctx());
 
+        // A1 provenance & citations modal.
+        self.render_provenance_view(ui.ctx());
+
         egui::Panel::top("menu").show_inside(ui, |ui| self.menu_bar(ui));
 
         if let AppState::ProjectLoaded { name, root, .. } = &self.app_state {
@@ -2358,6 +2467,7 @@ impl SaddaApp {
         let mut to_reveal: Option<(i64, String)> = None;
         let mut to_delete_prompt: Option<(i64, String)> = None;
         let mut to_rename_prompt: Option<(i64, String)> = None;
+        let mut to_provenance: Option<(i64, String)> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for b in &bundles {
                 let is_selected = selected == Some(b.id);
@@ -2376,6 +2486,10 @@ impl SaddaApp {
                     }
                     if ui.button("Reveal in file manager").clicked() {
                         to_reveal = Some((b.id, b.audio_relative_path.clone()));
+                        ui.close();
+                    }
+                    if ui.button("Provenance & citations…").clicked() {
+                        to_provenance = Some((b.id, b.name.clone()));
                         ui.close();
                     }
                     ui.separator();
@@ -2416,6 +2530,9 @@ impl SaddaApp {
                 name,
                 just_started: true,
             });
+        }
+        if let Some((id, name)) = to_provenance {
+            self.open_provenance_view(id, name);
         }
     }
 

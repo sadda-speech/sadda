@@ -489,6 +489,111 @@ pub struct ProcessingRunRow {
     pub status: String,
 }
 
+/// The `processing_run.kind` discriminator. Tells provenance queries
+/// (and citation export) what produced a tier / signal: a built-in DSP
+/// analysis, an ML model, a composite clinical measure, a plugin, or a
+/// live capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessingRunKind {
+    /// Built-in DSP (`sadda.dsp.*`) — pitch, formants, MFCC, …
+    DspAlgorithm,
+    /// Registry-resolved ML model inference.
+    MlModel,
+    /// Composite clinical measure (`sadda.clinical.*`) — AVQI, CPP, …
+    ClinicalMeasure,
+    /// Plugin-supplied analyzer.
+    Plugin,
+    /// Live microphone capture committed to a bundle.
+    LiveRecording,
+}
+
+impl ProcessingRunKind {
+    /// The on-disk string stored in `processing_run.kind` (and checked
+    /// by the table's `CHECK` constraint).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DspAlgorithm => "dsp_algorithm",
+            Self::MlModel => "ml_model",
+            Self::ClinicalMeasure => "clinical_measure",
+            Self::Plugin => "plugin",
+            Self::LiveRecording => "live_recording",
+        }
+    }
+}
+
+/// Terminal status of a recorded run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessingRunStatus {
+    /// Completed successfully.
+    Ok,
+    /// Failed; `error_message` carries the detail.
+    Error,
+    /// Partial result (e.g. some frames dropped).
+    Partial,
+}
+
+impl ProcessingRunStatus {
+    /// The on-disk string stored in `processing_run.status`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::Partial => "partial",
+        }
+    }
+}
+
+/// Provenance facts a caller supplies to [`Project::record_processing_run`].
+/// The engine fills in `processor_version` (the sadda version), the
+/// timestamps, and the active recipe id; the caller supplies the rest.
+///
+/// Build with [`ProcessingRunSpec::new`] and set only the fields that
+/// apply (most runs leave the tier/signal id lists or `weights_checksum`
+/// at their defaults).
+#[derive(Debug, Clone)]
+pub struct ProcessingRunSpec {
+    /// Bundle the run targeted.
+    pub bundle_id: i64,
+    /// What kind of processor produced the result.
+    pub kind: ProcessingRunKind,
+    /// Reverse-DNS processor id, e.g. `sadda.dsp.pitch.autocorrelation`.
+    /// Matched against the [`crate::citation`] registry for export.
+    pub processor_id: String,
+    /// JSON parameters (processor-specific shape), if any.
+    pub parameters: Option<String>,
+    /// Tier ids consumed as input.
+    pub input_tier_ids: Vec<i64>,
+    /// Tier ids produced.
+    pub output_tier_ids: Vec<i64>,
+    /// DerivedSignal ids produced (Parquet sidecars).
+    pub output_signal_ids: Vec<i64>,
+    /// Model weights checksum, for `ml_model` runs.
+    pub weights_checksum: Option<String>,
+    /// Terminal status (defaults to `Ok`).
+    pub status: ProcessingRunStatus,
+    /// Failure detail when `status` is `Error` / `Partial`.
+    pub error_message: Option<String>,
+}
+
+impl ProcessingRunSpec {
+    /// A successful run with no inputs/outputs recorded yet. Set the
+    /// remaining fields directly on the returned struct.
+    pub fn new(bundle_id: i64, kind: ProcessingRunKind, processor_id: impl Into<String>) -> Self {
+        Self {
+            bundle_id,
+            kind,
+            processor_id: processor_id.into(),
+            parameters: None,
+            input_tier_ids: Vec::new(),
+            output_tier_ids: Vec::new(),
+            output_signal_ids: Vec::new(),
+            weights_checksum: None,
+            status: ProcessingRunStatus::Ok,
+            error_message: None,
+        }
+    }
+}
+
 impl Project {
     /// Creates a new project at `path`. The path must not exist yet. Lays
     /// down the directory tree, opens a fresh `corpus.db`, runs the full
@@ -1622,28 +1727,14 @@ impl Project {
             display,
             textgrid.tiers.len()
         );
-        let output_tier_ids = format!(
-            "[{}]",
-            new_tier_ids
-                .iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>()
-                .join(",")
+        let mut spec = ProcessingRunSpec::new(
+            bundle_id,
+            ProcessingRunKind::DspAlgorithm,
+            "sadda.io.textgrid.import",
         );
-        self.conn.execute(
-            "INSERT INTO processing_run \
-                (bundle_id, kind, processor_id, processor_version, \
-                 parameters, output_tier_ids, finished_at, status, recipe_run_id) \
-             VALUES (?1, 'dsp_algorithm', 'sadda.io.textgrid.import', ?2, ?3, ?4, \
-                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'ok', ?5)",
-            rusqlite::params![
-                bundle_id,
-                crate::version(),
-                params,
-                output_tier_ids,
-                self.recipe_run_id.get(),
-            ],
-        )?;
+        spec.parameters = Some(params);
+        spec.output_tier_ids = new_tier_ids.clone();
+        self.record_processing_run(&spec)?;
         Ok(new_tier_ids)
     }
 
@@ -1941,28 +2032,14 @@ impl Project {
 
         let display = path.display().to_string();
         let params = format!("{{\"path\":{:?},\"n_tiers\":{}}}", display, eaf.tiers.len());
-        let output_tier_ids = format!(
-            "[{}]",
-            new_tier_ids
-                .iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>()
-                .join(",")
+        let mut spec = ProcessingRunSpec::new(
+            bundle_id,
+            ProcessingRunKind::DspAlgorithm,
+            "sadda.io.eaf.import",
         );
-        self.conn.execute(
-            "INSERT INTO processing_run \
-                (bundle_id, kind, processor_id, processor_version, \
-                 parameters, output_tier_ids, finished_at, status, recipe_run_id) \
-             VALUES (?1, 'dsp_algorithm', 'sadda.io.eaf.import', ?2, ?3, ?4, \
-                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), 'ok', ?5)",
-            rusqlite::params![
-                bundle_id,
-                crate::version(),
-                params,
-                output_tier_ids,
-                self.recipe_run_id.get(),
-            ],
-        )?;
+        spec.parameters = Some(params);
+        spec.output_tier_ids = new_tier_ids.clone();
+        self.record_processing_run(&spec)?;
         Ok(new_tier_ids)
     }
 
@@ -2070,6 +2147,100 @@ impl Project {
             },
         )?;
         Ok(r)
+    }
+
+    /// Records a completed [`processing_run`](ProcessingRunRow) for
+    /// audit provenance and returns its id. Fills in the sadda version,
+    /// the start/finish timestamps, and the active recipe id (if a
+    /// recipe is running); the caller supplies the [`ProcessingRunSpec`].
+    ///
+    /// This is the single insert path every analysis that produces a
+    /// tier or signal should go through, so a bundle's provenance
+    /// timeline ([`Self::processing_runs`]) and citation export
+    /// ([`Self::citations`]) stay complete.
+    pub fn record_processing_run(&self, spec: &ProcessingRunSpec) -> Result<i64> {
+        // Empty id lists serialize to NULL, not "[]", so an unfiltered
+        // query distinguishes "no outputs" from "[]".
+        fn ids_json(ids: &[i64]) -> Option<String> {
+            if ids.is_empty() {
+                return None;
+            }
+            Some(format!(
+                "[{}]",
+                ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+            ))
+        }
+        let id: i64 = self.conn.query_row(
+            "INSERT INTO processing_run \
+                (bundle_id, kind, processor_id, processor_version, weights_checksum, \
+                 parameters, input_tier_ids, output_tier_ids, output_signal_ids, \
+                 finished_at, status, error_message, recipe_run_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
+                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?10, ?11, ?12) RETURNING id",
+            rusqlite::params![
+                spec.bundle_id,
+                spec.kind.as_str(),
+                spec.processor_id,
+                crate::version(),
+                spec.weights_checksum,
+                spec.parameters,
+                ids_json(&spec.input_tier_ids),
+                ids_json(&spec.output_tier_ids),
+                ids_json(&spec.output_signal_ids),
+                spec.status.as_str(),
+                spec.error_message,
+                self.recipe_run_id.get(),
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// Returns a bundle's `processing_run` rows in insertion order — the
+    /// provenance timeline answering "where did every tier / signal on
+    /// this bundle come from?"
+    pub fn processing_runs(&self, bundle_id: i64) -> Result<Vec<ProcessingRunRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, bundle_id, kind, processor_id, processor_version, \
+                    parameters, output_tier_ids, started_at, finished_at, status \
+             FROM processing_run WHERE bundle_id = ?1 ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([bundle_id], |row| {
+                Ok(ProcessingRunRow {
+                    id: row.get(0)?,
+                    bundle_id: row.get(1)?,
+                    kind: row.get(2)?,
+                    processor_id: row.get(3)?,
+                    processor_version: row.get(4)?,
+                    parameters: row.get(5)?,
+                    output_tier_ids: row.get(6)?,
+                    started_at: row.get(7)?,
+                    finished_at: row.get(8)?,
+                    status: row.get(9)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Returns the literature citations for every cited processor that
+    /// ran on `bundle_id`, deduplicated by `processor_id` and ordered by
+    /// first use. Processors with no academic source (imports, live
+    /// recording, …) are omitted. Drives "export the references for the
+    /// analyses in this project."
+    pub fn citations(&self, bundle_id: i64) -> Result<Vec<crate::citation::Citation>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for run in self.processing_runs(bundle_id)? {
+            if !seen.insert(run.processor_id.clone()) {
+                continue;
+            }
+            if let Some(c) = crate::citation::citation_for(&run.processor_id) {
+                out.push(c);
+            }
+        }
+        Ok(out)
     }
 
     /// Returns the `processing_run` rows linked to a recipe, ordered
@@ -2993,6 +3164,99 @@ mod tests {
         // Unknown id errors rather than silently no-op'ing.
         let err = project.rename_bundle(9_999, "x").unwrap_err();
         assert!(matches!(err, EngineError::Corpus(_)));
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn record_processing_run_and_query_timeline() {
+        let root = unique_dir("processing_run");
+        let _ = std::fs::remove_dir_all(&root);
+        let source_wav = std::env::temp_dir().join(format!(
+            "sadda_engine_prov_source_{}.wav",
+            std::process::id()
+        ));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("greeting", &source_wav).unwrap();
+
+        // Fresh bundle: no runs yet.
+        assert!(project.processing_runs(bundle_id).unwrap().is_empty());
+
+        let mut pitch = ProcessingRunSpec::new(
+            bundle_id,
+            ProcessingRunKind::DspAlgorithm,
+            "sadda.dsp.pitch.autocorrelation",
+        );
+        pitch.parameters = Some("{\"step\":0.01}".into());
+        pitch.output_signal_ids = vec![1];
+        let pid = project.record_processing_run(&pitch).unwrap();
+        project
+            .record_processing_run(&ProcessingRunSpec::new(
+                bundle_id,
+                ProcessingRunKind::DspAlgorithm,
+                "sadda.dsp.mfcc",
+            ))
+            .unwrap();
+
+        let runs = project.processing_runs(bundle_id).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].id, pid);
+        assert_eq!(runs[0].processor_id, "sadda.dsp.pitch.autocorrelation");
+        assert_eq!(runs[0].kind, "dsp_algorithm");
+        assert_eq!(runs[0].processor_version, crate::version());
+        assert_eq!(runs[0].status, "ok");
+        assert!(runs[0].finished_at.is_some());
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn citations_dedup_and_omit_uncited() {
+        let root = unique_dir("citations");
+        let _ = std::fs::remove_dir_all(&root);
+        let source_wav = std::env::temp_dir().join(format!(
+            "sadda_engine_cite_source_{}.wav",
+            std::process::id()
+        ));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("greeting", &source_wav).unwrap();
+
+        // Two pitch runs (same processor) + one mfcc + one uncited tool op.
+        for _ in 0..2 {
+            project
+                .record_processing_run(&ProcessingRunSpec::new(
+                    bundle_id,
+                    ProcessingRunKind::DspAlgorithm,
+                    "sadda.dsp.pitch.windowed_autocorrelation",
+                ))
+                .unwrap();
+        }
+        project
+            .record_processing_run(&ProcessingRunSpec::new(
+                bundle_id,
+                ProcessingRunKind::DspAlgorithm,
+                "sadda.dsp.mfcc",
+            ))
+            .unwrap();
+        project
+            .record_processing_run(&ProcessingRunSpec::new(
+                bundle_id,
+                ProcessingRunKind::DspAlgorithm,
+                "sadda.io.textgrid.import",
+            ))
+            .unwrap();
+
+        let cites = project.citations(bundle_id).unwrap();
+        // pitch (deduped to 1) + mfcc = 2; the import op is uncited.
+        assert_eq!(cites.len(), 2);
+        assert!(cites[0].reference.contains("Boersma"));
+        assert!(cites[1].reference.contains("Davis"));
 
         let _ = std::fs::remove_file(&source_wav);
         let _ = std::fs::remove_dir_all(&root);

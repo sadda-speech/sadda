@@ -10,10 +10,12 @@ import typing
 __all__ = [
     "Audio",
     "Bundle",
+    "Citation",
     "DerivedSignal",
     "FormantFrame",
     "Interval",
     "Point",
+    "ProcessingRun",
     "Project",
     "Reference",
     "Session",
@@ -128,6 +130,29 @@ class Bundle:
     def extra(self) -> typing.Optional[builtins.str]:
         r"""
         Freeform JSON payload (stored as text).
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class Citation:
+    r"""
+    A literature reference for an analysis a bundle used. Returned by
+    `Project.citations(bundle_id)`, suitable for a paper's reference list.
+    """
+    @property
+    def processor_id(self) -> builtins.str:
+        r"""
+        The processor this cites (matches `ProcessingRun.processor_id`).
+        """
+    @property
+    def reference(self) -> builtins.str:
+        r"""
+        Human-readable reference string.
+        """
+    @property
+    def doi(self) -> typing.Optional[builtins.str]:
+        r"""
+        Bare DOI, if one exists.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -297,6 +322,64 @@ class Point:
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
+class ProcessingRun:
+    r"""
+    One row of a bundle's provenance timeline — an analysis that ran on
+    the bundle. Returned by `Project.processing_runs(bundle_id)`.
+    """
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Processing-run id (primary key).
+        """
+    @property
+    def bundle_id(self) -> builtins.int:
+        r"""
+        Bundle the run targeted.
+        """
+    @property
+    def kind(self) -> builtins.str:
+        r"""
+        `dsp_algorithm` | `ml_model` | `clinical_measure` | `plugin` | `live_recording`.
+        """
+    @property
+    def processor_id(self) -> builtins.str:
+        r"""
+        Reverse-DNS processor id, e.g. `sadda.dsp.pitch.autocorrelation`.
+        """
+    @property
+    def processor_version(self) -> builtins.str:
+        r"""
+        Sadda version at run time.
+        """
+    @property
+    def parameters(self) -> typing.Optional[builtins.str]:
+        r"""
+        JSON parameters (processor-specific shape), if any.
+        """
+    @property
+    def output_tier_ids(self) -> typing.Optional[builtins.str]:
+        r"""
+        JSON array of produced tier ids, if any.
+        """
+    @property
+    def started_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC start timestamp.
+        """
+    @property
+    def finished_at(self) -> typing.Optional[builtins.str]:
+        r"""
+        ISO 8601 UTC finish timestamp, if recorded.
+        """
+    @property
+    def status(self) -> builtins.str:
+        r"""
+        `ok` | `error` | `partial`.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
 class Project:
     r"""
     A sadda project: a directory holding audio, derived signals, attachments,
@@ -342,6 +425,24 @@ class Project:
         Renames a bundle's display name. The underlying WAV file is
         left untouched. Raises if `bundle_id` does not exist or the
         new name is empty / whitespace-only.
+        """
+    def record_processing_run(self, bundle_id: builtins.int, kind: builtins.str, processor_id: builtins.str, *, parameters: typing.Optional[builtins.str] = None, input_tier_ids: typing.Optional[typing.Sequence[builtins.int]] = None, output_tier_ids: typing.Optional[typing.Sequence[builtins.int]] = None, output_signal_ids: typing.Optional[typing.Sequence[builtins.int]] = None, weights_checksum: typing.Optional[builtins.str] = None) -> builtins.int:
+        r"""
+        Records a completed processing run for audit provenance and
+        returns its id. The engine fills in the sadda version, timestamps,
+        and active recipe id. `kind` is one of `dsp_algorithm`,
+        `ml_model`, `clinical_measure`, `plugin`, `live_recording`.
+        """
+    def processing_runs(self, bundle_id: builtins.int) -> builtins.list[ProcessingRun]:
+        r"""
+        Returns a bundle's processing-run timeline (provenance), oldest
+        first.
+        """
+    def citations(self, bundle_id: builtins.int) -> builtins.list[Citation]:
+        r"""
+        Returns the literature citations for the analyses a bundle used,
+        deduplicated by processor and ordered by first use. Uncited
+        processors (imports, recording) are omitted.
         """
     def load_audio(self, bundle_id: builtins.int) -> Audio:
         r"""

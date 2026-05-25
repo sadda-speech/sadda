@@ -616,6 +616,130 @@ impl PyDerivedSignal {
     }
 }
 
+/// One row of a bundle's provenance timeline — an analysis that ran on
+/// the bundle. Returned by `Project.processing_runs(bundle_id)`.
+#[gen_stub_pyclass]
+#[pyclass(name = "ProcessingRun", frozen)]
+struct PyProcessingRun {
+    inner: sadda_engine::ProcessingRunRow,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyProcessingRun {
+    /// Processing-run id (primary key).
+    #[getter]
+    fn id(&self) -> i64 {
+        self.inner.id
+    }
+    /// Bundle the run targeted.
+    #[getter]
+    fn bundle_id(&self) -> i64 {
+        self.inner.bundle_id
+    }
+    /// `dsp_algorithm` | `ml_model` | `clinical_measure` | `plugin` | `live_recording`.
+    #[getter]
+    fn kind(&self) -> String {
+        self.inner.kind.clone()
+    }
+    /// Reverse-DNS processor id, e.g. `sadda.dsp.pitch.autocorrelation`.
+    #[getter]
+    fn processor_id(&self) -> String {
+        self.inner.processor_id.clone()
+    }
+    /// Sadda version at run time.
+    #[getter]
+    fn processor_version(&self) -> String {
+        self.inner.processor_version.clone()
+    }
+    /// JSON parameters (processor-specific shape), if any.
+    #[getter]
+    fn parameters(&self) -> Option<String> {
+        self.inner.parameters.clone()
+    }
+    /// JSON array of produced tier ids, if any.
+    #[getter]
+    fn output_tier_ids(&self) -> Option<String> {
+        self.inner.output_tier_ids.clone()
+    }
+    /// ISO 8601 UTC start timestamp.
+    #[getter]
+    fn started_at(&self) -> String {
+        self.inner.started_at.clone()
+    }
+    /// ISO 8601 UTC finish timestamp, if recorded.
+    #[getter]
+    fn finished_at(&self) -> Option<String> {
+        self.inner.finished_at.clone()
+    }
+    /// `ok` | `error` | `partial`.
+    #[getter]
+    fn status(&self) -> String {
+        self.inner.status.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ProcessingRun(id={}, kind={:?}, processor_id={:?}, status={:?})",
+            self.inner.id, self.inner.kind, self.inner.processor_id, self.inner.status,
+        )
+    }
+}
+
+/// A literature reference for an analysis a bundle used. Returned by
+/// `Project.citations(bundle_id)`, suitable for a paper's reference list.
+#[gen_stub_pyclass]
+#[pyclass(name = "Citation", frozen)]
+struct PyCitation {
+    inner: sadda_engine::Citation,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyCitation {
+    /// The processor this cites (matches `ProcessingRun.processor_id`).
+    #[getter]
+    fn processor_id(&self) -> String {
+        self.inner.processor_id.clone()
+    }
+    /// Human-readable reference string.
+    #[getter]
+    fn reference(&self) -> String {
+        self.inner.reference.clone()
+    }
+    /// Bare DOI, if one exists.
+    #[getter]
+    fn doi(&self) -> Option<String> {
+        self.inner.doi.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Citation(processor_id={:?}, doi={:?})",
+            self.inner.processor_id, self.inner.doi
+        )
+    }
+}
+
+/// Parses a `processing_run.kind` string into the engine enum, raising
+/// `ValueError` on an unknown value.
+fn parse_run_kind(s: &str) -> PyResult<sadda_engine::ProcessingRunKind> {
+    use sadda_engine::ProcessingRunKind as K;
+    Ok(match s {
+        "dsp_algorithm" => K::DspAlgorithm,
+        "ml_model" => K::MlModel,
+        "clinical_measure" => K::ClinicalMeasure,
+        "plugin" => K::Plugin,
+        "live_recording" => K::LiveRecording,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid processing-run kind {other:?}; expected one of \
+                 dsp_algorithm, ml_model, clinical_measure, plugin, live_recording"
+            )));
+        }
+    })
+}
+
 /// A sadda project: a directory holding audio, derived signals, attachments,
 /// and a SQLite-backed corpus database. Construct via `sadda.new_project(...)`
 /// or `sadda.open_project(...)`.
@@ -692,6 +816,60 @@ impl PyProject {
     fn rename_bundle(&self, bundle_id: i64, new_name: &str) -> PyResult<()> {
         self.inner
             .rename_bundle(bundle_id, new_name)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Records a completed processing run for audit provenance and
+    /// returns its id. The engine fills in the sadda version, timestamps,
+    /// and active recipe id. `kind` is one of `dsp_algorithm`,
+    /// `ml_model`, `clinical_measure`, `plugin`, `live_recording`.
+    #[pyo3(signature = (bundle_id, kind, processor_id, *, parameters=None,
+        input_tier_ids=None, output_tier_ids=None, output_signal_ids=None,
+        weights_checksum=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn record_processing_run(
+        &self,
+        bundle_id: i64,
+        kind: &str,
+        processor_id: &str,
+        parameters: Option<String>,
+        input_tier_ids: Option<Vec<i64>>,
+        output_tier_ids: Option<Vec<i64>>,
+        output_signal_ids: Option<Vec<i64>>,
+        weights_checksum: Option<String>,
+    ) -> PyResult<i64> {
+        let mut spec =
+            sadda_engine::ProcessingRunSpec::new(bundle_id, parse_run_kind(kind)?, processor_id);
+        spec.parameters = parameters;
+        spec.input_tier_ids = input_tier_ids.unwrap_or_default();
+        spec.output_tier_ids = output_tier_ids.unwrap_or_default();
+        spec.output_signal_ids = output_signal_ids.unwrap_or_default();
+        spec.weights_checksum = weights_checksum;
+        self.inner
+            .record_processing_run(&spec)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Returns a bundle's processing-run timeline (provenance), oldest
+    /// first.
+    fn processing_runs(&self, bundle_id: i64) -> PyResult<Vec<PyProcessingRun>> {
+        self.inner
+            .processing_runs(bundle_id)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|inner| PyProcessingRun { inner })
+                    .collect()
+            })
+            .map_err(engine_err_to_py)
+    }
+
+    /// Returns the literature citations for the analyses a bundle used,
+    /// deduplicated by processor and ordered by first use. Uncited
+    /// processors (imports, recording) are omitted.
+    fn citations(&self, bundle_id: i64) -> PyResult<Vec<PyCitation>> {
+        self.inner
+            .citations(bundle_id)
+            .map(|cs| cs.into_iter().map(|inner| PyCitation { inner }).collect())
             .map_err(engine_err_to_py)
     }
 
@@ -1598,6 +1776,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyReference>()?;
     m.add_class::<PyDerivedSignal>()?;
     m.add_class::<PyFormantFrame>()?;
+    m.add_class::<PyProcessingRun>()?;
+    m.add_class::<PyCitation>()?;
     m.add_class::<PyProject>()?;
 
     // Live recording: sadda.live.* surface. We register it as a Python
