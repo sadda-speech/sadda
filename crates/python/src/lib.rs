@@ -724,6 +724,118 @@ impl PyCitation {
     }
 }
 
+/// Microphone / signal-chain calibration mapping dB-FS to dB-SPL.
+/// Construct with `Calibration(reference_spl_db=…, reference_db_fs=…)`.
+#[gen_stub_pyclass]
+// `from_py_object` opts into the FromPyObject derive (pyo3 0.28 makes it
+// explicit for Clone pyclasses) so `Calibration` can be passed by value
+// to `add_instrument`.
+#[pyclass(name = "Calibration", frozen, from_py_object)]
+#[derive(Clone)]
+struct PyCalibration {
+    inner: sadda_engine::Calibration,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyCalibration {
+    /// Builds a calibration from a reference tone: its known SPL and the
+    /// dB-FS the engine measured for it.
+    #[new]
+    fn new(reference_spl_db: f64, reference_db_fs: f64) -> Self {
+        Self {
+            inner: sadda_engine::Calibration {
+                reference_spl_db,
+                reference_db_fs,
+            },
+        }
+    }
+    /// SPL of the calibration tone (dB-SPL).
+    #[getter]
+    fn reference_spl_db(&self) -> f64 {
+        self.inner.reference_spl_db
+    }
+    /// dB-FS measured for that tone.
+    #[getter]
+    fn reference_db_fs(&self) -> f64 {
+        self.inner.reference_db_fs
+    }
+    /// dB added to a dB-FS reading to obtain dB-SPL.
+    fn spl_offset_db(&self) -> f64 {
+        self.inner.spl_offset_db()
+    }
+    /// Converts a relative dB-FS value to calibrated dB-SPL.
+    fn to_spl(&self, db_fs: f32) -> f32 {
+        self.inner
+            .to_spl(sadda_engine::Decibels::new(db_fs))
+            .value()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Calibration(reference_spl_db={}, reference_db_fs={})",
+            self.inner.reference_spl_db, self.inner.reference_db_fs
+        )
+    }
+}
+
+/// A capture instrument (microphone, interface) and its optional
+/// calibration. Returned by `Project.instruments()` / `get_instrument()`.
+#[gen_stub_pyclass]
+#[pyclass(name = "Instrument", frozen)]
+struct PyInstrument {
+    inner: sadda_engine::Instrument,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyInstrument {
+    /// Instrument id (primary key).
+    #[getter]
+    fn id(&self) -> i64 {
+        self.inner.id
+    }
+    /// Human-readable name.
+    #[getter]
+    fn name(&self) -> String {
+        self.inner.name.clone()
+    }
+    /// Kind label (e.g. `"microphone"`).
+    #[getter]
+    fn kind(&self) -> Option<String> {
+        self.inner.kind.clone()
+    }
+    /// Serial number.
+    #[getter]
+    fn serial(&self) -> Option<String> {
+        self.inner.serial.clone()
+    }
+    /// Calibration, if the instrument has been calibrated.
+    #[getter]
+    fn calibration(&self) -> Option<PyCalibration> {
+        self.inner.calibration.map(|inner| PyCalibration { inner })
+    }
+    /// Freeform JSON payload.
+    #[getter]
+    fn extra(&self) -> Option<String> {
+        self.inner.extra.clone()
+    }
+    /// ISO 8601 UTC creation timestamp.
+    #[getter]
+    fn created_at(&self) -> String {
+        self.inner.created_at.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Instrument(id={}, name={:?}, calibrated={})",
+            self.inner.id,
+            self.inner.name,
+            self.inner.calibration.is_some()
+        )
+    }
+}
+
 /// Parses a `processing_run.kind` string into the engine enum, raising
 /// `ValueError` on an unknown value.
 fn parse_run_kind(s: &str) -> PyResult<sadda_engine::ProcessingRunKind> {
@@ -873,6 +985,52 @@ impl PyProject {
         self.inner
             .citations(bundle_id)
             .map(|cs| cs.into_iter().map(|inner| PyCitation { inner }).collect())
+            .map_err(engine_err_to_py)
+    }
+
+    /// Inserts an instrument (microphone / interface), optionally with a
+    /// `Calibration`. Returns the new instrument's id.
+    #[pyo3(signature = (name, *, kind=None, serial=None, calibration=None, extra=None))]
+    fn add_instrument(
+        &self,
+        name: &str,
+        kind: Option<String>,
+        serial: Option<String>,
+        calibration: Option<PyCalibration>,
+        extra: Option<String>,
+    ) -> PyResult<i64> {
+        let spec = sadda_engine::InstrumentSpec {
+            name: name.into(),
+            kind,
+            serial,
+            calibration: calibration.map(|c| c.inner),
+            extra,
+        };
+        self.inner.add_instrument(&spec).map_err(engine_err_to_py)
+    }
+
+    /// Lists all instruments in id order.
+    fn instruments(&self) -> PyResult<Vec<PyInstrument>> {
+        self.inner
+            .instruments()
+            .map(|xs| xs.into_iter().map(|inner| PyInstrument { inner }).collect())
+            .map_err(engine_err_to_py)
+    }
+
+    /// Fetches a single instrument by id.
+    fn get_instrument(&self, instrument_id: i64) -> PyResult<PyInstrument> {
+        self.inner
+            .get_instrument(instrument_id)
+            .map(|inner| PyInstrument { inner })
+            .map_err(engine_err_to_py)
+    }
+
+    /// Resolves a bundle's calibration via bundle → session →
+    /// instrument. `None` means levels for that bundle are dB-FS only.
+    fn bundle_calibration(&self, bundle_id: i64) -> PyResult<Option<PyCalibration>> {
+        self.inner
+            .bundle_calibration(bundle_id)
+            .map(|o| o.map(|inner| PyCalibration { inner }))
             .map_err(engine_err_to_py)
     }
 
@@ -1783,6 +1941,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFormantFrame>()?;
     m.add_class::<PyProcessingRun>()?;
     m.add_class::<PyCitation>()?;
+    m.add_class::<PyCalibration>()?;
+    m.add_class::<PyInstrument>()?;
     m.add_class::<PyProject>()?;
 
     // Live recording: sadda.live.* surface. We register it as a Python

@@ -10,9 +10,11 @@ import typing
 __all__ = [
     "Audio",
     "Bundle",
+    "Calibration",
     "Citation",
     "DerivedSignal",
     "FormantFrame",
+    "Instrument",
     "Interval",
     "Point",
     "ProcessingRun",
@@ -134,6 +136,37 @@ class Bundle:
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
+class Calibration:
+    r"""
+    Microphone / signal-chain calibration mapping dB-FS to dB-SPL.
+    Construct with `Calibration(reference_spl_db=…, reference_db_fs=…)`.
+    """
+    @property
+    def reference_spl_db(self) -> builtins.float:
+        r"""
+        SPL of the calibration tone (dB-SPL).
+        """
+    @property
+    def reference_db_fs(self) -> builtins.float:
+        r"""
+        dB-FS measured for that tone.
+        """
+    def __new__(cls, reference_spl_db: builtins.float, reference_db_fs: builtins.float) -> Calibration:
+        r"""
+        Builds a calibration from a reference tone: its known SPL and the
+        dB-FS the engine measured for it.
+        """
+    def spl_offset_db(self) -> builtins.float:
+        r"""
+        dB added to a dB-FS reading to obtain dB-SPL.
+        """
+    def to_spl(self, db_fs: builtins.float) -> builtins.float:
+        r"""
+        Converts a relative dB-FS value to calibrated dB-SPL.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
 class Citation:
     r"""
     A literature reference for an analysis a bundle used. Returned by
@@ -232,6 +265,49 @@ class FormantFrame:
     def bandwidths(self) -> numpy.typing.NDArray[numpy.float32]:
         r"""
         Bandwidths in Hz, co-indexed with `frequencies`.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class Instrument:
+    r"""
+    A capture instrument (microphone, interface) and its optional
+    calibration. Returned by `Project.instruments()` / `get_instrument()`.
+    """
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Instrument id (primary key).
+        """
+    @property
+    def name(self) -> builtins.str:
+        r"""
+        Human-readable name.
+        """
+    @property
+    def kind(self) -> typing.Optional[builtins.str]:
+        r"""
+        Kind label (e.g. `"microphone"`).
+        """
+    @property
+    def serial(self) -> typing.Optional[builtins.str]:
+        r"""
+        Serial number.
+        """
+    @property
+    def calibration(self) -> typing.Optional[Calibration]:
+        r"""
+        Calibration, if the instrument has been calibrated.
+        """
+    @property
+    def extra(self) -> typing.Optional[builtins.str]:
+        r"""
+        Freeform JSON payload.
+        """
+    @property
+    def created_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC creation timestamp.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -443,6 +519,24 @@ class Project:
         Returns the literature citations for the analyses a bundle used,
         deduplicated by processor and ordered by first use. Uncited
         processors (imports, recording) are omitted.
+        """
+    def add_instrument(self, name: builtins.str, *, kind: typing.Optional[builtins.str] = None, serial: typing.Optional[builtins.str] = None, calibration: typing.Optional[Calibration] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
+        r"""
+        Inserts an instrument (microphone / interface), optionally with a
+        `Calibration`. Returns the new instrument's id.
+        """
+    def instruments(self) -> builtins.list[Instrument]:
+        r"""
+        Lists all instruments in id order.
+        """
+    def get_instrument(self, instrument_id: builtins.int) -> Instrument:
+        r"""
+        Fetches a single instrument by id.
+        """
+    def bundle_calibration(self, bundle_id: builtins.int) -> typing.Optional[Calibration]:
+        r"""
+        Resolves a bundle's calibration via bundle → session →
+        instrument. `None` means levels for that bundle are dB-FS only.
         """
     def load_audio(self, bundle_id: builtins.int) -> Audio:
         r"""
