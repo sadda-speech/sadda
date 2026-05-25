@@ -6,6 +6,41 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-25 — Long-term average spectrum (LTAS) as a first-class feature
+
+Promoted from "an AVQI helper" to a first-class `sadda.dsp` feature at the user's request — LTAS is a core phonetics tool (spectral slope, tilt, alpha ratio underpin voice-quality work broadly), and it's also where B6's AVQI slope/tilt parameters come from.
+
+### What it delivers
+
+`engine::dsp::ltas(samples, sr, bin_hz) -> Ltas` — the Welch-averaged power spectrum (overlapping Hann frames → mean power per FFT bin → aggregated into `bin_hz` bands → dB). The `Ltas` carries the per-band dB levels and three derived measures:
+
+- **slope** — high-band/low-band energy ratio in dB (`Ltas: Get slope`, "energy" averaging).
+- **tilt** — least-squares regression slope of band dB vs frequency, dB/kHz.
+- **alpha ratio** — energy above vs below 1 kHz, dB.
+
+All three are *differences/ratios* of dB levels, so — like CPP, unlike HNR — they're **invariant to the spectrum's overall normalization**; only the shape matters. The slope matched Praat within **3 dB** first try across harmonic-tone and pulse-train fixtures.
+
+### Three surfaces
+
+`engine::dsp::ltas` + `sadda.dsp.ltas` (returns an `Ltas` with `.levels_db` / `.slope()` / `.tilt()` / `.alpha_ratio()`), tiered `stable`. GUI: the spectrum is plottable; a dedicated LTAS pane rides with cluster D's overlays.
+
+### Feeds B6
+
+AVQI's "slope" and "tilt" parameters are exactly `Ltas::slope` and `Ltas::tilt`, so B6 (AVQI/ABI) consumes this directly.
+
+### Layout
+
+- `crates/engine/src/dsp/ltas.rs` (new) — `Ltas` + `ltas`.
+- `crates/python/src/lib.rs` — `PyLtas` + `ltas` pyfunction; `python/sadda/dsp/__init__.py` re-export.
+- `tests/clinical/praat/jitter_shimmer.praat` — `ltas_slope` column; `clinical_perturbation.rs` + `test_ltas.py` tests.
+
+### Sources / references
+
+- Praat (Boersma & Weenink) — Ltas / Get slope
+- 2026-05-25 CPP/CPPS entry (same offset-invariance argument); the validation harness this extends
+
+---
+
 ## 2026-05-25 — CPP/CPPS (B5, part 2): cepstral peak prominence, robust tilt, Praat-validated
 
 Completes cluster B's B5. Smoothed cepstral peak prominence — the prominence of the cepstral peak (at the f0 quefrency) above the cepstrum's regression tilt line, averaged over frames. Praat's `PowerCepstrogram` → `Get CPPS`.

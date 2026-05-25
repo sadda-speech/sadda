@@ -21,6 +21,7 @@ struct Golden {
     shimmer_local_db: f64,
     hnr_db: f64,
     cpps: f64,
+    ltas_slope: f64,
 }
 
 fn load_golden(name: &str) -> Golden {
@@ -36,6 +37,7 @@ fn load_golden(name: &str) -> Golden {
                 shimmer_local_db: cols[5].parse().unwrap(),
                 hnr_db: cols[8].parse().unwrap(),
                 cpps: cols[9].parse().unwrap(),
+                ltas_slope: cols[10].parse().unwrap(),
             };
         }
     }
@@ -147,6 +149,25 @@ fn matches_praat_on_cpps() {
         let got = cpps(&audio, &CppsConfig::default()).unwrap().value() as f64;
         let want = load_golden(name).cpps;
         report.push_str(&format!("{name}: cpps {got:.2} vs praat {want:.2}\n"));
+        ok &= (got - want).abs() < 3.0;
+    }
+    assert!(ok, "{report}");
+}
+
+#[test]
+fn matches_praat_on_ltas_slope() {
+    use sadda_engine::dsp::ltas;
+    // Band energy ratio (0–1 kHz vs 1–4 kHz) within 3 dB of Praat across
+    // signal types. Offset-invariant, so it tracks the spectral shape.
+    let mut report = String::new();
+    let mut ok = true;
+    for name in ["hnr_high_120hz", "clean_120hz", "shimmer_150hz"] {
+        let audio = Audio::from_wav_path(fixtures_dir().join(format!("{name}.wav"))).unwrap();
+        let mono: Vec<f32> = audio.mono_samples().collect();
+        let l = ltas(&mono, audio.sample_rate, 100.0);
+        let got = l.slope((0.0, 1000.0), (1000.0, 4000.0)).value() as f64;
+        let want = load_golden(name).ltas_slope;
+        report.push_str(&format!("{name}: ltas_slope {got:.2} vs praat {want:.2}\n"));
         ok &= (got - want).abs() < 3.0;
     }
     assert!(ok, "{report}");

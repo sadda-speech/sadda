@@ -9,6 +9,7 @@
 pub mod formants;
 pub mod intensity;
 pub mod lpc;
+pub mod ltas;
 pub mod mfcc;
 pub mod roots;
 pub mod spectrogram;
@@ -18,6 +19,7 @@ pub mod windowing;
 pub use formants::{FormantFrame, FormantsConfig, formants};
 pub use intensity::{IntensityFrame, intensity};
 pub use lpc::{LpcMethod, LpcResult, autocorr_lpc, burg_lpc, lpc};
+pub use ltas::{Ltas, ltas};
 pub use mfcc::mfcc;
 pub use roots::polynomial_roots;
 pub use spectrogram::power_spectrogram;

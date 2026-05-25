@@ -25,7 +25,7 @@ out$ = fixtures_dir$ + "/praat_golden.tsv"
 writeFileLine: out$,
     ... "signal", tab$, "jitter_local", tab$, "jitter_rap", tab$, "jitter_ppq5",
     ... tab$, "shimmer_local", tab$, "shimmer_local_db", tab$, "shimmer_apq3",
-    ... tab$, "shimmer_apq5", tab$, "hnr_db", tab$, "cpps"
+    ... tab$, "shimmer_apq5", tab$, "hnr_db", tab$, "cpps", tab$, "ltas_slope"
 
 # Voice-report defaults.
 shortest = 0.0001
@@ -70,11 +70,16 @@ for i to n
     cpps = Get CPPS: "yes", 0.02, 0.0005, 60, 330, 0.05, "Parabolic",
         ... 0.001, 0.05, "Straight", "Robust slow"
 
+    # LTAS slope — band energy ratio (dB), 0–1 kHz vs 1–4 kHz.
+    selectObject: sound
+    ltas = To Ltas: 100
+    ltas_slope = Get slope: 0, 1000, 1000, 4000, "energy"
+
     appendFileLine: out$, stem$, tab$, jit_local, tab$, jit_rap, tab$, jit_ppq5,
         ... tab$, shim_local, tab$, shim_db, tab$, shim_apq3, tab$, shim_apq5,
-        ... tab$, hnr, tab$, cpps
+        ... tab$, hnr, tab$, cpps, tab$, ltas_slope
 
-    removeObject: sound, pitch, pp, harm, pc
+    removeObject: sound, pitch, pp, harm, pc, ltas
 endfor
 removeObject: strings
 writeInfoLine: "Wrote ", n, " rows to ", out$
