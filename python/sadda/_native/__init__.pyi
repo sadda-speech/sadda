@@ -16,6 +16,7 @@ __all__ = [
     "FormantFrame",
     "Instrument",
     "Interval",
+    "Ltas",
     "PerturbationReport",
     "Point",
     "ProcessingRun",
@@ -35,6 +36,7 @@ __all__ = [
     "intensity",
     "kaiser",
     "load_wav",
+    "ltas",
     "mfcc",
     "new_project",
     "open_project",
@@ -360,6 +362,43 @@ class Interval:
     def extra(self) -> typing.Optional[builtins.str]:
         r"""
         JSON `extra` payload.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class Ltas:
+    r"""
+    A long-term average spectrum: mean power per `bin_hz`-wide band, in
+    dB. Returned by `sadda.dsp.ltas`. Level *differences* (slope, tilt,
+    alpha ratio) are the meaningful quantities.
+    """
+    @property
+    def bin_hz(self) -> builtins.float:
+        r"""
+        Band width in Hz.
+        """
+    @property
+    def sample_rate(self) -> builtins.int:
+        r"""
+        Source sample rate in Hz.
+        """
+    @property
+    def levels_db(self) -> numpy.typing.NDArray[numpy.float32]:
+        r"""
+        dB level per band (band `i` spans `[i·bin_hz, (i+1)·bin_hz)`).
+        """
+    def slope(self, low_lo: builtins.float, low_hi: builtins.float, high_lo: builtins.float, high_hi: builtins.float) -> builtins.float:
+        r"""
+        Spectral slope (dB): high-band / low-band energy ratio.
+        """
+    def tilt(self, f_lo: builtins.float, f_hi: builtins.float) -> builtins.float:
+        r"""
+        Spectral tilt: regression slope of band dB over `[f_lo, f_hi)`,
+        in dB per kHz.
+        """
+    def alpha_ratio(self) -> builtins.float:
+        r"""
+        Alpha ratio (dB): energy above vs below 1 kHz.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -1022,6 +1061,12 @@ def kaiser(n: builtins.int, beta: builtins.float) -> numpy.typing.NDArray[numpy.
 def load_wav(path: builtins.str | os.PathLike | pathlib.Path) -> Audio:
     r"""
     Loads a WAV file from disk. Returns a sadda.Audio.
+    """
+
+def ltas(audio: Audio, *, bin_hz: builtins.float = 100.0) -> Ltas:
+    r"""
+    Computes the long-term average spectrum of `audio` with `bin_hz`-wide
+    bands (Welch-averaged power).
     """
 
 def mfcc(audio: Audio, *, frame_size_seconds: builtins.float = 0.02500000037252903, hop_seconds: builtins.float = 0.009999999776482582, n_mels: builtins.int = 40, n_mfcc: builtins.int = 13, f_min: builtins.float = 0.0, f_max: typing.Optional[builtins.float] = None) -> numpy.typing.NDArray[numpy.float32]:

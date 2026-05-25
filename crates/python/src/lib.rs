@@ -1907,6 +1907,70 @@ fn mfcc<'py>(
     arr.into_pyarray(py)
 }
 
+/// A long-term average spectrum: mean power per `bin_hz`-wide band, in
+/// dB. Returned by `sadda.dsp.ltas`. Level *differences* (slope, tilt,
+/// alpha ratio) are the meaningful quantities.
+#[gen_stub_pyclass]
+#[pyclass(name = "Ltas", frozen)]
+struct PyLtas {
+    inner: sadda_engine::dsp::Ltas,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyLtas {
+    /// Band width in Hz.
+    #[getter]
+    fn bin_hz(&self) -> f32 {
+        self.inner.bin_hz
+    }
+    /// Source sample rate in Hz.
+    #[getter]
+    fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate
+    }
+    /// dB level per band (band `i` spans `[i·bin_hz, (i+1)·bin_hz)`).
+    #[getter]
+    fn levels_db<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
+        self.inner.levels_db.clone().into_pyarray(py)
+    }
+    /// Spectral slope (dB): high-band / low-band energy ratio.
+    fn slope(&self, low_lo: f32, low_hi: f32, high_lo: f32, high_hi: f32) -> f32 {
+        self.inner
+            .slope((low_lo, low_hi), (high_lo, high_hi))
+            .value()
+    }
+    /// Spectral tilt: regression slope of band dB over `[f_lo, f_hi)`,
+    /// in dB per kHz.
+    fn tilt(&self, f_lo: f32, f_hi: f32) -> f32 {
+        self.inner.tilt(f_lo, f_hi)
+    }
+    /// Alpha ratio (dB): energy above vs below 1 kHz.
+    fn alpha_ratio(&self) -> f32 {
+        self.inner.alpha_ratio().value()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Ltas(bin_hz={}, n_bands={})",
+            self.inner.bin_hz,
+            self.inner.levels_db.len()
+        )
+    }
+}
+
+/// Computes the long-term average spectrum of `audio` with `bin_hz`-wide
+/// bands (Welch-averaged power).
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (audio, *, bin_hz=100.0))]
+fn ltas(audio: &PyAudio, bin_hz: f32) -> PyLtas {
+    let mono: Vec<f32> = audio.inner.mono_samples().collect();
+    PyLtas {
+        inner: sadda_engine::dsp::ltas(&mono, audio.inner.sample_rate, bin_hz),
+    }
+}
+
 /// Jitter + shimmer over a sustained phonation. Fields are floats:
 /// jitter / relative shimmers are fractions (0.01 = 1%);
 /// `shimmer_local_db` is in dB.
@@ -2049,6 +2113,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(voiced_pitch, m)?)?;
     m.add_function(wrap_pyfunction!(formants, m)?)?;
     m.add_function(wrap_pyfunction!(mfcc, m)?)?;
+    m.add_function(wrap_pyfunction!(ltas, m)?)?;
     m.add_function(wrap_pyfunction!(perturbation, m)?)?;
     m.add_function(wrap_pyfunction!(hnr, m)?)?;
     m.add_function(wrap_pyfunction!(cpps, m)?)?;
@@ -2064,6 +2129,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyReference>()?;
     m.add_class::<PyDerivedSignal>()?;
     m.add_class::<PyFormantFrame>()?;
+    m.add_class::<PyLtas>()?;
     m.add_class::<PyPerturbationReport>()?;
     m.add_class::<PyProcessingRun>()?;
     m.add_class::<PyCitation>()?;

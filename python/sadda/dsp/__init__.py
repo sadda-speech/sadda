@@ -15,6 +15,7 @@ from sadda._stability import stable
 
 __all__ = [
     "FormantFrame",
+    "Ltas",
     "blackman",
     "f0",
     "formants",
@@ -23,6 +24,7 @@ __all__ = [
     "hann",
     "intensity",
     "kaiser",
+    "ltas",
     "mfcc",
     "spectrogram",
     "stft",
@@ -44,3 +46,7 @@ voiced_pitch = stable(_native.voiced_pitch)
 formants = stable(_native.formants)
 mfcc = stable(_native.mfcc)
 FormantFrame = stable(_native.FormantFrame)
+
+# LTAS surface — long-term average spectrum + slope/tilt/alpha ratio.
+ltas = stable(_native.ltas)
+Ltas = stable(_native.Ltas)
