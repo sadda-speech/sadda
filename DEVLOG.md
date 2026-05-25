@@ -6,6 +6,37 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-25 — Phase-2 GUI dogfooding: lane-alignment + spectrogram-bounds fixes shipped; bundle-rename and TikZ figure-export logged for later
+
+Dogfooding the 0.2 desktop GUI on WSL2 surfaced three rendering/launch issues (fixed this session) and two feature gaps (logged here). This is an **intake entry, not a design entry** — the two backlog items still need their own design passes before implementation.
+
+### Shipped this session (Phase-2 polish)
+
+- **X11-under-WSL launch fix.** `cargo run -p sadda-app` aborted with `WinitEventLoop(ExitFailure(1))` under WSLg — winit's Wayland backend broken-pipes against the WSLg compositor. `main()` now drops `WAYLAND_DISPLAY` when WSL is detected (`WSL_INTEROP` / `/proc/sys/kernel/osrelease`), steering winit onto XWayland (`DISPLAY=:0`), which works. No-op off WSL, so native Wayland sessions are untouched.
+- **Lane alignment.** The waveform / spectrogram / tier-strip plot areas didn't share left/right boundaries. Root cause: the waveform + tier panels carried `Frame::side_top_panel`'s 8px horizontal inner margin while the spectrogram was drawn frameless on the bare `ui`. Fix: all three lanes are now frameless (`Frame::NONE`); horizontal alignment is owned **solely** by the shared 120px gutter (`SIGNAL_LEFT_GUTTER` on the tier strip + matching `y_axis_min_width` on the two plots). The one outer `CentralPanel` supplies uniform window padding. This is the alignment convention to preserve as more lanes (f0 / intensity / formant tracks) land.
+- **Spectrogram bounds.** The plot padded ~5% past the data (a meaningless 0…−1000 Hz band, plus empty time beyond the recording) and — latent — never cropped to the zoom window, because the full-bundle texture dominates egui_plot's auto-bounds (the old `include_x` comment claiming it "crops for free" was wrong). Fix: both plots now set exact bounds each frame via `PlotUi::set_plot_bounds_x/y`, which disables auto-fit (killing the margin) and crops the image to the visible window. x-bounds are now identical across panes, reinforcing the shared-cursor alignment.
+
+### Backlog — not yet designed
+
+**Bundle rename (near-term, fits current Phase 2).** No way to rename a bundle after creation — the selector only creates / deletes / reveals. A GUI editing affordance, which the roadmap's contributor-onramp note pegs to the post-0.2 window we're in. Cheap: the `bundle` table has `name TEXT NOT NULL` with **no** uniqueness constraint (only `audio_relative_path` is `UNIQUE`, and a display-name rename doesn't touch the WAV), so the engine side is a bare `UPDATE bundle SET name=? WHERE id=?`. Three-surface per the standing rule: engine gains `rename_bundle` / `update_bundle_name`, the Python module wraps it, the GUI exposes it from the existing bundle-row context menu (H1) via an inline or modal text edit, each with a test. Small enough to lift into the current phase whenever wanted.
+
+**Publication-quality figure export → TikZ (future, ~Phase 3+).** Export the assembled view — selected panes (waveform, spectrogram), derived-signal overlays, labeled tiers, selections — as a TikZ figure for LaTeX, mirroring the user's existing Praat tooling, **specTeX** (https://github.com/dbqpdb/specTeX). Differentiator-tier and explicitly gated on "once the visual elements are all developed," so it lands after Phase-3 "GUI overlay rendering" at the earliest. Needs its own design session; open questions to settle there:
+  - **Intermediate representation.** Does the engine/Python side emit a figure spec (keeping export scriptable + headless, three-surface), with the GUI just feeding it the current view? Strongly preferred over a GUI-only renderer.
+  - **Spectrogram in TikZ.** TikZ can't draw the bitmap natively — it'd embed a PNG (the baked colormap texture) and overlay vector axes / tiers / annotations on top. Confirm against how specTeX handles it.
+  - **Fidelity + units.** How closely to match on-screen styling; axis scaling; time/frequency units; tier label typesetting.
+
+### What this entry doesn't decide
+
+Neither backlog item is designed here — no IR, no API names beyond the sketch, no GUI layout. The bundle-rename sketch is concrete enough to implement directly when picked up; the TikZ exporter needs a design entry first, with specTeX as the prior-art baseline to study.
+
+### Sources / references
+
+- specTeX — the user's Praat TikZ figure exporter, prior art for the export feature: https://github.com/dbqpdb/specTeX
+- 2026-05-20 roadmap entry (Phase 2 GUI scope; Phase 3 overlay rendering; contributor-onramp pegging GUI editing affordances to post-0.2)
+- 2026-05-23 H1 entry (the bundle-row context menu the rename UI would extend)
+
+---
+
 ## 2026-05-23 — Phase-2 polish (H1): File-menu I/O for TextGrid + EAF, live-recording dialog, bundle context menu, `Project::delete_bundle`
 
 Goal: bring the GUI's I/O surface up to user expectation for a "desktop GUI release." The 2026-05-23 Phase 2 slicing entry's eleven slices delivered the visual editor, scripting host, single-writer lock, and release CI — but the existing engine methods for TextGrid / EAF I/O (D1, D2) and live recording (E1) were left unwired from the GUI menus. First post-0.2 user feedback flagged this as the most obvious gap.

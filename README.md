@@ -114,6 +114,9 @@ Requirements:
 cargo build
 cargo test
 
+# Desktop app (egui + wgpu)
+cargo run -p sadda-app
+
 # Python extension + tests
 uv sync
 uv run pytest python/tests/
@@ -122,6 +125,28 @@ uv run pytest python/tests/
 uv pip install mkdocs-material "mkdocstrings[python]"
 mkdocs serve
 ```
+
+The app embeds CPython for the script panel, so its binary links
+against the `libpython` PyO3 picked at build time (via the
+`PYO3_PYTHON` env var, defaulting to `python3` on `PATH`). If
+`cargo run -p sadda-app` fails with `error while loading shared
+libraries: libpython3.X.so.1.0: cannot open shared object file`,
+that `libpython` isn't on the runtime loader path. Two fixes:
+
+```bash
+# 1. Put the build-time Python's lib dir on the loader path:
+LD_LIBRARY_PATH="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')" \
+    cargo run -p sadda-app
+
+# 2. Or rebuild against a Python whose libpython is already on
+#    the loader path (e.g. Ubuntu's /usr/bin/python3):
+PYO3_PYTHON=/usr/bin/python3 cargo clean -p sadda-app
+PYO3_PYTHON=/usr/bin/python3 cargo run -p sadda-app
+```
+
+Common trigger: conda / miniconda `python3` is first on `PATH`.
+See `crates/script-engine/README.md` for the same gotcha at the
+test layer.
 
 ## License
 
