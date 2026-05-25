@@ -107,7 +107,7 @@ fn pitch_subscriber_observes_440hz_for_440hz_sine() {
 
     let mut pitches: Vec<f32> = Vec::new();
     while let Ok(p) = results.pitches.pop() {
-        pitches.push(p.frequency_hz);
+        pitches.push(p.frequency_hz.value());
     }
     assert!(pitches.len() >= 10, "got {} pitch frames", pitches.len());
     pitches.sort_by(|a, b| a.partial_cmp(b).unwrap());

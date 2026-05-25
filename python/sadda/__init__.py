@@ -20,6 +20,7 @@ from sadda._stability import (
     experimental,
     provisional,
     stable,
+    stable_clinical,
 )
 
 __all__ = [
@@ -47,6 +48,7 @@ __all__ = [
     "provisional",
     "schema_version",
     "stable",
+    "stable_clinical",
     "version",
 ]
 

@@ -51,6 +51,9 @@ pub(crate) fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
             "project locked by PID {holder_pid} on {hostname}; lockfile at {}",
             lockfile_path.display()
         )),
+        sadda_engine::EngineError::Unreliable { measure, reason } => {
+            PyValueError::new_err(format!("measure '{measure}' unreliable: {reason}"))
+        }
     }
 }
 
@@ -1360,7 +1363,7 @@ fn f0<'py>(
     };
     let frames = sadda_engine::autocorrelation(&audio.inner, &config);
     let times: Vec<f64> = frames.iter().map(|f| f.time_seconds).collect();
-    let freqs: Vec<f32> = frames.iter().map(|f| f.frequency_hz).collect();
+    let freqs: Vec<f32> = frames.iter().map(|f| f.frequency_hz.value()).collect();
     (times.into_pyarray(py), freqs.into_pyarray(py))
 }
 
@@ -1530,7 +1533,7 @@ fn intensity<'py>(
     );
     let times: Vec<f64> = frames.iter().map(|f| f.time_seconds).collect();
     let rms: Vec<f32> = frames.iter().map(|f| f.rms).collect();
-    let db_fs: Vec<f32> = frames.iter().map(|f| f.db_fs).collect();
+    let db_fs: Vec<f32> = frames.iter().map(|f| f.db_fs.value()).collect();
     (
         times.into_pyarray(py),
         rms.into_pyarray(py),
@@ -1559,12 +1562,14 @@ impl PyFormantFrame {
     /// Formant frequencies in Hz, ascending.
     #[getter]
     fn frequencies<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
-        self.inner.frequencies.clone().into_pyarray(py)
+        let hz: Vec<f32> = self.inner.frequencies.iter().map(|h| h.value()).collect();
+        hz.into_pyarray(py)
     }
     /// Bandwidths in Hz, co-indexed with `frequencies`.
     #[getter]
     fn bandwidths<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
-        self.inner.bandwidths.clone().into_pyarray(py)
+        let hz: Vec<f32> = self.inner.bandwidths.iter().map(|h| h.value()).collect();
+        hz.into_pyarray(py)
     }
 
     fn __repr__(&self) -> String {
@@ -1648,7 +1653,7 @@ fn voiced_pitch<'py>(
     };
     let frames = sadda_engine::pitch::pitch(&audio.inner, &config, pitch_method);
     let times: Vec<f64> = frames.iter().map(|f| f.time_seconds).collect();
-    let freqs: Vec<f32> = frames.iter().map(|f| f.frequency_hz).collect();
+    let freqs: Vec<f32> = frames.iter().map(|f| f.frequency_hz.value()).collect();
     let voicing: Vec<f32> = frames.iter().map(|f| f.voicing).collect();
     Ok((
         times.into_pyarray(py),

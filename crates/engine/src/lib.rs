@@ -12,6 +12,7 @@ pub mod io;
 pub mod live;
 pub mod pitch;
 pub mod storage;
+pub mod units;
 
 pub use audio::Audio;
 pub use citation::{Citation, citation_for};
@@ -26,6 +27,7 @@ pub use live::{
     MeterFrame, StoppedSession,
 };
 pub use pitch::{PitchConfig, PitchFrame, autocorrelation};
+pub use units::{Decibels, Hertz, Ratio, Seconds};
 
 /// Returns the engine crate's semver string, taken from `Cargo.toml` at build
 /// time. Useful as a sanity check at the language-binding boundaries.

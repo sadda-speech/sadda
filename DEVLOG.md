@@ -6,6 +6,52 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-25 — Typed units + clinical discipline (A2): lightweight unit newtypes, no-silent-fallback error, stable-clinical marking, research-use-only labeling
+
+Second Phase-3 slice (cluster A, clinical substrate). Lands the measurement-discipline substrate the cluster-B clinical measures build on: typed units, an explicit "couldn't compute reliably" error, a stronger API-stability tier for the clinical surface, and research-use-only labeling.
+
+### Design forks settled this session
+
+- **Unit modelling: lightweight newtypes, not the full `uom` crate.** The clinical-regulatory + slicing entries named `uom`; in practice the engine's quantity set is small and the Python surface returns NumPy arrays of plain floats, so `uom`'s verbose `Quantity` types add ceremony without crossing the FFI boundary as numbers anyway. Newtypes make the unit part of the *type* (a signature reads `Hertz`, not `f32`) and unwrap to the primitive at the boundary — 90% of the discipline at 10% of the cost. Full dimensional algebra (catching Hz+seconds) is the part we give up; not worth it for this quantity set.
+- **Retrofit the existing DSP, not just new measures.** Applied now rather than waiting for cluster B.
+
+### What A2 delivers
+
+- **`engine::units`** — `Hertz`, `Decibels`, `Ratio` (f32-backed) and `Seconds` (f64-backed) newtypes: `new` / `value`, `Display` with the unit, ordering for thresholds. The "no bare numbers" substrate.
+- **Retrofit** — `PitchFrame.frequency_hz`, `FormantFrame.frequencies` / `bandwidths` (+ the `Live*Frame` mirrors) → `Hertz`; `IntensityFrame.db_fs` / `MeterFrame.rms_db` (+ live) → `Decibels`. Producers wrap; the PyO3 getters and live callbacks unwrap with `.value()`, so **the Python API is unchanged** (the `.pyi` stub diff is empty) — the type safety is Rust-internal.
+- **No-silent-fallback** — `EngineError::Unreliable { measure, reason }` + `EngineError::unreliable(…)`. A measure on insufficient signal returns this *instead of a guessed number*; mapped to Python `ValueError`.
+- **Stable-for-clinical-use marking** — a `stable_clinical` stability tier (no runtime warning, like `@stable`, but a distinct label `"stable-clinical"` that `get_stability` surfaces) for the stronger change-control the clinical surface needs.
+- **Research-use-only labeling** — an always-visible status-bar notice in the app ("For research, education, and non-diagnostic use only") and an **Intended use** section in the README. Posture 3, never a clinical claim.
+
+### Scope decisions
+
+| Decision | Reasoning |
+|---|---|
+| Units on **frequency + level** only | Hz and dB are the clinically load-bearing, confusion-prone quantities. `time_seconds` stays a bare `f64` (the engine's universal time type — wrapping it everywhere is high-churn, low-value); linear `rms` and `voicing` stay bare (`Seconds` / `Ratio` exist in the module for cluster B) |
+| Python keeps returning floats | Newtypes unwrap at the PyO3/NumPy boundary; no API break, stub unchanged |
+| `Unreliable` carries `measure` + `reason` | Names what failed and why — honest for clinical contexts, no fabricated value |
+
+### What A2 deliberately doesn't ship
+
+- **Full dimensional analysis** — newtypes don't prevent `Hertz + Seconds`; that mixing isn't a realistic risk for this code, and `uom`'s cost wasn't justified.
+- **Per-measure uncertainty quantification** — A2 ships explicit *errors* on bad input; richer "value + uncertainty" returns are deferred (clinical entry).
+- **The regression-test / numerical-drift CI gates** for `stable_clinical` measures — those land *with* cluster B's measures, which are the first things to carry the tier.
+
+### Layout
+
+- `crates/engine/src/units.rs` (new); retrofit in `dsp/{intensity,formants}.rs`, `pitch.rs`, `live/mod.rs`; `error.rs` (`Unreliable`).
+- `crates/python/src/{lib,live}.rs` — getters/callbacks unwrap; `engine_err_to_py` maps `Unreliable`.
+- `python/sadda/_stability.py` + `__init__.py` — `stable_clinical`.
+- `crates/app/src/main.rs` — status-bar RUO notice. `README.md` — Intended use.
+
+### Sources / references
+
+- 2026-05-25 Phase 3 slicing entry (A2 scope); this session's A2 design forks (newtypes; retrofit existing DSP)
+- 2026-05-18 clinical-regulatory-stance entry (commitments: typed units #5, no-silent-fallback #6, stable-API marking #8, RUO labeling #1/#10)
+- 2026-05-21 DSP-method-diversity principle (the measure path the units now type)
+
+---
+
 ## 2026-05-25 — Provenance coverage + citation export (A1): `record_processing_run` backbone, per-bundle timeline, citation registry
 
 First Phase-3 slice (cluster A, clinical substrate). Builds the provenance backbone every later clinical / ML / DSP slice records into, plus citation export. The `processing_run` table + `kind` enum already existed (B1 / V6); A1 adds the unified write path, a per-bundle query, and the citation layer on top.

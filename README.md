@@ -4,6 +4,17 @@
 
 An open-source toolkit for phonetics and speech-science research.
 
+## Intended use
+
+sadda is **for research, education, and non-diagnostic use only.** It is
+not a medical device and makes no diagnostic, therapeutic, or treatment
+claims. Its clinical-style measures (jitter, shimmer, HNR, CPP, AVQI,
+ABI, …) are provided for research and education; they are implemented
+with validation suites and provenance so a downstream entity *could*
+pursue regulatory clearance, but sadda itself is not cleared and takes
+no liability for clinical decisions made with it. "Research use" by
+long convention includes clinical-*research* contexts.
+
 ## Install
 
 ```bash

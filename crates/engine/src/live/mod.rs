@@ -94,7 +94,7 @@ pub struct MeterFrame {
     /// RMS amplitude over the chunk, in `[0, 1]`.
     pub rms: f32,
     /// RMS expressed in dB-FS. Floored at [`DB_FS_FLOOR`].
-    pub rms_db: f32,
+    pub rms_db: crate::units::Decibels,
     /// Time in seconds since the session started.
     pub time_seconds: f64,
 }
@@ -104,8 +104,8 @@ pub struct MeterFrame {
 pub struct LivePitchFrame {
     /// Time in seconds since the session started.
     pub time_seconds: f64,
-    /// Estimated f0 in Hz.
-    pub frequency_hz: f32,
+    /// Estimated f0.
+    pub frequency_hz: crate::units::Hertz,
     /// Voicing strength in `[0, 1]`.
     pub voicing: f32,
 }
@@ -116,7 +116,7 @@ pub struct LiveIntensityFrame {
     /// Time in seconds since the session started.
     pub time_seconds: f64,
     /// dB-FS intensity (floored at [`DB_FS_FLOOR`]).
-    pub db_fs: f32,
+    pub db_fs: crate::units::Decibels,
 }
 
 /// One formants reading emitted once per analysis hop. Variable length —
@@ -126,10 +126,10 @@ pub struct LiveIntensityFrame {
 pub struct LiveFormantsFrame {
     /// Time in seconds since the session started.
     pub time_seconds: f64,
-    /// Formant frequencies in Hz, ascending.
-    pub frequencies: Vec<f32>,
-    /// Bandwidths in Hz, co-indexed with `frequencies`.
-    pub bandwidths: Vec<f32>,
+    /// Formant frequencies, ascending.
+    pub frequencies: Vec<crate::units::Hertz>,
+    /// Bandwidths, co-indexed with `frequencies`.
+    pub bandwidths: Vec<crate::units::Hertz>,
 }
 
 /// The result rtrbs exposed to the dispatch side. Each is a single-consumer
@@ -481,7 +481,7 @@ impl ConsumerCtx {
                     let _ = self.meters.push(MeterFrame {
                         peak,
                         rms,
-                        rms_db,
+                        rms_db: crate::units::Decibels::new(rms_db),
                         time_seconds: meter_time,
                     });
                 }
@@ -588,7 +588,7 @@ fn emit_dsp_frames(
     };
     let _ = intensities.push(LiveIntensityFrame {
         time_seconds: centre_seconds,
-        db_fs,
+        db_fs: crate::units::Decibels::new(db_fs),
     });
 
     // Pitch via single-frame autocorrelation. We can't reuse the public
@@ -609,7 +609,7 @@ fn emit_dsp_frames(
         let frequency_hz = sample_rate as f32 / lag as f32;
         let _ = pitches.push(LivePitchFrame {
             time_seconds: centre_seconds,
-            frequency_hz,
+            frequency_hz: crate::units::Hertz::new(frequency_hz),
             voicing,
         });
     }
@@ -723,7 +723,7 @@ mod tests {
 
         let mut pitch_values = Vec::new();
         while let Ok(p) = results.pitches.pop() {
-            pitch_values.push(p.frequency_hz);
+            pitch_values.push(p.frequency_hz.value());
         }
         assert!(!pitch_values.is_empty(), "expected pitch frames");
         // Median should be very close to 440 Hz.
@@ -756,7 +756,11 @@ mod tests {
         while let Ok(f) = results.intensities.pop() {
             got_any = true;
             // 0.5-amplitude sine: RMS ≈ 0.354 → ~ -9 dB-FS
-            assert!(f.db_fs > -30.0 && f.db_fs < 0.0, "db_fs = {}", f.db_fs);
+            assert!(
+                f.db_fs.value() > -30.0 && f.db_fs.value() < 0.0,
+                "db_fs = {}",
+                f.db_fs
+            );
         }
         assert!(got_any);
         stopped.discard().unwrap();
