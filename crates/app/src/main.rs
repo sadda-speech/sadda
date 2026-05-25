@@ -188,6 +188,9 @@ struct ProvenanceView {
     name: String,
     runs: Vec<sadda_engine::ProcessingRunRow>,
     citations: Vec<sadda_engine::Citation>,
+    /// A3: the bundle's resolved calibration, if any. Drives the
+    /// "levels are dB-SPL vs dB-FS" line.
+    calibration: Option<sadda_engine::Calibration>,
 }
 
 /// H1: identifies a bundle the user has requested be deleted,
@@ -883,10 +886,14 @@ impl SaddaApp {
             Ok(c) => c,
             Err(e) => return self.set_error(format!("Failed to load citations: {e}")),
         };
+        // A3: a failed calibration lookup is non-fatal — treat as
+        // uncalibrated rather than blocking the whole view.
+        let calibration = project.bundle_calibration(bundle_id).ok().flatten();
         self.provenance = Some(ProvenanceView {
             name,
             runs,
             citations,
+            calibration,
         });
     }
 
@@ -905,6 +912,20 @@ impl SaddaApp {
             .resizable(true)
             .default_width(560.0)
             .show(ctx, |ui| {
+                // A3: calibration status — are levels absolute dB-SPL or
+                // relative dB-FS?
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Levels:").strong());
+                    match &view.calibration {
+                        Some(c) => ui.label(format!(
+                            "calibrated — dB-SPL (+{:.1} dB from dB-FS)",
+                            c.spl_offset_db()
+                        )),
+                        None => ui.label(egui::RichText::new("uncalibrated — dB-FS only").weak()),
+                    };
+                });
+                ui.separator();
+
                 ui.label(egui::RichText::new("Processing runs").strong());
                 if view.runs.is_empty() {
                     ui.label(egui::RichText::new("(no recorded analyses yet)").weak());

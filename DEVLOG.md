@@ -6,6 +6,50 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-25 — Instrument calibration + calibrated SPL (A3): Instrument CRUD, reference-pair calibration, bundle→session→instrument resolution
+
+Third Phase-3 slice, and the last of **cluster A (clinical substrate)**. Adds the calibration path that turns the engine's relative dB-FS readings into absolute dB-SPL — a precondition for clinically meaningful intensity, which the cluster-B measures will consume.
+
+### What A3 delivers
+
+- **`Calibration`** — a flat single-offset model: a reference tone of known SPL recorded at a measured dB-FS pins `offset = reference_spl_db − reference_db_fs`. The reference *pair* is stored (not just the offset) so the calibration is auditable. `spl_offset_db()` + `to_spl(Decibels) -> Decibels`.
+- **Instrument CRUD** — the `instrument` table existed (B1, schema-only); A3 adds `Instrument` / `InstrumentSpec` + `add_instrument` / `instruments` / `get_instrument`. `Calibration` is serialized as JSON into the existing generic `calibration TEXT` column.
+- **`Project::bundle_calibration(bundle_id)`** — resolves a bundle's calibration by walking **bundle → session → instrument** (sessions already carried `instrument_id`; this is the first code to populate and read instruments). `None` = levels are dB-FS only.
+- **Three surfaces** — Python `Instrument` / `Calibration` classes (`Calibration(reference_spl_db=…, reference_db_fs=…)`, `.to_spl(db_fs)`) + the CRUD + `bundle_calibration`; GUI shows a **Levels: calibrated (dB-SPL, +X dB) / uncalibrated (dB-FS only)** line in the bundle provenance modal.
+
+### Design decisions
+
+| Decision | Reasoning |
+|---|---|
+| Store `Calibration` as **JSON in the existing `calibration TEXT` column** | No V8 migration, and no audit-trigger rebuild (the B1 discipline: any `ALTER` on an audited table must drop+recreate its 3 triggers). Added `serde` + `serde_json` to the engine — both already in the lock tree |
+| **Single-offset** calibration model | The foundational dB-FS→dB-SPL mapping; frequency-response curves (the clinical entry's richer form) are deferred until a real consumer needs them |
+| Store the **reference pair**, not just the derived offset | Auditable — clinical provenance wants "how was this calibrated," not just the number |
+| GUI surface = a line in the **provenance modal** | Calibration is "how these levels were measured" — provenance-adjacent. Avoids per-frame DB queries (the modal loads a one-shot snapshot) |
+| Lenient calibration parse | A null/legacy/unparseable `calibration` value reads as `None` (uncalibrated), never fails the whole instrument query |
+
+### What A3 deliberately doesn't ship
+
+- **Frequency-response curves / per-frequency calibration** — single broadband offset only for now.
+- **A full instrument-management GUI** and a **calibrated-SPL display** — there's no intensity track in the GUI yet, so SPL has no plot to render into. Instrument setup is via the Python API / script for now; the management UI + SPL display ride with the cluster-B intensity measure and the cluster-D overlays.
+
+### Cluster A is complete
+
+A1 (provenance) + A2 (units + discipline) + A3 (calibration) close the clinical substrate. **Next is cluster B (clinical algorithms)** — jitter/shimmer/HNR/CPP/AVQI/ABI — which is gated on the prerequisite **clinical validation-references** design entry (pick the reference implementation + values per measure; the slicing entry flagged it must precede B4).
+
+### Layout
+
+- `crates/engine/src/corpus.rs` — `Calibration`, `Instrument`, `InstrumentSpec`, `add_instrument` / `instruments` / `get_instrument`, `bundle_calibration`. `crates/engine/Cargo.toml` — `serde` + `serde_json`.
+- `crates/python/src/lib.rs` — `PyCalibration` (`from_py_object`) + `PyInstrument` + the methods.
+- `crates/app/src/main.rs` — calibration line in `ProvenanceView`.
+
+### Sources / references
+
+- 2026-05-25 Phase 3 slicing entry (A3 scope; cluster-B gating on validation-references)
+- 2026-05-18 clinical-regulatory-stance entry (commitment #4: calibrated SPL + mic profiles on the Instrument entity)
+- 2026-05-18 corpus-data-model entry (the `instrument` table + session→instrument link)
+
+---
+
 ## 2026-05-25 — Typed units + clinical discipline (A2): lightweight unit newtypes, no-silent-fallback error, stable-clinical marking, research-use-only labeling
 
 Second Phase-3 slice (cluster A, clinical substrate). Lands the measurement-discipline substrate the cluster-B clinical measures build on: typed units, an explicit "couldn't compute reliably" error, a stronger API-stability tier for the clinical surface, and research-use-only labeling.

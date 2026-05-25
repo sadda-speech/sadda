@@ -17,9 +17,10 @@ pub mod units;
 pub use audio::Audio;
 pub use citation::{Citation, citation_for};
 pub use corpus::{
-    Bundle, BundleSpec, DerivedSignal, Interval, IntervalSpec, Point, PointSpec, ProcessingRunKind,
-    ProcessingRunRow, ProcessingRunSpec, ProcessingRunStatus, Project, RecipeRun, Reference,
-    ReferenceSpec, Session, SessionSpec, Speaker, SpeakerSpec, Tier, TierRows, TierSpec, TierType,
+    Bundle, BundleSpec, Calibration, DerivedSignal, Instrument, InstrumentSpec, Interval,
+    IntervalSpec, Point, PointSpec, ProcessingRunKind, ProcessingRunRow, ProcessingRunSpec,
+    ProcessingRunStatus, Project, RecipeRun, Reference, ReferenceSpec, Session, SessionSpec,
+    Speaker, SpeakerSpec, Tier, TierRows, TierSpec, TierType,
 };
 pub use error::{EngineError, Result};
 pub use live::{

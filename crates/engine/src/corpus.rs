@@ -172,6 +172,85 @@ impl SessionSpec {
     }
 }
 
+/// Microphone / signal-chain calibration that maps the engine's
+/// relative dB-FS readings to absolute dB-SPL (re 20 µPa).
+///
+/// A flat single-offset model (A3): a calibration tone of known SPL is
+/// recorded, and the dB-FS the engine measures for it pins the offset —
+/// `offset = reference_spl_db − reference_db_fs`, added to any dB-FS
+/// reading to get dB-SPL. The reference *pair* is stored (not just the
+/// derived offset) so the calibration is auditable. Frequency-response
+/// curves are a later refinement. Serialized as JSON in
+/// `instrument.calibration`.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Calibration {
+    /// SPL of the calibration tone, in dB-SPL (e.g. `94.0` from a
+    /// class-1 acoustic calibrator).
+    pub reference_spl_db: f64,
+    /// dB-FS the engine measured for that same tone.
+    pub reference_db_fs: f64,
+}
+
+impl Calibration {
+    /// The offset added to a dB-FS reading to obtain dB-SPL.
+    pub fn spl_offset_db(&self) -> f64 {
+        self.reference_spl_db - self.reference_db_fs
+    }
+
+    /// Converts a relative dB-FS intensity to calibrated dB-SPL.
+    pub fn to_spl(&self, db_fs: crate::units::Decibels) -> crate::units::Decibels {
+        crate::units::Decibels::new(db_fs.value() + self.spl_offset_db() as f32)
+    }
+}
+
+/// A capture instrument (microphone, preamp, audio interface) with its
+/// optional calibration. Mirrors the `instrument` table; the schema's
+/// generic `calibration TEXT` column holds [`Calibration`] as JSON.
+#[derive(Debug, Clone)]
+pub struct Instrument {
+    /// Instrument id (primary key).
+    pub id: i64,
+    /// Human-readable name.
+    pub name: String,
+    /// Free-form kind label (e.g. `"microphone"`, `"interface"`).
+    pub kind: Option<String>,
+    /// Serial number.
+    pub serial: Option<String>,
+    /// Calibration, if the instrument has been calibrated. `None` when
+    /// the column is null or holds an unparseable legacy value.
+    pub calibration: Option<Calibration>,
+    /// Freeform JSON payload.
+    pub extra: Option<String>,
+    /// ISO 8601 UTC creation timestamp.
+    pub created_at: String,
+}
+
+/// Fields for creating an [`Instrument`]. Use [`InstrumentSpec::new`]
+/// for the common name-only case.
+#[derive(Debug, Clone, Default)]
+pub struct InstrumentSpec {
+    /// Name (required).
+    pub name: String,
+    /// Kind label.
+    pub kind: Option<String>,
+    /// Serial number.
+    pub serial: Option<String>,
+    /// Calibration, if known at creation time.
+    pub calibration: Option<Calibration>,
+    /// JSON `extra`.
+    pub extra: Option<String>,
+}
+
+impl InstrumentSpec {
+    /// Builds a spec with only the required name field populated.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+}
+
 /// Optional fields for creating a [`Bundle`]. Use [`BundleSpec::new`] for
 /// the common `name`-only case.
 #[derive(Debug, Clone, Default)]
@@ -1003,6 +1082,85 @@ impl Project {
             },
         )?;
         Ok(session)
+    }
+
+    /// Inserts an [`Instrument`] row. Returns the new instrument's id.
+    /// The [`Calibration`], if any, is serialized to JSON in the
+    /// `calibration` column.
+    pub fn add_instrument(&self, spec: &InstrumentSpec) -> Result<i64> {
+        let cal_json = match &spec.calibration {
+            Some(c) => Some(
+                serde_json::to_string(c)
+                    .map_err(|e| EngineError::Corpus(format!("calibration serialize: {e}")))?,
+            ),
+            None => None,
+        };
+        let id: i64 = self.conn.query_row(
+            "INSERT INTO instrument (name, kind, serial, calibration, extra) \
+             VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
+            rusqlite::params![spec.name, spec.kind, spec.serial, cal_json, spec.extra],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// Lists all instruments in id order.
+    pub fn instruments(&self) -> Result<Vec<Instrument>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, kind, serial, calibration, extra, created_at \
+             FROM instrument ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([], Self::row_to_instrument)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Fetches a single instrument by id.
+    pub fn get_instrument(&self, id: i64) -> Result<Instrument> {
+        let instrument = self.conn.query_row(
+            "SELECT id, name, kind, serial, calibration, extra, created_at \
+             FROM instrument WHERE id = ?1",
+            [id],
+            Self::row_to_instrument,
+        )?;
+        Ok(instrument)
+    }
+
+    /// Maps a `instrument` row to [`Instrument`], leniently parsing the
+    /// calibration JSON (an unparseable/legacy value reads as `None`
+    /// rather than failing the whole query).
+    fn row_to_instrument(row: &rusqlite::Row<'_>) -> rusqlite::Result<Instrument> {
+        let cal_text: Option<String> = row.get(4)?;
+        Ok(Instrument {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            kind: row.get(2)?,
+            serial: row.get(3)?,
+            calibration: cal_text.and_then(|s| serde_json::from_str(&s).ok()),
+            extra: row.get(5)?,
+            created_at: row.get(6)?,
+        })
+    }
+
+    /// Resolves a bundle's calibration by walking
+    /// bundle → session → instrument. Returns `None` if the bundle has
+    /// no session, the session no instrument, or the instrument no
+    /// calibration — i.e. levels for that bundle are dB-FS only.
+    pub fn bundle_calibration(&self, bundle_id: i64) -> Result<Option<Calibration>> {
+        let cal_text: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT i.calibration FROM bundle b \
+                 JOIN session s ON b.session_id = s.id \
+                 JOIN instrument i ON s.instrument_id = i.id \
+                 WHERE b.id = ?1",
+                [bundle_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(cal_text.and_then(|s| serde_json::from_str(&s).ok()))
     }
 
     /// Returns the user string written into `audit_log.user` for any mutation
@@ -3259,6 +3417,56 @@ mod tests {
         assert!(cites[1].reference.contains("Davis"));
 
         let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn instrument_calibration_roundtrips_and_resolves_via_bundle() {
+        let root = unique_dir("instrument_cal");
+        let _ = std::fs::remove_dir_all(&root);
+        let wav =
+            std::env::temp_dir().join(format!("sadda_engine_cal_a_{}.wav", std::process::id()));
+        let wav2 =
+            std::env::temp_dir().join(format!("sadda_engine_cal_b_{}.wav", std::process::id()));
+        write_short_wav(&wav, 16_000);
+        write_short_wav(&wav2, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+
+        // A 94 dB-SPL calibration tone read -20 dB-FS → +114 dB offset.
+        let cal = Calibration {
+            reference_spl_db: 94.0,
+            reference_db_fs: -20.0,
+        };
+        let mut ispec = InstrumentSpec::new("B&K 4189");
+        ispec.kind = Some("microphone".into());
+        ispec.calibration = Some(cal);
+        let instrument_id = project.add_instrument(&ispec).unwrap();
+
+        // Round-trips through the calibration JSON column.
+        let got = project.get_instrument(instrument_id).unwrap();
+        assert_eq!(got.name, "B&K 4189");
+        assert_eq!(got.calibration, Some(cal));
+        assert!((cal.spl_offset_db() - 114.0).abs() < 1e-9);
+        // -26 dB-FS + 114 → 88 dB-SPL.
+        assert!((cal.to_spl(crate::units::Decibels::new(-26.0)).value() - 88.0).abs() < 1e-4);
+
+        // bundle → session → instrument resolves the calibration.
+        let mut sspec = SessionSpec::new("s1");
+        sspec.instrument_id = Some(instrument_id);
+        let session_id = project.add_session(&sspec).unwrap();
+        let mut bspec = BundleSpec::new("greeting");
+        bspec.session_id = Some(session_id);
+        let calibrated = project.add_bundle_with(&bspec, &wav).unwrap();
+        assert_eq!(project.bundle_calibration(calibrated).unwrap(), Some(cal));
+
+        // A bundle with no session is uncalibrated (dB-FS only).
+        let plain = project.add_bundle("plain", &wav2).unwrap();
+        assert_eq!(project.bundle_calibration(plain).unwrap(), None);
+        assert_eq!(project.bundle_calibration(9_999).unwrap(), None);
+
+        let _ = std::fs::remove_file(&wav);
+        let _ = std::fs::remove_file(&wav2);
         let _ = std::fs::remove_dir_all(&root);
     }
 

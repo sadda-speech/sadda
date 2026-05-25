@@ -26,9 +26,11 @@ from sadda._stability import (
 __all__ = [
     "Audio",
     "Bundle",
+    "Calibration",
     "Citation",
     "DerivedSignal",
     "ExperimentalAPIWarning",
+    "Instrument",
     "Interval",
     "Point",
     "ProcessingRun",
@@ -79,6 +81,10 @@ DerivedSignal = stable(_native.DerivedSignal)
 # A1 surface (Phase 3) — provenance timeline + citation export.
 ProcessingRun = stable(_native.ProcessingRun)
 Citation = stable(_native.Citation)
+
+# A3 surface (Phase 3) — instrument calibration + calibrated SPL.
+Instrument = stable(_native.Instrument)
+Calibration = stable(_native.Calibration)
 
 
 def _project_query(self, tier_id):
