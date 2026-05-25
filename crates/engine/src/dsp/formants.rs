@@ -32,10 +32,10 @@ use crate::dsp::windowing::hann;
 pub struct FormantFrame {
     /// Time at the centre of the analysis frame, in seconds.
     pub time_seconds: f64,
-    /// Formant frequencies in Hz, ascending.
-    pub frequencies: Vec<f32>,
-    /// Bandwidths in Hz, co-indexed with `frequencies`.
-    pub bandwidths: Vec<f32>,
+    /// Formant frequencies, ascending.
+    pub frequencies: Vec<crate::units::Hertz>,
+    /// Bandwidths, co-indexed with `frequencies`.
+    pub bandwidths: Vec<crate::units::Hertz>,
 }
 
 /// Configuration for [`formants`].
@@ -188,8 +188,14 @@ pub fn formants(samples: &[f32], sample_rate: u32, config: &FormantsConfig) -> V
         candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         candidates.truncate(config.n_formants);
 
-        let frequencies: Vec<f32> = candidates.iter().map(|(f, _)| *f).collect();
-        let bandwidths: Vec<f32> = candidates.iter().map(|(_, b)| *b).collect();
+        let frequencies: Vec<crate::units::Hertz> = candidates
+            .iter()
+            .map(|(f, _)| crate::units::Hertz::new(*f))
+            .collect();
+        let bandwidths: Vec<crate::units::Hertz> = candidates
+            .iter()
+            .map(|(_, b)| crate::units::Hertz::new(*b))
+            .collect();
         out.push(FormantFrame {
             time_seconds,
             frequencies,
@@ -278,7 +284,7 @@ mod tests {
         );
         for (i, &target) in expected.iter().enumerate() {
             assert!(
-                (mid.frequencies[i] - target).abs() < 120.0,
+                (mid.frequencies[i].value() - target).abs() < 120.0,
                 "formant {}: got {} Hz, expected ~{} Hz; full freqs {:?}",
                 i + 1,
                 mid.frequencies[i],
@@ -326,7 +332,7 @@ mod tests {
         );
         for (i, &target) in expected.iter().enumerate() {
             assert!(
-                (mid.frequencies[i] - target).abs() < 200.0,
+                (mid.frequencies[i].value() - target).abs() < 200.0,
                 "autocorr formant {}: got {}, expected {}",
                 i + 1,
                 mid.frequencies[i],

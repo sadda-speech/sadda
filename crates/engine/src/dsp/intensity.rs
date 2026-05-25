@@ -18,10 +18,11 @@ pub struct IntensityFrame {
     /// Time at the center of the analysis frame, in seconds.
     pub time_seconds: f64,
     /// Linear RMS amplitude over the frame: `sqrt(mean(samples²))`.
+    /// Dimensionless (left as a bare `f32`).
     pub rms: f32,
     /// dB-FS: `20 * log10(rms)`. Clamped to [`DB_FS_FLOOR`] for silent
     /// frames so callers don't have to special-case `-∞`.
-    pub db_fs: f32,
+    pub db_fs: crate::units::Decibels,
 }
 
 /// Floor for dB-FS to avoid `-inf` on completely silent frames.
@@ -66,7 +67,7 @@ pub fn intensity(
         out.push(IntensityFrame {
             time_seconds: start as f64 / sample_rate as f64 + half_frame_seconds,
             rms,
-            db_fs,
+            db_fs: crate::units::Decibels::new(db_fs),
         });
     }
     out
@@ -100,7 +101,7 @@ mod tests {
         );
         // 20 * log10(1/√2) = -3.0103 dB.
         assert!(
-            (mid.db_fs - (-3.0103)).abs() < 0.1,
+            (mid.db_fs.value() - (-3.0103)).abs() < 0.1,
             "got db_fs={}",
             mid.db_fs
         );
@@ -115,7 +116,7 @@ mod tests {
         assert!(!frames.is_empty());
         for f in &frames {
             assert_eq!(f.rms, 0.0);
-            assert_eq!(f.db_fs, DB_FS_FLOOR);
+            assert_eq!(f.db_fs.value(), DB_FS_FLOOR);
         }
     }
 

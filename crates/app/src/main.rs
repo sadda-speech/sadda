@@ -1151,7 +1151,7 @@ impl SaddaApp {
             if let RecordDialogState::Recording(handle) = &mut dialog.state {
                 let mut latest_peak = dialog.meter_db;
                 while let Ok(m) = handle.results.meters.pop() {
-                    latest_peak = m.rms_db;
+                    latest_peak = m.rms_db.value();
                 }
                 while handle.results.pitches.pop().is_ok() {}
                 while handle.results.intensities.pop().is_ok() {}
@@ -2181,12 +2181,20 @@ impl eframe::App for SaddaApp {
 
         egui::Panel::top("menu").show_inside(ui, |ui| self.menu_bar(ui));
 
-        if let AppState::ProjectLoaded { name, root, .. } = &self.app_state {
-            let label = format!("Project: {name}  ·  {}", root.display());
-            egui::Panel::bottom("status").show_inside(ui, |ui| {
-                ui.label(label);
+        egui::Panel::bottom("status").show_inside(ui, |ui| {
+            ui.horizontal(|ui| {
+                if let AppState::ProjectLoaded { name, root, .. } = &self.app_state {
+                    ui.label(format!("Project: {name}  ·  {}", root.display()));
+                    ui.separator();
+                }
+                // Research-use-only labeling (clinical-regulatory posture 3,
+                // Phase 3 A2): always visible, never a clinical claim.
+                ui.label(
+                    egui::RichText::new("For research, education, and non-diagnostic use only")
+                        .weak(),
+                );
             });
-        }
+        });
 
         if let Some(msg) = self.error.clone() {
             egui::Panel::bottom("error").show_inside(ui, |ui| {

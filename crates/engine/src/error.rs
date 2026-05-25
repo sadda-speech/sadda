@@ -69,8 +69,49 @@ pub enum EngineError {
         /// Filesystem path to the `.sadda-lock` file.
         lockfile_path: std::path::PathBuf,
     },
+
+    /// A measurement could not be computed reliably on the given input
+    /// (insufficient signal, out-of-range parameters, no voiced frames,
+    /// …). Returned *instead of* a guessed number — the no-silent-
+    /// fallback discipline for clinical-path measures from the
+    /// 2026-05-18 clinical-regulatory entry. Clinical measures return
+    /// this rather than a fabricated value when their preconditions
+    /// aren't met.
+    #[error("measure '{measure}' could not be computed reliably: {reason}")]
+    Unreliable {
+        /// The measure that couldn't be computed (e.g. `"cpps"`).
+        measure: String,
+        /// Why it couldn't be computed reliably.
+        reason: String,
+    },
+}
+
+impl EngineError {
+    /// Builds an [`EngineError::Unreliable`] for a clinical-path measure
+    /// whose preconditions weren't met. Use this instead of returning a
+    /// guessed value.
+    pub fn unreliable(measure: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::Unreliable {
+            measure: measure.into(),
+            reason: reason.into(),
+        }
+    }
 }
 
 /// Convenience alias for `Result<T, EngineError>`, mirroring the std lib's
 /// `io::Result` convention.
 pub type Result<T> = std::result::Result<T, EngineError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unreliable_names_the_measure_and_reason() {
+        let e = EngineError::unreliable("cpps", "no voiced frames in selection");
+        assert!(matches!(e, EngineError::Unreliable { .. }));
+        let msg = e.to_string();
+        assert!(msg.contains("cpps"));
+        assert!(msg.contains("no voiced frames"));
+    }
+}

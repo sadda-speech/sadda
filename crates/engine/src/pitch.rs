@@ -94,10 +94,10 @@ impl Default for PitchConfig {
 pub struct PitchFrame {
     /// Centre time of the analysis frame, in seconds from the start of the audio.
     pub time_seconds: f64,
-    /// Estimated f0 in Hz. For silent / unvoiced frames the lag still
+    /// Estimated f0. For silent / unvoiced frames the lag still
     /// maximises *some* function so a frequency is reported; filter by
     /// `voicing` to discard unreliable estimates.
-    pub frequency_hz: f32,
+    pub frequency_hz: crate::units::Hertz,
     /// Voicing strength in `[0, 1]`. For [`autocorrelation`] this is
     /// `R(τ_best) / R(0)`; for [`autocorrelation_boersma`] this is the
     /// window-corrected normalised peak height. Closer to 1 = more clearly
@@ -143,7 +143,7 @@ pub fn autocorrelation(audio: &Audio, config: &PitchConfig) -> Vec<PitchFrame> {
         let time_seconds = (start + frame_size / 2) as f64 / audio.sample_rate as f64;
         frames.push(PitchFrame {
             time_seconds,
-            frequency_hz,
+            frequency_hz: crate::units::Hertz::new(frequency_hz),
             voicing: voicing.clamp(0.0, 1.0),
         });
         start += hop_size;
@@ -287,7 +287,7 @@ pub fn windowed_autocorrelation(audio: &Audio, config: &PitchConfig) -> Vec<Pitc
         let time_seconds = (start + frame_size / 2) as f64 / audio.sample_rate as f64;
         frames.push(PitchFrame {
             time_seconds,
-            frequency_hz,
+            frequency_hz: crate::units::Hertz::new(frequency_hz),
             voicing,
         });
         start += hop_size;
@@ -351,10 +351,10 @@ mod tests {
         assert!(!frames.is_empty(), "expected at least one frame");
         for f in &frames {
             assert!(
-                (f.frequency_hz - 440.0).abs() < 10.0,
+                (f.frequency_hz.value() - 440.0).abs() < 10.0,
                 "frame at t={:.3}s reported {:.1} Hz, expected ~440",
                 f.time_seconds,
-                f.frequency_hz
+                f.frequency_hz.value()
             );
         }
     }
@@ -367,10 +367,10 @@ mod tests {
         assert!(!frames.is_empty());
         for f in &frames {
             assert!(
-                (f.frequency_hz - 100.0).abs() < 2.0,
+                (f.frequency_hz.value() - 100.0).abs() < 2.0,
                 "frame at t={:.3}s reported {:.1} Hz, expected ~100",
                 f.time_seconds,
-                f.frequency_hz
+                f.frequency_hz.value()
             );
         }
     }
@@ -385,7 +385,7 @@ mod tests {
 
         assert_eq!(f_mono.len(), f_stereo.len());
         for (a, b) in f_mono.iter().zip(f_stereo.iter()) {
-            assert!((a.frequency_hz - b.frequency_hz).abs() < 0.01);
+            assert!((a.frequency_hz.value() - b.frequency_hz.value()).abs() < 0.01);
             assert!((a.time_seconds - b.time_seconds).abs() < 1e-9);
         }
     }
@@ -439,9 +439,9 @@ mod tests {
         assert!(!frames.is_empty());
         let mid = &frames[frames.len() / 2];
         assert!(
-            (mid.frequency_hz - 220.0).abs() < 1.0,
+            (mid.frequency_hz.value() - 220.0).abs() < 1.0,
             "windowed_autocorrelation: got {} Hz, expected ~220",
-            mid.frequency_hz
+            mid.frequency_hz.value()
         );
         assert!(
             mid.voicing > 0.7,
@@ -468,8 +468,8 @@ mod tests {
         let b = pitch(&audio, &cfg, PitchMethod::WindowedAutocorrelation);
         // Both should detect 220 Hz; the methods don't have to agree to the
         // last decimal but must be within reasonable tolerance of each other.
-        let mid_a = a[a.len() / 2].frequency_hz;
-        let mid_b = b[b.len() / 2].frequency_hz;
+        let mid_a = a[a.len() / 2].frequency_hz.value();
+        let mid_b = b[b.len() / 2].frequency_hz.value();
         assert!(
             (mid_a - 220.0).abs() < 10.0,
             "autocorr midpoint = {}",

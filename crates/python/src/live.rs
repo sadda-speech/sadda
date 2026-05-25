@@ -61,29 +61,28 @@ impl DispatchState {
                 while let Ok(m) = self.results.meters.pop() {
                     did_work = true;
                     if let Some(cb) = cbs.meter.as_ref() {
-                        let _ = cb.call1(py, (m.peak, m.rms, m.rms_db, m.time_seconds));
+                        let _ = cb.call1(py, (m.peak, m.rms, m.rms_db.value(), m.time_seconds));
                     }
                 }
                 while let Ok(p) = self.results.pitches.pop() {
                     did_work = true;
                     if let Some(cb) = cbs.pitch.as_ref() {
                         let voiced = p.voicing >= 0.45;
-                        let _ = cb.call1(py, (p.frequency_hz, voiced, p.time_seconds));
+                        let _ = cb.call1(py, (p.frequency_hz.value(), voiced, p.time_seconds));
                     }
                 }
                 while let Ok(i) = self.results.intensities.pop() {
                     did_work = true;
                     if let Some(cb) = cbs.intensity.as_ref() {
-                        let _ = cb.call1(py, (i.db_fs, i.time_seconds));
+                        let _ = cb.call1(py, (i.db_fs.value(), i.time_seconds));
                     }
                 }
                 while let Ok(f) = self.results.formants.pop() {
                     did_work = true;
                     if let Some(cb) = cbs.formants.as_ref() {
-                        let _ = cb.call1(
-                            py,
-                            (f.frequencies.clone(), f.bandwidths.clone(), f.time_seconds),
-                        );
+                        let freqs: Vec<f32> = f.frequencies.iter().map(|h| h.value()).collect();
+                        let bws: Vec<f32> = f.bandwidths.iter().map(|h| h.value()).collect();
+                        let _ = cb.call1(py, (freqs, bws, f.time_seconds));
                     }
                 }
             });

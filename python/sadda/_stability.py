@@ -22,6 +22,7 @@ __all__ = [
     "ProvisionalAPIWarning",
     "ExperimentalAPIWarning",
     "stable",
+    "stable_clinical",
     "provisional",
     "experimental",
     "get_stability",
@@ -161,5 +162,11 @@ def _make_decorator(
 
 
 stable = _make_decorator(None, "stable", "stable")
+# "stable-clinical": stable, plus the stronger change-control discipline the
+# clinical surface requires (regression-tested, numerically pinned). Like
+# @stable it emits no runtime warning; the distinct tier lets tooling and the
+# `get_stability` introspection flag the clinical contract. Per the
+# 2026-05-18 clinical-regulatory entry (commitment #8) and Phase 3 A2.
+stable_clinical = _make_decorator(None, "stable-clinical", "stable")
 provisional = _make_decorator(ProvisionalAPIWarning, "provisional", "provisional")
 experimental = _make_decorator(ExperimentalAPIWarning, "experimental", "experimental")
