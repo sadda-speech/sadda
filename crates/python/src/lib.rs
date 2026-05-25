@@ -1990,6 +1990,28 @@ fn perturbation(
         .map_err(engine_err_to_py)
 }
 
+/// Mean harmonics-to-noise ratio (dB) of a sustained phonation, via the
+/// Boersma-1993 cross-correlation method (Praat's `To Harmonicity
+/// (cc)`). Raises `ValueError` if the signal is too short or silent.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (audio, *, pitch_floor_hz=75.0, pitch_ceiling_hz=600.0, hop_seconds=0.01))]
+fn hnr(
+    audio: &PyAudio,
+    pitch_floor_hz: f32,
+    pitch_ceiling_hz: f32,
+    hop_seconds: f32,
+) -> PyResult<f32> {
+    let cfg = sadda_engine::HnrConfig {
+        pitch_floor_hz,
+        pitch_ceiling_hz,
+        hop_seconds,
+    };
+    sadda_engine::hnr(&audio.inner, &cfg)
+        .map(|d| d.value())
+        .map_err(engine_err_to_py)
+}
+
 /// sadda._native — Rust extension submodule. End users should `import sadda`
 /// and use the decorated re-exports in `sadda.__init__` rather than reaching
 /// in here directly.
@@ -2011,6 +2033,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(formants, m)?)?;
     m.add_function(wrap_pyfunction!(mfcc, m)?)?;
     m.add_function(wrap_pyfunction!(perturbation, m)?)?;
+    m.add_function(wrap_pyfunction!(hnr, m)?)?;
     m.add_function(wrap_pyfunction!(new_project, m)?)?;
     m.add_function(wrap_pyfunction!(open_project, m)?)?;
     m.add_class::<PyAudio>()?;

@@ -209,6 +209,100 @@ fn shimmer_db(amps: &[f64]) -> f64 {
     s / (amps.len() - 1) as f64
 }
 
+/// Configuration for [`hnr`].
+#[derive(Debug, Clone)]
+pub struct HnrConfig {
+    /// Lowest f0 to consider, in Hz (sets the longest lag / window).
+    pub pitch_floor_hz: f32,
+    /// Highest f0 to consider, in Hz (sets the shortest lag).
+    pub pitch_ceiling_hz: f32,
+    /// Frame advance, in seconds.
+    pub hop_seconds: f32,
+}
+
+impl Default for HnrConfig {
+    fn default() -> Self {
+        Self {
+            pitch_floor_hz: 75.0,
+            pitch_ceiling_hz: 600.0,
+            hop_seconds: 0.01,
+        }
+    }
+}
+
+/// Mean harmonics-to-noise ratio (dB) of a sustained phonation, via the
+/// Boersma-1993 **cross-correlation** method (Praat's `To Harmonicity
+/// (cc)`).
+///
+/// Per frame, the maximum normalized cross-correlation `r` over the
+/// pitch lag range gives `HNR = 10·log10(r / (1 − r))`; the mean is
+/// taken over non-silent frames. The geometric-mean energy
+/// normalization `r(τ) = Σ x_i x_{i+τ} / √(Σ x_i² · Σ x_{i+τ}²)` is what
+/// makes this track Praat near `r → 1`, where the pitch tracker's
+/// window-corrected voicing over-reads badly. [`EngineError::Unreliable`]
+/// if the signal is too short or wholly silent.
+pub fn hnr(audio: &Audio, config: &HnrConfig) -> Result<Decibels> {
+    let sr = audio.sample_rate as f32;
+    let x: Vec<f64> = audio.mono_samples().map(|s| s as f64).collect();
+    let n = x.len();
+    let min_lag = (sr / config.pitch_ceiling_hz).round() as usize;
+    let max_lag = (sr / config.pitch_floor_hz).round() as usize;
+    let win = max_lag.max(1); // comparison window ≥ one floor-period
+    let hop = ((config.hop_seconds * sr) as usize).max(1);
+    if min_lag < 1 || max_lag <= min_lag || n < win + max_lag {
+        return Err(EngineError::unreliable(
+            "hnr",
+            "signal too short for the requested pitch range",
+        ));
+    }
+
+    let frame_energy = |s: usize| -> f64 { x[s..s + win].iter().map(|v| v * v).sum() };
+
+    // Silence gate at 1% of the strongest frame's energy.
+    let mut max_e = 0.0_f64;
+    let mut s = 0;
+    while s + win + max_lag <= n {
+        max_e = max_e.max(frame_energy(s));
+        s += hop;
+    }
+    let silence = 0.01 * max_e;
+
+    let mut sum = 0.0_f64;
+    let mut count = 0usize;
+    s = 0;
+    while s + win + max_lag <= n {
+        let e0 = frame_energy(s);
+        if e0 <= silence {
+            s += hop;
+            continue;
+        }
+        let mut best_r = 0.0_f64;
+        for tau in min_lag..=max_lag {
+            let mut cc = 0.0_f64;
+            let mut e1 = 0.0_f64;
+            for i in 0..win {
+                let b = x[s + i + tau];
+                cc += x[s + i] * b;
+                e1 += b * b;
+            }
+            if e1 > 0.0 {
+                let r = cc / (e0 * e1).sqrt();
+                if r > best_r {
+                    best_r = r;
+                }
+            }
+        }
+        let r = best_r.clamp(1e-6, 1.0 - 1e-6);
+        sum += 10.0 * (r / (1.0 - r)).log10();
+        count += 1;
+        s += hop;
+    }
+    if count == 0 {
+        return Err(EngineError::unreliable("hnr", "no non-silent frames"));
+    }
+    Ok(Decibels::new((sum / count as f64) as f32))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

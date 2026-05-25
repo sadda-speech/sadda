@@ -30,6 +30,7 @@ __all__ = [
     "gaussian",
     "hamming",
     "hann",
+    "hnr",
     "intensity",
     "kaiser",
     "load_wav",
@@ -987,6 +988,13 @@ def hamming(n: builtins.int) -> numpy.typing.NDArray[numpy.float32]:
 def hann(n: builtins.int) -> numpy.typing.NDArray[numpy.float32]:
     r"""
     Hann window: `0.5 * (1 - cos(2π n / (N-1)))`.
+    """
+
+def hnr(audio: Audio, *, pitch_floor_hz: builtins.float = 75.0, pitch_ceiling_hz: builtins.float = 600.0, hop_seconds: builtins.float = 0.009999999776482582) -> builtins.float:
+    r"""
+    Mean harmonics-to-noise ratio (dB) of a sustained phonation, via the
+    Boersma-1993 cross-correlation method (Praat's `To Harmonicity
+    (cc)`). Raises `ValueError` if the signal is too short or silent.
     """
 
 def intensity(audio: Audio, *, frame_size_seconds: builtins.float = 0.029999999329447746, hop_seconds: builtins.float = 0.009999999776482582) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float32], numpy.typing.NDArray[numpy.float32]]:

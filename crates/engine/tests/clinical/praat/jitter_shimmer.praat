@@ -25,7 +25,7 @@ out$ = fixtures_dir$ + "/praat_golden.tsv"
 writeFileLine: out$,
     ... "signal", tab$, "jitter_local", tab$, "jitter_rap", tab$, "jitter_ppq5",
     ... tab$, "shimmer_local", tab$, "shimmer_local_db", tab$, "shimmer_apq3",
-    ... tab$, "shimmer_apq5"
+    ... tab$, "shimmer_apq5", tab$, "hnr_db"
 
 # Voice-report defaults.
 shortest = 0.0001
@@ -59,10 +59,16 @@ for i to n
     shim_apq3 = Get shimmer (apq3): 0, 0, shortest, longest, max_period_factor, max_amp_factor
     shim_apq5 = Get shimmer (apq5): 0, 0, shortest, longest, max_period_factor, max_amp_factor
 
-    appendFileLine: out$, stem$, tab$, jit_local, tab$, jit_rap, tab$, jit_ppq5,
-        ... tab$, shim_local, tab$, shim_db, tab$, shim_apq3, tab$, shim_apq5
+    # HNR (B5) — mean of the cross-correlation harmonicity.
+    selectObject: sound
+    harm = To Harmonicity (cc): 0.01, pitch_floor, 0.1, 1.0
+    hnr = Get mean: 0, 0
 
-    removeObject: sound, pitch, pp
+    appendFileLine: out$, stem$, tab$, jit_local, tab$, jit_rap, tab$, jit_ppq5,
+        ... tab$, shim_local, tab$, shim_db, tab$, shim_apq3, tab$, shim_apq5,
+        ... tab$, hnr
+
+    removeObject: sound, pitch, pp, harm
 endfor
 removeObject: strings
 writeInfoLine: "Wrote ", n, " rows to ", out$

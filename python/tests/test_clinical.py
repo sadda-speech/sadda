@@ -41,7 +41,16 @@ def test_perturbation_unreliable_raises(tmp_path) -> None:
         sadda.clinical.perturbation(audio)
 
 
+def test_hnr_on_sustained_tones() -> None:
+    high = sadda.load_wav(str(FIXTURES / "hnr_high_120hz.wav"))
+    mid = sadda.load_wav(str(FIXTURES / "hnr_mid_120hz.wav"))
+    # Injected 25 dB and 12 dB HNR.
+    assert sadda.clinical.hnr(high) > 20.0
+    assert 8.0 < sadda.clinical.hnr(mid) < 16.0
+
+
 def test_clinical_surface_is_stable_clinical() -> None:
     from sadda._stability import get_stability
 
     assert get_stability(sadda.clinical.perturbation) == "stable-clinical"
+    assert get_stability(sadda.clinical.hnr) == "stable-clinical"

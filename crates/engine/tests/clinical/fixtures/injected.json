@@ -29,6 +29,22 @@
       "shimmer_frac": 0.08,
       "analytic_jitter_local": 0.016126,
       "analytic_shimmer_local": 0.050518
+    },
+    "hnr_high_120hz": {
+      "f0_hz": 120.0,
+      "jitter_frac": 0.0,
+      "shimmer_frac": 0.0,
+      "analytic_jitter_local": 0.0,
+      "analytic_shimmer_local": 0.0,
+      "analytic_hnr_db": 25.041
+    },
+    "hnr_mid_120hz": {
+      "f0_hz": 120.0,
+      "jitter_frac": 0.0,
+      "shimmer_frac": 0.0,
+      "analytic_jitter_local": 0.0,
+      "analytic_shimmer_local": 0.0,
+      "analytic_hnr_db": 12.012
     }
   }
 }
