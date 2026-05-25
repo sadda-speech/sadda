@@ -17,6 +17,7 @@ from sadda._stability import stable_clinical
 
 __all__ = [
     "PerturbationReport",
+    "cpps",
     "hnr",
     "perturbation",
 ]
@@ -24,3 +25,4 @@ __all__ = [
 perturbation = stable_clinical(_native.perturbation)
 PerturbationReport = stable_clinical(_native.PerturbationReport)
 hnr = stable_clinical(_native.hnr)
+cpps = stable_clinical(_native.cpps)

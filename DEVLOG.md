@@ -6,6 +6,55 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-25 — CPP/CPPS (B5, part 2): cepstral peak prominence, robust tilt, Praat-validated
+
+Completes cluster B's B5. Smoothed cepstral peak prominence — the prominence of the cepstral peak (at the f0 quefrency) above the cepstrum's regression tilt line, averaged over frames. Praat's `PowerCepstrogram` → `Get CPPS`.
+
+### Why this was easier than HNR
+
+CPP is a **prominence** — `peak − tilt_line`, both in dB. Any constant offset on the cepstrum (FFT normalization, `ln` vs `log10`, even log-power vs log-magnitude — all *additive* in dB) **cancels in the subtraction**. So unlike HNR's `r→1` hypersensitivity, CPP is robust to implementation conventions; only the cepstrum *shape* and the regression matter. First implementation was already within ~4 dB of Praat.
+
+### Design
+
+`engine::clinical::cpps`: per frame, Hann window → real FFT → log power spectrum → inverse FFT (the cepstrum) → quefrency-smoothed power → dB → peak in the f0 quefrency band → **robust (IRLS bisquare) straight-line tilt** over [0.001, 0.05] s → `CPP = peak − line(peak_q)`; mean over frames. Two tuned-to-Praat pieces:
+
+- **Robust tilt regression** (not plain least-squares) so the cepstral peak doesn't drag the fitted line up and shrink the prominence — matches Praat's "Robust" fit.
+- **Quefrency smoothing in the power domain** (≈0.00015 s, calibrated to Praat). Unsmoothed CPP over-reads by ~4 dB; smoothing the *power* cepstrum lowers the sharp peak ~10·log10 (vs magnitude smoothing's harsher 20·log10, which over-shot to −6 dB). The window is calibrated against the reference rather than replicating Praat's resample-to-10 kHz cepstrogram pipeline.
+
+Matches Praat within **3 dB** on the harmonic-tone fixtures.
+
+### Validation signal choice
+
+CPPS is validated on the **sustained harmonic-tone** fixtures (the HNR signals), which are the appropriate cepstral input — a vowel is harmonic-rich, not an impulse train. The B4 jitter/shimmer **pulse-train** fixtures have a degenerate cepstrum and diverge 15–20 dB from Praat; they aren't valid CPP inputs and are excluded from the CPP test.
+
+### Three surfaces
+
+`engine::clinical::cpps` + `sadda.clinical.cpps` (`stable_clinical`). GUI via the script panel; dedicated display with cluster D.
+
+### What this doesn't do
+
+- **Praat's exact CPPS pipeline** (resample to 2·maxFreq, its precise smoothing/window) — approximated with a calibrated power-domain quefrency smoothing, validated to 3 dB.
+- **Time smoothing** — negligible for stationary sustained tones; not implemented.
+- **FFT-accelerated** per-frame work — fine at analysis sizes.
+
+### Cluster B status
+
+B4 (jitter/shimmer) + **B5 (HNR + CPP/CPPS)** done. Next: **B6 (AVQI + ABI)** — composite indices that *combine* CPPS + HNR + shimmer + spectral slope/tilt, so B4/B5's measures feed directly into B6.
+
+### Layout
+
+- `crates/engine/src/clinical.rs` — `cpps` + `CppsConfig` + `robust_line` / `moving_average`.
+- `crates/python/src/lib.rs` — `cpps` pyfunction; `python/sadda/clinical/__init__.py` re-export.
+- `tests/clinical/praat/jitter_shimmer.praat` — CPPS column; `clinical_perturbation.rs` CPPS test.
+
+### Sources / references
+
+- Hillenbrand et al. 1994; Heman-Ackah et al. 2003 (CPP / CPPS)
+- Praat (Boersma & Weenink) — PowerCepstrogram / Get CPPS
+- 2026-05-25 clinical-validation-references entry; B5-part-1 (HNR) entry (shared harmonic-tone fixtures)
+
+---
+
 ## 2026-05-25 — HNR (B5, part 1): faithful Boersma cross-correlation harmonicity, Praat-validated
 
 Second cluster-B measure: mean harmonics-to-noise ratio over a sustained phonation, via the Boersma-1993 **cross-correlation** method (Praat's `To Harmonicity (cc)`). CPP/CPPS (the rest of B5) follows.

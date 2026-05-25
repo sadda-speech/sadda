@@ -2012,6 +2012,23 @@ fn hnr(
         .map_err(engine_err_to_py)
 }
 
+/// Smoothed cepstral peak prominence (dB) of a sustained phonation
+/// (Praat's `PowerCepstrogram` → `Get CPPS`). Raises `ValueError` if the
+/// signal is too short. Intended for sustained vowels.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (audio, *, pitch_floor_hz=60.0, pitch_ceiling_hz=330.0))]
+fn cpps(audio: &PyAudio, pitch_floor_hz: f32, pitch_ceiling_hz: f32) -> PyResult<f32> {
+    let cfg = sadda_engine::CppsConfig {
+        pitch_floor_hz,
+        pitch_ceiling_hz,
+        ..Default::default()
+    };
+    sadda_engine::cpps(&audio.inner, &cfg)
+        .map(|d| d.value())
+        .map_err(engine_err_to_py)
+}
+
 /// sadda._native — Rust extension submodule. End users should `import sadda`
 /// and use the decorated re-exports in `sadda.__init__` rather than reaching
 /// in here directly.
@@ -2034,6 +2051,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(mfcc, m)?)?;
     m.add_function(wrap_pyfunction!(perturbation, m)?)?;
     m.add_function(wrap_pyfunction!(hnr, m)?)?;
+    m.add_function(wrap_pyfunction!(cpps, m)?)?;
     m.add_function(wrap_pyfunction!(new_project, m)?)?;
     m.add_function(wrap_pyfunction!(open_project, m)?)?;
     m.add_class::<PyAudio>()?;

@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use sadda_engine::{Audio, HnrConfig, PerturbationConfig, hnr, perturbation};
+use sadda_engine::{Audio, CppsConfig, HnrConfig, PerturbationConfig, cpps, hnr, perturbation};
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/clinical/fixtures")
@@ -20,6 +20,7 @@ struct Golden {
     shimmer_local: f64,
     shimmer_local_db: f64,
     hnr_db: f64,
+    cpps: f64,
 }
 
 fn load_golden(name: &str) -> Golden {
@@ -34,6 +35,7 @@ fn load_golden(name: &str) -> Golden {
                 shimmer_local: cols[4].parse().unwrap(),
                 shimmer_local_db: cols[5].parse().unwrap(),
                 hnr_db: cols[8].parse().unwrap(),
+                cpps: cols[9].parse().unwrap(),
             };
         }
     }
@@ -129,6 +131,25 @@ fn matches_praat_on_hnr() {
             "{name}: hnr {got} vs praat {want}"
         );
     }
+}
+
+#[test]
+fn matches_praat_on_cpps() {
+    // Validated on the sustained *harmonic-tone* fixtures, which are the
+    // appropriate cepstral input (a vowel is harmonic-rich, not an impulse
+    // train — the jitter/shimmer pulse-train fixtures have a degenerate
+    // cepstrum and aren't valid CPP inputs). The two SNRs exercise the
+    // clean→noisy direction. Within 3 dB of Praat's CPPS.
+    let mut report = String::new();
+    let mut ok = true;
+    for name in ["hnr_high_120hz", "hnr_mid_120hz"] {
+        let audio = Audio::from_wav_path(fixtures_dir().join(format!("{name}.wav"))).unwrap();
+        let got = cpps(&audio, &CppsConfig::default()).unwrap().value() as f64;
+        let want = load_golden(name).cpps;
+        report.push_str(&format!("{name}: cpps {got:.2} vs praat {want:.2}\n"));
+        ok &= (got - want).abs() < 3.0;
+    }
+    assert!(ok, "{report}");
 }
 
 #[test]
