@@ -6,6 +6,210 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-25 — Provenance coverage + citation export (A1): `record_processing_run` backbone, per-bundle timeline, citation registry
+
+First Phase-3 slice (cluster A, clinical substrate). Builds the provenance backbone every later clinical / ML / DSP slice records into, plus citation export. The `processing_run` table + `kind` enum already existed (B1 / V6); A1 adds the unified write path, a per-bundle query, and the citation layer on top.
+
+### What A1 delivers
+
+- **`Project::record_processing_run(&ProcessingRunSpec) -> i64`** — the single insert path for a completed run. The engine fills in the sadda version, `started_at` / `finished_at`, and the active recipe id (`current_recipe_id`); the caller supplies `ProcessingRunSpec` (bundle, `ProcessingRunKind`, `processor_id`, optional params / input+output tier ids / output signal ids / weights checksum / status). New `ProcessingRunKind` + `ProcessingRunStatus` enums give the `kind` / `status` CHECK values type-safety.
+- **`Project::processing_runs(bundle_id) -> Vec<ProcessingRunRow>`** — the per-bundle provenance timeline (insertion order), alongside the pre-existing `processing_runs_for_recipe`.
+- **Citation registry** (`engine::citation`) — `Citation { processor_id, reference, doi }` + `citation_for(processor_id)`, the **machine-readable source of truth** for citation export. Seeded from the DSP modules' curated `## References` blocks (Boersma 1993 for pitch, McCandless 1974 / Markel 1972 for formants, Makhoul 1975 for LPC, Davis & Mermelstein 1980 for MFCC, Allen 1977 for STFT/spectrogram) rather than reproduced from memory. Uncited processors (imports, recording) return `None`.
+- **`Project::citations(bundle_id) -> Vec<Citation>`** — walks the bundle's runs, dedups by `processor_id`, preserves first-use order, drops uncited processors.
+- **Three surfaces**: Python `record_processing_run` / `processing_runs` / `citations` + `ProcessingRun` / `Citation` pyclasses (stubs regenerated; tiered `@stable`); GUI **"Provenance & citations…"** modal off the bundle context menu — read-only run list + deduped citation list with DOI links and a **Copy references** clipboard action.
+
+### Design decisions
+
+| Decision | Reasoning |
+|---|---|
+| One `record_processing_run` insert path | Every analysis goes through it, so the timeline + citations stay complete. Refactored the TextGrid / EAF import inserts onto it (behavior-preserving DRY) |
+| Citation registry keyed by `processor_id` | Reverse-DNS ids (`sadda.dsp.pitch.autocorrelation`) per the ML-registry entry; the registry is the one machine-readable mirror of the per-method doc citations |
+| Empty id lists → SQL `NULL`, not `"[]"` | Distinguishes "no outputs" from an empty array in the stored JSON |
+| Citations dedup by processor, first-use order | A reference list wants each work once, in the order analyses first used it |
+| `commit_recording` left on its own insert | It writes inside the bundle-commit transaction with rename-back error handling; not worth threading through the new path this slice |
+
+### What A1 deliberately doesn't ship
+
+- **Auto-recording of every DSP / clinical call.** `sadda.dsp.*` are pure functions that don't touch a `Project`; provenance is recorded at the *persistence boundary* (imports / recording today; derived-signal writes and the cluster-B clinical measures as they land). A1 ships the backbone + the API for callers to record; blanket auto-coverage completes through B and a later derived-signal-write hook.
+- **Richer citations** — one primary reference + DOI per processor; multiple-refs-per-method and BibTeX/`.bib` export are later enhancements.
+- **Start-then-finish runs** — A1 records completed runs (`started_at` ≈ `finished_at`); long-running async runs that stamp start then finish come with the ML cluster.
+
+### Acceptance vs the slicing-entry target
+
+The slicing entry's A1 acceptance ("pitch track then AVQI → complete timeline; `citations()` lists both") can't fully land until clinical measures (B) exist. A1 satisfies the achievable half: recording any cited processor (e.g. `sadda.dsp.mfcc`) makes it appear in both the timeline and `citations()`, verified in engine + Python tests; imports already record provenance through the new path.
+
+### Layout
+
+- `crates/engine/src/citation.rs` (new) — `Citation` + `citation_for`.
+- `crates/engine/src/corpus.rs` — `ProcessingRunKind` / `ProcessingRunStatus` / `ProcessingRunSpec`, `record_processing_run`, `processing_runs`, `citations`; import inserts refactored.
+- `crates/python/src/lib.rs` — `PyProcessingRun` / `PyCitation` + three `Project` methods + `parse_run_kind`.
+- `crates/app/src/main.rs` — `ProvenanceView` + the modal.
+- Tests: 3 engine (citation registry) + 2 engine (corpus provenance/citations) + 3 Python.
+
+### Sources / references
+
+- 2026-05-25 Phase 3 slicing entry (A1 scope + the three-surface validation/registry extensions)
+- 2026-05-20 ML-model-registry entry (`ProcessingRun` shape, `kind` discriminator, reverse-DNS `processor_id`)
+- 2026-05-18 clinical-regulatory-stance entry (provenance as commitment #1; citation export)
+- 2026-05-21 DSP-method-diversity principle (every method carries a published source — now surfaced via the citation registry)
+
+---
+
+## 2026-05-25 — Phase 3 slicing: 12 slices in 5 clusters, released incrementally 0.3.0 → 0.3.2
+
+Goal: sequence Phase 3 — "Differentiators part 1," the clinical-ready release — into a commit-by-commit ordering, analogous to the Phase 1 (2026-05-21) and Phase 2 (2026-05-23) slicing entries. Phase 3's *scope* and most of its *design* are already settled across four prior entries (reference-distribution governance, clinical regulatory stance, ML model registry, profile catalog); this entry commits to *cadence and ordering*. It is the largest phase in the milestone plan (3–4 months solo part-time).
+
+### What ships across 0.3 (from the milestone plan)
+
+> Reference distribution infrastructure (format + resolver + GitHub registry + CI + Pages index + in-app publish) + bundled starter set + GUI overlay rendering + clinical algorithms (AVQI / ABI / CPP / jitter / shimmer / HNR) with validation suite + provenance + uom typed units + calibrated SPL + research-use-only labeling + ort runtime + VAD bundled + wav2vec2/Whisper on-demand download + embedding tiers
+
+**Phase 3 design conversation (2026-05-25), confirmed:**
+
+- **Full Phase 3 scope** — refdist + clinical + ML all land in the 0.3 line. Not narrowed despite the size; the milestone plan's "differentiators" thesis keeps clinical and ML together.
+- **Incremental sub-releases** rather than one 0.3 at phase end. The largest phase is the one most worth de-risking with intermediate usable artifacts. Each sub-release tags both tracks where applicable: PyPI (`v0.3.x`) for new Python surface, app binaries (`v0.3.x-app`) via the existing G11 workflow.
+- **Clinical substrate first** — provenance / units / calibration before the algorithms that depend on them. Infrastructure-first, matching the A1 cadence of every prior phase.
+
+### What changes from Phase 2
+
+| | Phase 2 | Phase 3 |
+|---|---|---|
+| Slices | 11 | 12 |
+| Release | single 0.2 at phase end | **incremental: 0.3.0 → 0.3.1 → 0.3.2** |
+| Each slice ends in | a clickable feature | a measured value, an overlay, or an inference — most with a validation suite |
+| Surfaces per slice | engine (small) + app + manual verify | engine + Python + GUI **+ validation suite** (clinical) **+ registry repo + CI** (refdist) |
+| Headline risk | render performance | **numerical correctness** (clinical measures must match published references) + bundle size (ML runtime) |
+
+The three-surface rule (engine + Python + GUI, adopted after H1) holds, with two Phase-3 extensions: every **clinical** measure adds a fourth surface — a **validation suite** (known-input/known-output vs published reference values, run in CI with numerical-drift gates); every **refdist/model** capability adds a fifth — the **public registry repo + its CI**, a separate artifact from the app repo.
+
+### Prior-art shape (clinical measures + ML runtime; refdist covered in its own entry)
+
+| Source | What we lift | What we leave |
+|---|---|---|
+| **Praat** | The de-facto reference for jitter / shimmer / HNR / CPPS; published algorithm definitions; AVQI Praat scripts (Maryn) | Its exact windowing quirks where better-documented variants exist |
+| **MDVP (KayPENTAX)** | The clinical perturbation-measure vocabulary clinicians expect | Proprietary; disagrees numerically with Praat on "the same" measure — we validate against a *chosen* reference, not both silently |
+| **VoiceSauce / COVAREP** | Batch spectral/voice-quality measure suites; reproducible parameterization | MATLAB heritage; no corpus model |
+| **AVQI / ABI (Maryn et al.)** | The composite-index formulas + their validated component set (CPPS, HNR, shimmer, slope, tilt) | — (adopt directly, validate against published values) |
+| **ONNX Runtime (`ort`)** | Cross-platform CPU/GPU inference, the Phase-3-committed runtime; ONNX as canonical curated format | Training; framework-specific formats (handled at publish time, not runtime) |
+| **MFA models registry / HuggingFace Hub** | Model distribution pattern (covered in the ML-registry entry: parallel registry, HF passthrough escape hatch) | — |
+
+### Decomposition: 5 clusters, 12 slices
+
+Slice numbering continues the per-phase counter (1–12); cluster letters restart at A.
+
+**Cluster A — Clinical substrate** (lands first; everything clinical depends on it)
+
+1. **A1 — Provenance coverage + citation export.** The `processing_run` table + `kind` enum already exist (B1 / V6); A1 makes *every* DSP and clinical analysis record a run (`kind = dsp_algorithm | clinical_measure`), populating `processor_id` / `processor_version` / `parameters` / input+output tier ids. Adds project-level **citation export** that walks the table and emits a reference list (refs come from each processor's registered citation). Acceptance: running a pitch track then an AVQI leaves a complete, queryable provenance timeline; `project.citations()` lists both.
+2. **A2 — Typed units + clinical discipline.** Introduce `uom` on the clinical-path API (no bare numbers); explicit **no-silent-fallback** error/uncertainty types (a measure on insufficient signal returns an error, never a guess); the **stable-for-clinical-use** API-marking convention (stronger than the general `@stable` tier); and **research-use-only labeling** (startup notice, docs banner, Intended Use statement). Acceptance: a clinical measure on a 50 ms silent clip returns a typed error, not a number; the app shows the RUO notice.
+3. **A3 — Instrument calibration + calibrated SPL.** Build the `Instrument` API (table exists, schema-only since B1) with structured calibration: mic sensitivity, frequency-response curve, reference level. Compute **calibrated SPL** (dB-SPL re 20 µPa) when a bundle is tied to a calibrated instrument; fall back to dB-FS otherwise (explicitly, per A2). Likely a V8 migration for structured calibration columns. Acceptance: a bundle with a calibrated `Instrument` reports SPL; one without reports dB-FS and says so.
+
+**Cluster B — Clinical algorithms** (each: engine + Python + GUI readout + validation suite + CI drift gate)
+
+4. **B4 — Jitter + shimmer.** Period-perturbation measures over the C2 pitch/period track; the standard family (local, rap, ppq5 / local-dB, apq3, apq5). Validated against published reference values.
+5. **B5 — HNR + CPP / CPPS.** Harmonics-to-noise ratio and cepstral peak prominence (smoothed). CPPS is the single most clinically load-bearing measure (AVQI's dominant term) and the spectral-domain counterpart to B4's time-domain perturbation.
+6. **B6 — AVQI + ABI.** The composite indices, built from B4/B5 components plus spectral slope/tilt. Validated against Maryn et al. published values. Acceptance: AVQI on the reference recordings reproduces published scores within tolerance.
+
+**Cluster C — Reference distribution infrastructure** (the cross-cutting differentiator; per the refdist-governance entry)
+
+7. **C7 — Format + resolver + query + pinning.** `refdist.toml` manifest parsing; engine resolver with the user-level cache (`~/.local/share/sadda/refdist/`); `engine.refdist.query(measure=…, population=…)`; project version-pinning in `project.toml`. The *consumption* side — resolve, cache, query, pin — independent of any hosted registry.
+8. **C8 — Registry repo + CI + Pages index + bundled starter set.** Stand up the public `refdist-registry` repo (tier 2 / tier 3 dirs); CI validation (TOML schema, license check, `min_n_per_subgroup`, data-file conformance); GitHub-Pages-rendered index JSON; and the **bundled tier-1 starter set** (Hillenbrand 1995, Peterson-Barney 1952, a small clinical normative-range set) shipped with the app. Gated on sourcing redistributable-licensed data.
+9. **C9 — In-app publishing.** Auto-scaffold a manifest from an analysis result; fork-and-PR submission flow using the user's GitHub credentials. Closes the refdist loop (consume → publish).
+
+**Cluster D — GUI overlay rendering**
+
+10. **D10 — Measure tracks + refdist overlays.** Render clinical measures as tracks on the signal views, and refdist as **overlays / target zones / percentile bands**, visually distinguishing `measure.kind` (`observed_distribution` vs `summary_normative_range` vs `target_zone`) so "what people sound like" is never conflated with "what to aim for." Surfaces the A1 citation list in the export UI. This is the slice the critical path gates on C (refdist) + B (measures to plot).
+
+**Cluster E — ML inference** (per the ML-registry entry; the model registry reuses the refdist mechanism)
+
+11. **E11 — `ort` runtime + model registry + bundled VAD.** Integrate ONNX Runtime; stand up the parallel model registry (shared protocol with refdist, larger-artifact + compute-hint manifest fields, HF passthrough via `hf://`); ship a small **bundled VAD** as the first end-to-end model and the embedding-tier proof. `ProcessingRun kind = ml_model` with `weights_checksum`.
+12. **E12 — On-demand models + embedding tiers.** wav2vec2 / Whisper resolved + downloaded on demand (with checksum validation + external-mirror support for >2 GB weights); inference results written as **embedding tiers** (`continuous_vector` dense signals from B3). Acceptance: `sadda.ml.load_model("sadda/wav2vec2-base-960h")` → embeddings stored as a queryable dense tier.
+
+### Sub-release mapping
+
+| Sub-release | Slices | Headline |
+|---|---|---|
+| **0.3.0** | A1–A3, B4–B6 | Clinical substrate + the six clinical algorithms with validation suites. The clinical-ready core. |
+| **0.3.1** | C7–C9, D10 | Reference distributions end-to-end + GUI overlays. The norms/comparison differentiator. |
+| **0.3.2** | E11–E12 | ML inference (ort + VAD + on-demand wav2vec2/Whisper + embedding tiers). |
+
+Each sub-release is independently usable and tagged (`v0.3.x` for the PyPI surface, `v0.3.x-app` for binaries). Sub-release boundaries are the adjustable part — if the substrate (A) stabilizes well before the algorithms (B), it can ship as its own 0.3.0 with the algorithms following as 0.3.1.
+
+### Dependency graph
+
+```
+A1 (provenance) ─→ A2 (units/discipline) ─→ A3 (calibration) ─┐
+                                                               ├─→ B4 (jitter/shimmer) ─→ B5 (HNR/CPP) ─→ B6 (AVQI/ABI) ─┐
+                                                               │                                                          ├─→ D10 (overlays)
+C7 (resolve/query/pin) ─→ C8 (registry+CI+starter set) ─→ C9 (publish) ───────────────────────────────────────────────┘
+                                                                                                              (refdist norms feed D10)
+E11 (ort+registry+VAD) ─→ E12 (on-demand models + embedding tiers)        [independent of A–D; ships 0.3.2]
+```
+
+B needs A (units, provenance, no-silent-fallback). D10 needs B (measures) + C (norms to overlay). C is independent of B and can proceed in parallel. E is independent of everything else.
+
+### Confirmed scope decisions
+
+| Item | Decision | Reasoning |
+|---|---|---|
+| 0.3 scope | **Full Phase 3 (clinical + refdist + ML)** | Keeps the "differentiators" package intact; milestone-plan scope held |
+| Release cadence | **Incremental 0.3.0 → 0.3.2** | De-risks the largest phase; ships usable artifacts mid-phase; matches the incremental-0.x principle |
+| First cluster | **Clinical substrate (A)** | Provenance/units/calibration gate the algorithms; infra-first cadence |
+| Clinical reference target | **One chosen reference per measure, not "match everything"** | Praat and MDVP disagree on "the same" measure; silently averaging is worse than a documented choice. Settled per measure in the validation-references design pass below |
+| Units | **`uom` on the clinical path** | Compile-time unit checking; clinical entry's commitment |
+| Unreliable inputs | **Typed error / uncertainty, never a guessed number** | No-silent-fallback; false confidence is harmful clinically |
+| Model format | **ONNX canonical (curated tier); HF passthrough for the rest** | Phase-3 `ort` commitment; ML-registry entry |
+| Registry shape | **Models reuse the refdist registry mechanism** | One protocol, two registries; ML-registry entry |
+
+### Prerequisite design passes + parallel risk spikes
+
+Unlike Phase 2, two clusters need a focused **design entry before their first slice**, plus the milestone plan's standing spikes:
+
+| Item | Type | When | Purpose |
+|---|---|---|---|
+| **Clinical validation references** | design entry (required) | before B4 | Pick the reference implementation + reference values per measure (AVQI→Maryn; CPPS→Hillenbrand/Heman-Ackah; jitter/shimmer→Praat vs MDVP). Resolve disagreements explicitly. The clinical-regulatory entry flagged this as needing its own entry. |
+| **`ort` runtime integration** | spike | before E11 | Confirm ONNX Runtime links + bundles cleanly across macOS/Linux/Windows and the binary-size impact, before E commits. |
+| **Native plugin ABI** | spike (milestone plan) | late Phase 3, before Phase 4 | One trivial native plugin from a dylib; settles `abi_stable` vs C ABI vs WASM. |
+| **Tongue-segmentation model exploration** | spike (milestone plan) | during Phase 3 | Survey/fine-tune candidates; de-risks Phase 4's heaviest deliverable. |
+
+### Cut lines if timeline pressure hits
+
+In priority order of what to defer first:
+
+1. **Cluster E (ML inference)** → slips to a 0.3.3 / pulled into early Phase 4. It's the most self-contained and least coupled to the clinical headline.
+2. **C9 (in-app publishing)** → ship consume + bundled starter set (C7/C8); defer user publishing. Most users consume long before they publish.
+3. **B6 (AVQI/ABI)** → ship the component measures (jitter/shimmer/HNR/CPP) at 0.3.0; the composite indices follow. Components are individually useful.
+4. **A3 (calibrated SPL)** → dB-FS only at first; calibrated SPL follows once a calibrated `Instrument` workflow is validated with a real clinical user.
+
+**Not cuttable**: provenance + units + no-silent-fallback (A1/A2), at least the perturbation measures with validation (B4), refdist consume + starter set (C7/C8), research-use-only labeling.
+
+### What this entry doesn't decide
+
+- **Per-measure validation tolerances and reference datasets** — the prerequisite validation-references entry settles these (it's a correctness contract, not a cadence question).
+- **Whether clinical-path code is restricted to in-tree / audited plugins** — the clinical-regulatory entry flagged a community plugin computing jitter wrongly as a distinct risk; policy TBD, likely alongside the Phase-4 plugin ABI.
+- **Sub-release exact boundaries** — A vs A+B for 0.3.0; settled as the substrate stabilizes.
+- **Per-measure uncertainty modeling** — A2 ships explicit errors on bad input; richer "value + uncertainty" returns are layered later (clinical entry).
+- **Starter-set exact contents** — gated on confirming redistribution rights per dataset; publicly-licensed material only to start (refdist entry's open item).
+- **Model cache eviction policy** — manual `sadda model gc` in v1; automatic LRU if disk pressure surfaces (ML-registry entry).
+
+### Pace and revisit cadence
+
+- Milestone plan estimates Phase 3 at 3–4 months solo part-time; 12 slices over ~16 weeks ≈ one slice every 1–2 weeks, same cadence as Phases 1–2.
+- Revisit after **0.3.0** ships: the first clinical release with real measured values — clinical-research feedback may reshape B/C/D ordering and surface the workflow features (protocols, reports) deferred to v1.x.
+- Revisit after the validation-references entry: if a chosen reference proves unreproducible, re-scope the affected measure.
+
+### Sources / references
+
+- 2026-05-18 milestone-plan entry (Phase 3 row; critical path: refdist before clinical; the after-0.2 revisit point this entry acts on)
+- 2026-05-18 reference-distribution-governance entry (three-tier registry, manifest format, hosting, in-app publish)
+- 2026-05-18 clinical-regulatory-stance entry (posture 3; the nine architectural commitments; AVQI/ABI/CPP/jitter/shimmer/HNR scope; validation-references deferral)
+- 2026-05-20 ML-model-registry entry (ProcessingRun provenance; parallel model registry; ONNX canonical; HF passthrough; embedding tiers)
+- 2026-05-20 profile-catalog entry (clinical profile; per-profile recommended distributions)
+- 2026-05-21 / 2026-05-23 Phase 1 + Phase 2 slicing entries (analogous structure)
+- `ort` (ONNX Runtime for Rust): <https://github.com/pykeio/ort>
+- `uom`: <https://github.com/iliekturtles/uom>
+- AVQI (Maryn et al.): <https://www.vvl.be/en/avqi>
+
+---
+
 ## 2026-05-25 — Phase-2 GUI dogfooding: lane-alignment + spectrogram-bounds fixes shipped; bundle-rename and TikZ figure-export logged for later
 
 Dogfooding the 0.2 desktop GUI on WSL2 surfaced three rendering/launch issues (fixed this session) and two feature gaps (logged here). This is an **intake entry, not a design entry** — the two backlog items still need their own design passes before implementation.

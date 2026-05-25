@@ -4,6 +4,7 @@
 #![warn(missing_docs)]
 
 pub mod audio;
+pub mod citation;
 pub mod corpus;
 pub mod dsp;
 pub mod error;
@@ -13,10 +14,11 @@ pub mod pitch;
 pub mod storage;
 
 pub use audio::Audio;
+pub use citation::{Citation, citation_for};
 pub use corpus::{
-    Bundle, BundleSpec, DerivedSignal, Interval, IntervalSpec, Point, PointSpec, ProcessingRunRow,
-    Project, RecipeRun, Reference, ReferenceSpec, Session, SessionSpec, Speaker, SpeakerSpec, Tier,
-    TierRows, TierSpec, TierType,
+    Bundle, BundleSpec, DerivedSignal, Interval, IntervalSpec, Point, PointSpec, ProcessingRunKind,
+    ProcessingRunRow, ProcessingRunSpec, ProcessingRunStatus, Project, RecipeRun, Reference,
+    ReferenceSpec, Session, SessionSpec, Speaker, SpeakerSpec, Tier, TierRows, TierSpec, TierType,
 };
 pub use error::{EngineError, Result};
 pub use live::{
