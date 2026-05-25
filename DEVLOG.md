@@ -6,6 +6,89 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-25 — Clinical validation references: Praat-primary, tolerance-match, synthetic + small-real corpus
+
+Goal: settle the validation contract for cluster B's clinical measures — the prerequisite both the Phase-3 slicing entry and the 2026-05-18 clinical-regulatory entry flagged as required *before* B4. Cluster A (substrate) is complete; this entry unblocks the algorithms. It fixes *what* each measure is validated against, *how* "validated" is defined, and *on what data* — not the algorithms themselves (those land per B-slice).
+
+### Decisions (2026-05-25 design session)
+
+| Question | Decision |
+|---|---|
+| **Primary reference** | **Praat primary; MDVP a documented secondary cross-check.** Praat is open, scriptable (we can run it to generate reference values), reproducible, and the de-facto research standard; the AVQI and CPPS references are themselves Praat-based. MDVP (KayPENTAX) is the clinical standard many clinicians know, but it is proprietary — we can neither redistribute its values nor re-derive them — so it cannot be the validation *target*. Where Praat and MDVP are known to diverge for a measure, the divergence is documented in the measure's docs, never silently averaged. |
+| **What "validated" means** | **Match the Praat reference value within a per-measure tolerance** (computational reproducibility), for now. **Flagged to revisit:** whether measures merit a deeper **construct-validity** check — see below. |
+| **Corpus** | **Both** — synthetic signals with analytic ground truth *and* a small clean-licensed real-voice set. |
+
+### Reference per measure
+
+The Praat features each cluster-B measure validates against (exact parameters + precise published refs land in each B-slice and its A1 citation-registry entries; this fixes the *target*):
+
+| Measure | Praat reference | Literature |
+|---|---|---|
+| Jitter (local, rap, ppq5) | Voice report via PointProcess (periodic, cc) | Boersma & Weenink, Praat manual |
+| Shimmer (local, local dB, apq3, apq5) | Voice report (same PointProcess) | " |
+| HNR | `To Harmonicity (cc)` → mean | Boersma 1993 |
+| CPP / CPPS | `To PowerCepstrogram` → CPPS | Hillenbrand et al. 1994; Heman-Ackah et al. 2003 |
+| AVQI | Maryn AVQI Praat script (v3) | Maryn et al. 2010 + revisions |
+| ABI | Barsties ABI Praat script | Barsties von Latoszek et al. |
+
+### Methodology
+
+- **Reference values are generated offline and committed as golden fixtures.** Run Praat (via its scripting interface) once over the shared test inputs, capture the outputs, and check them in as test data. CI asserts our outputs match the golden values within the per-measure tolerance — so **CI never needs Praat installed**, and numerical drift fails the build (the slicing entry's CI drift gate). The Praat version is recorded alongside the fixtures (CPPS/AVQI specifics have shifted across Praat releases).
+- **Per-measure tolerance** is set in each B-slice's design pass — tighter for deterministic measures, looser where windowing / pitch-tracking sensitivity makes exact reproduction unrealistic. A measure that can't be computed reliably on a fixture returns the A2 `Unreliable` error rather than a number to compare.
+- **Two corpora, two notions of truth:**
+  - *Synthetic* — synthesized voiced signals with **injected, analytically-known** perturbation (controlled jitter/shimmer on a glottal-pulse train; HNR via added noise at a known SNR). Truth is the injected value; no licensing; fully reproducible. Primary for unit-level exactness.
+  - *Small real set* — one small, clean-licensed sustained-vowel set (normal + disordered). Truth there is the Praat reference value (no analytic truth for real voice); exercises messy real signals. **Sourcing is open** (the standing sample-data-licensing concern); synthetic carries v1 if sourcing slips, with the real-set tests a stub until a set is found.
+
+### Construct validity (deferred — revisit)
+
+Matching Praat establishes *computational reproducibility* — we compute the measure the way the reference does. It does **not** establish *construct validity* — that the measure actually indexes the clinical construct (dysphonia severity, breathiness) on our data. Different validation tiers. v1's contract is reproducibility; a later pass — once measures are landed and a labelled corpus exists — assesses criterion/construct validity (e.g. AVQI vs expert perceptual ratings). Tracked as deferred; not gating cluster B.
+
+### What this entry doesn't decide
+
+- **Exact per-measure tolerances** — per B-slice design pass.
+- **The specific real dataset** — sourcing TBD; synthetic is the non-blocking fallback.
+- **The pinned Praat version** — pinned when B4 generates the first fixtures.
+- **Algorithms** — each B-slice designs its own; this entry fixes only the validation target.
+
+### Unblocks
+
+Cluster B is cleared to start: **B4 (jitter + shimmer)** → B5 (HNR + CPP/CPPS) → B6 (AVQI + ABI), each with a Praat-golden + synthetic validation suite. 0.3.0 = cluster A (done) + cluster B.
+
+### Sources / references
+
+- 2026-05-18 clinical-regulatory-stance entry (deferred this entry; validation-suite commitment #2)
+- 2026-05-25 Phase 3 slicing entry (cluster B gated on this entry)
+- Praat (Boersma & Weenink) — Voice report / harmonicity / power-cepstrogram manual sections
+- Maryn et al. (AVQI); Barsties von Latoszek et al. (ABI); Hillenbrand et al. 1994 and Heman-Ackah et al. 2003 (CPP / CPPS)
+
+---
+
+## 2026-05-25 — Feature intake: microphone registry + frequency-response correction
+
+Logged during A3, **not yet designed** — captured here so it isn't lost and so its connections to existing work are recorded.
+
+**The feature.** A curated registry of microphones and their published properties — frequency range, sensitivity, impedance, dynamic range, self-noise, max SPL, polar pattern, and the **frequency-response function (FRF)** — plus **inverse FRF correction**: flatten a recording's spectral coloration by applying the mic's inverse response, so measured spectra/formants/levels reflect the signal rather than the transducer.
+
+**How it connects to what exists:**
+
+- **Extends A3 calibration.** A3 ships a single *broadband* dB-FS→dB-SPL offset; the FRF is the per-*frequency* generalization. A registry mic supplies its published FRF as the correction basis (refined by a calibration tone where available). The `Calibration` model grows a frequency-dependent variant; the `Instrument` entity gains a "registry mic id" reference.
+- **Third instance of the registry pattern.** The refdist-governance + ML-model-registry entries already define the mechanism: TOML-manifest entries, curated/community tiers, GitHub-Pages index, resolve-by-id + cache, provenance + citation, in-app publish. A microphone registry reuses it wholesale — a `mic.toml` with the properties above. Decide at design time: a parallel registry vs a sub-namespace of refdist.
+
+**Open questions for its own design session:**
+
+- **FRF representation** — magnitude-only vs complex (phase); published "typical unit" curve vs per-serial measured response; how the two compose with A3's calibration tone.
+- **Inverse-correction method** — minimum-phase inverse filter vs regularized deconvolution vs magnitude-only EQ; how to bound noise amplification at roll-off frequencies.
+- **Data + licensing** — manufacturer FRF data is often published as plots/typical curves with unclear redistribution rights; same sourcing concern as the refdist starter set.
+
+**Where in the plan:** Phase 3+ (depends on cluster C's reference-distribution infrastructure being in place) or v1.x. Needs its own design entry; intake only here.
+
+### Sources / references
+
+- 2026-05-25 A3 entry (the single-offset `Calibration` this generalizes)
+- 2026-05-18 reference-distribution-governance + 2026-05-20 ML-model-registry entries (the registry mechanism to reuse)
+
+---
+
 ## 2026-05-25 — Instrument calibration + calibrated SPL (A3): Instrument CRUD, reference-pair calibration, bundle→session→instrument resolution
 
 Third Phase-3 slice, and the last of **cluster A (clinical substrate)**. Adds the calibration path that turns the engine's relative dB-FS readings into absolute dB-SPL — a precondition for clinically meaningful intensity, which the cluster-B measures will consume.
