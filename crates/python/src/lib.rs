@@ -2093,6 +2093,23 @@ fn cpps(audio: &PyAudio, pitch_floor_hz: f32, pitch_ceiling_hz: f32) -> PyResult
         .map_err(engine_err_to_py)
 }
 
+/// Acoustic Voice Quality Index v03.01 from its six components. Clean-room
+/// from the publications; **not yet confirmed against the reference Praat
+/// script** (exposed as PROVISIONAL). Units: CPPS / HNR / shimmer-dB /
+/// slope / tilt in dB, shimmer-local as a percent.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn avqi(
+    cpps: f32,
+    hnr: f32,
+    shimmer_local_pct: f32,
+    shimmer_local_db: f32,
+    slope: f32,
+    tilt: f32,
+) -> f32 {
+    sadda_engine::avqi(cpps, hnr, shimmer_local_pct, shimmer_local_db, slope, tilt)
+}
+
 /// sadda._native — Rust extension submodule. End users should `import sadda`
 /// and use the decorated re-exports in `sadda.__init__` rather than reaching
 /// in here directly.
@@ -2117,6 +2134,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(perturbation, m)?)?;
     m.add_function(wrap_pyfunction!(hnr, m)?)?;
     m.add_function(wrap_pyfunction!(cpps, m)?)?;
+    m.add_function(wrap_pyfunction!(avqi, m)?)?;
     m.add_function(wrap_pyfunction!(new_project, m)?)?;
     m.add_function(wrap_pyfunction!(open_project, m)?)?;
     m.add_class::<PyAudio>()?;

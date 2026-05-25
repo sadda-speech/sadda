@@ -13,10 +13,11 @@ For research, education, and non-diagnostic use only.
 from __future__ import annotations
 
 from sadda import _native
-from sadda._stability import stable_clinical
+from sadda._stability import provisional, stable_clinical
 
 __all__ = [
     "PerturbationReport",
+    "avqi",
     "cpps",
     "hnr",
     "perturbation",
@@ -26,3 +27,9 @@ perturbation = stable_clinical(_native.perturbation)
 PerturbationReport = stable_clinical(_native.PerturbationReport)
 hnr = stable_clinical(_native.hnr)
 cpps = stable_clinical(_native.cpps)
+
+# AVQI is PROVISIONAL, not stable_clinical: the v03.01 formula is
+# clean-room from the publications but not yet confirmed against the
+# reference Praat script / authors (version + slope/tilt-definition
+# questions are open), so its absolute values may change.
+avqi = provisional(_native.avqi)

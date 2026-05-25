@@ -495,9 +495,71 @@ fn robust_line(y: &[f64], lo: usize, hi: usize) -> (f64, f64) {
     (a, b)
 }
 
+/// Acoustic Voice Quality Index (AVQI) **v03.01** — a single 0–10
+/// dysphonia-severity score from a weighted combination of six measures
+/// (Maryn et al. 2010; Barsties von Latoszek et al., v03.01).
+///
+/// **Clean-room** from the publications: the Phonanium AVQI Praat plugin
+/// is proprietary and is *not* used as a model — only (later) as a
+/// black-box oracle to confirm output. The coefficients here are the
+/// published v03.01 form.
+///
+/// Inputs are unit-specific (the coefficients were fit to these units):
+/// - `cpps` — smoothed cepstral peak prominence, dB
+/// - `hnr` — harmonics-to-noise ratio, dB
+/// - `shimmer_local_pct` — shimmer local as a **percent** (e.g. `2.77`)
+/// - `shimmer_local_db` — shimmer local, dB
+/// - `slope` — LTAS slope, dB
+/// - `tilt` — LTAS trendline tilt, dB
+///
+/// Result is clamped to the published `[0, 10]` AVQI range.
+///
+/// ## Not yet reference-confirmed (pending the authors / Praat-script oracle)
+/// - The v03.01 coefficients could not be byte-verified against a
+///   *v03.01* worked example. The accessible worked examples (Maryn &
+///   Weenink 2015) are script v02.02 and give different absolute values
+///   for the same component vectors (their normal-voice example reads
+///   2.76 there vs ~1.13 here) — a version-scaling difference, flagged.
+/// - `slope` / `tilt` must be measured per AVQI's exact LTAS definitions
+///   (tilt is a dB trendline value, not the dB/kHz `Ltas::tilt`); the
+///   audio→AVQI wiring is deferred until those are confirmed.
+pub fn avqi(
+    cpps: f32,
+    hnr: f32,
+    shimmer_local_pct: f32,
+    shimmer_local_db: f32,
+    slope: f32,
+    tilt: f32,
+) -> f32 {
+    let inner = 3.295 - 0.111 * cpps - 0.073 * hnr - 0.213 * shimmer_local_pct
+        + 2.789 * shimmer_local_db
+        - 0.032 * slope
+        + 0.077 * tilt;
+    (2.571 * inner).clamp(0.0, 10.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn avqi_formula_orders_normal_below_dysphonic() {
+        // Component vectors from Maryn & Weenink 2015 Figs 1 (normal) &
+        // 2 (dysphonic). The v03.01 formula gives different absolute
+        // values than that paper's v02.02 figures (version difference),
+        // but must order normal < dysphonic and stay in [0, 10]. The
+        // ~1.13 / ~4.82 are this formula's own values (arithmetic
+        // regression check), not the v02.02 figures' 2.76 / 5.92.
+        let normal = avqi(14.50, 21.96, 2.77, 0.35, -24.73, -10.66);
+        let dysphonic = avqi(8.57, 16.31, 7.80, 0.75, -31.51, -9.31);
+        assert!((normal - 1.129).abs() < 0.02, "normal AVQI {normal}");
+        assert!(
+            (dysphonic - 4.821).abs() < 0.02,
+            "dysphonic AVQI {dysphonic}"
+        );
+        assert!(normal < dysphonic);
+        assert!((0.0..=10.0).contains(&normal));
+    }
 
     #[test]
     fn ppq_window_math() {

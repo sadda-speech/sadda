@@ -59,6 +59,21 @@ def test_cpps_on_sustained_tones() -> None:
     assert 15.0 < cpps_high < 27.0
 
 
+def test_avqi_formula_orders_and_is_provisional() -> None:
+    import warnings
+
+    from sadda._stability import get_stability
+
+    # AVQI is provisional (not yet reference-confirmed) → warns on use.
+    assert get_stability(sadda.clinical.avqi) == "provisional"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        normal = sadda.clinical.avqi(14.50, 21.96, 2.77, 0.35, -24.73, -10.66)
+        dysphonic = sadda.clinical.avqi(8.57, 16.31, 7.80, 0.75, -31.51, -9.31)
+    assert normal < dysphonic
+    assert 0.0 <= normal <= 10.0
+
+
 def test_clinical_surface_is_stable_clinical() -> None:
     from sadda._stability import get_stability
 
