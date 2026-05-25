@@ -746,6 +746,32 @@ impl Project {
         Ok(())
     }
 
+    /// Renames a bundle's display name. Updates only the `name`
+    /// column — the on-disk WAV (`audio_relative_path`) is keyed
+    /// independently of the display name and is left untouched.
+    ///
+    /// The new name is trimmed; an empty / whitespace-only name is
+    /// rejected. Errors if `bundle_id` does not exist. Bundle names
+    /// are not unique-constrained, so duplicates are permitted. The
+    /// `UPDATE` fires the bundle audit trigger, recording the change
+    /// in `audit_log`.
+    pub fn rename_bundle(&self, bundle_id: i64, new_name: &str) -> Result<()> {
+        let trimmed = new_name.trim();
+        if trimmed.is_empty() {
+            return Err(EngineError::Corpus("bundle name must not be empty".into()));
+        }
+        let affected = self.conn.execute(
+            "UPDATE bundle SET name = ?1 WHERE id = ?2",
+            rusqlite::params![trimmed, bundle_id],
+        )?;
+        if affected == 0 {
+            return Err(EngineError::Corpus(format!(
+                "no bundle with id {bundle_id}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Inserts a [`Speaker`] row. Returns the new speaker's id.
     pub fn add_speaker(&self, spec: &SpeakerSpec) -> Result<i64> {
         let id: i64 = self.conn.query_row(
@@ -2932,6 +2958,41 @@ mod tests {
         let audio = project.load_audio(bundle_id).unwrap();
         assert_eq!(audio.sample_rate, 16_000);
         assert_eq!(audio.frame_count(), 4_000);
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rename_bundle_updates_name_trims_and_validates() {
+        let root = unique_dir("rename_bundle");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let source_wav = std::env::temp_dir().join(format!(
+            "sadda_engine_rename_source_{}.wav",
+            std::process::id()
+        ));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("greeting", &source_wav).unwrap();
+        let original_audio_path = project.bundles().unwrap()[0].audio_relative_path.clone();
+
+        // Rename trims surrounding whitespace and leaves the WAV path alone.
+        project.rename_bundle(bundle_id, "  farewell  ").unwrap();
+        let bundles = project.bundles().unwrap();
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].name, "farewell");
+        assert_eq!(bundles[0].audio_relative_path, original_audio_path);
+
+        // Empty / whitespace-only names are rejected.
+        let err = project.rename_bundle(bundle_id, "   ").unwrap_err();
+        assert!(matches!(err, EngineError::Corpus(_)));
+        assert_eq!(project.bundles().unwrap()[0].name, "farewell");
+
+        // Unknown id errors rather than silently no-op'ing.
+        let err = project.rename_bundle(9_999, "x").unwrap_err();
+        assert!(matches!(err, EngineError::Corpus(_)));
 
         let _ = std::fs::remove_file(&source_wav);
         let _ = std::fs::remove_dir_all(&root);

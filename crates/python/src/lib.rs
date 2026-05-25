@@ -686,6 +686,15 @@ impl PyProject {
             .map_err(engine_err_to_py)
     }
 
+    /// Renames a bundle's display name. The underlying WAV file is
+    /// left untouched. Raises if `bundle_id` does not exist or the
+    /// new name is empty / whitespace-only.
+    fn rename_bundle(&self, bundle_id: i64, new_name: &str) -> PyResult<()> {
+        self.inner
+            .rename_bundle(bundle_id, new_name)
+            .map_err(engine_err_to_py)
+    }
+
     /// Loads the audio file for a bundle.
     fn load_audio(&self, bundle_id: i64) -> PyResult<PyAudio> {
         self.inner

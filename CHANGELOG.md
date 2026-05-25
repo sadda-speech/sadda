@@ -4,6 +4,83 @@ All notable changes to sadda are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-05-25
+
+First desktop-GUI release. Closes Phase 2 of the project plan: an
+egui + wgpu application that opens projects, shows synced waveform /
+spectrogram / tier views, edits annotations, runs embedded-CPython
+scripts, records live audio, and imports/exports TextGrid + EAF —
+all on top of the 0.1 engine. Distributed as unsigned prebuilt
+binaries for macOS (arm64), Linux (x86_64), and Windows (x86_64).
+The Python library surface is unchanged from 0.1.1 apart from one
+new corpus method (`rename_bundle`). Tagged `v0.2.0-app` (the app
+release track; Python wheels keep the `v*.*.*` tags).
+
+### Added
+
+#### Application shell + navigation
+
+- **Project-aware shell** (`A1`): welcome screen with New / Open /
+  Recent, persistent window + recent-projects state.
+- **Bundle sidebar**: selectable per-bundle rows with a context menu
+  (rename, reveal in file manager, delete) and a live bundle count.
+
+#### Signal views (Cluster B + `C5`)
+
+- **Waveform, spectrogram, and tier-strip panes** sharing one
+  pixel-aligned time axis with a synced playback cursor (`C5`).
+- **Spectrogram** with matplotlib-faithful viridis / magma /
+  greyscale colormaps and configurable window / hop / dynamic range.
+- **Audio playback** (cpal output) via spacebar toggle, with
+  cursor-follow scrolling.
+
+#### Annotation editing (`D6` / `D7`)
+
+- **Interval + point editing**: drag-to-create, boundary resize,
+  point move, inline label edit, and delete — persisted through the
+  engine.
+
+#### Scripting (`E8` / `E9`)
+
+- **Embedded CPython script panel** (`E8`): run Python against the
+  open project, reusing the Phase-0 script-engine.
+- **In-app `sadda.app` namespace + command palette** (`E9`):
+  `import sadda.app` from embedded scripts, register commands, and
+  invoke them via Ctrl/Cmd+P.
+
+#### I/O, recording, and bundle management (`H1`)
+
+- **TextGrid + EAF import/export** wired into the File menu.
+- **Live-recording modal**: device / sample-rate / channel choice,
+  level meter, save-to-bundle.
+- **Bundle delete** (with confirmation) and **bundle rename** (via
+  the sidebar context menu), backed by new engine methods
+  `Project::delete_bundle` and `Project::rename_bundle`, both with
+  Python bindings.
+
+#### Reliability + distribution (`F10` / `G11`)
+
+- **Single-writer lock** (`F10`): a `.sadda-lock` advisory file
+  (PID + hostname) stops two processes writing one corpus.
+- **Release-binary CI** (`G11`): `app-release.yml` builds + uploads
+  macOS / Linux / Windows binaries on `v*.*.*-app` tags.
+
+### Fixed
+
+- **WSL launch crash**: under WSLg, winit's Wayland backend
+  broken-pipes on event-loop init; the app now drops
+  `WAYLAND_DISPLAY` when running under WSL so it takes the XWayland
+  path.
+- **Lane alignment**: the waveform / spectrogram / tier-strip plot
+  areas now share exact left and right boundaries (frameless panels
+  plus a single shared left-gutter width), so the playback cursor
+  draws as one straight line across all three.
+- **Spectrogram bounds**: the plot no longer pads past the data into
+  negative frequencies or beyond the recording, and now crops to the
+  zoom window instead of always drawing the whole file.
+
+[0.2.0]: https://github.com/sadda-speech/sadda/releases/tag/v0.2.0-app
+
 ## [0.1.1] — 2026-05-22
 
 Packaging-only release. No code changes from 0.1.0; ships the sdist

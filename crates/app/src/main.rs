@@ -34,8 +34,14 @@ use crate::state::{
 const TIER_LABEL_MAX_CHARS: usize = 20;
 /// Vertical pixels per lane in the tier strip.
 const TIER_LANE_HEIGHT: f32 = 28.0;
-/// Width of the left gutter holding the tier name in the tier strip.
-const TIER_LABEL_GUTTER: f32 = 120.0;
+/// Shared width of the left gutter that holds the y-axis ticks /
+/// labels on the waveform + spectrogram plots and the tier name on
+/// the tier strip. Using one value for all three keeps the time-axis
+/// plot areas pixel-aligned, so the playback cursor draws a single
+/// straight line top-to-bottom and all three views x-scale together.
+/// Sized to fit a 16-char tier name; comfortably wider than the
+/// widest expected Hz tickmark ("22050" at a 44.1 kHz sample rate).
+const SIGNAL_LEFT_GUTTER: f32 = 120.0;
 
 const APP_TITLE: &str = "sadda";
 /// Cap on spectrogram texture width. egui's typical max texture size
@@ -45,6 +51,14 @@ const APP_TITLE: &str = "sadda";
 const MAX_SPECTROGRAM_WIDTH: usize = 4096;
 
 fn main() -> eframe::Result<()> {
+    // WSLg advertises a Wayland compositor (WAYLAND_DISPLAY=wayland-0),
+    // but winit's Wayland backend broken-pipes against it during
+    // event-loop construction and eframe bails with
+    // `WinitEventLoop(ExitFailure(1))`. XWayland (DISPLAY=:0) works,
+    // so under WSL we drop WAYLAND_DISPLAY before the event loop is
+    // built, steering winit onto its X11 backend. No effect off WSL.
+    force_x11_under_wsl();
+
     // E9: register the built-in `sadda` module BEFORE the embedded
     // CPython interpreter starts, so embedded scripts can
     // `import sadda.app` without needing the wheel pip-installed.
@@ -64,6 +78,22 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(SaddaApp::new(cc)))),
     )
+}
+
+/// Detects WSL and, if found, removes `WAYLAND_DISPLAY` so winit
+/// selects its X11/XWayland backend instead of the WSLg Wayland one
+/// (which fails on event-loop init — see the `main` preamble). Must
+/// run before `eframe::run_native` builds the event loop.
+fn force_x11_under_wsl() {
+    let is_wsl = std::env::var_os("WSL_INTEROP").is_some()
+        || std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|s| s.to_ascii_lowercase().contains("microsoft"))
+            .unwrap_or(false);
+    if is_wsl && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        // SAFETY: called at the top of `main` before any thread is
+        // spawned, so there is no concurrent access to the environment.
+        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+    }
 }
 
 // `append_to_inittab!` registers under the wrapper function's name,
@@ -143,6 +173,9 @@ struct SaddaApp {
     /// H1: pending bundle-deletion confirmation. `Some` while the
     /// confirm modal is open.
     pending_delete: Option<PendingBundleDelete>,
+    /// Pending bundle rename. `Some` while the rename modal is open;
+    /// `name` is the editable buffer, seeded with the current name.
+    pending_rename: Option<PendingBundleRename>,
 }
 
 /// H1: identifies a bundle the user has requested be deleted,
@@ -150,6 +183,15 @@ struct SaddaApp {
 struct PendingBundleDelete {
     id: i64,
     name: String,
+}
+
+/// A bundle the user is renaming via the modal text-edit. `name` is
+/// the live edit buffer; `just_started` grabs focus on the first
+/// frame.
+struct PendingBundleRename {
+    id: i64,
+    name: String,
+    just_started: bool,
 }
 
 /// Mouse-driven edit-in-progress for tier lanes. Idle between drags;
@@ -477,6 +519,7 @@ impl SaddaApp {
             info: None,
             record_dialog: None,
             pending_delete: None,
+            pending_rename: None,
         }
     }
 
@@ -731,6 +774,87 @@ impl SaddaApp {
         }
     }
 
+    /// Renders the bundle-rename modal when one is pending. Commits on
+    /// Enter / Save; cancels on Escape / Cancel / window close. Save is
+    /// disabled while the (trimmed) name is empty.
+    fn render_pending_rename(&mut self, ctx: &egui::Context) {
+        if self.pending_rename.is_none() {
+            return;
+        }
+        let mut commit = false;
+        let mut cancel = false;
+        let mut keep_open = true;
+        if let Some(pending) = self.pending_rename.as_mut() {
+            egui::Window::new("Rename bundle")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut keep_open)
+                .show(ctx, |ui| {
+                    let resp =
+                        ui.add(egui::TextEdit::singleline(&mut pending.name).desired_width(260.0));
+                    if pending.just_started {
+                        resp.request_focus();
+                        pending.just_started = false;
+                    }
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        commit = true;
+                    }
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let can_save = !pending.name.trim().is_empty();
+                        if ui
+                            .add_enabled(can_save, egui::Button::new("Save"))
+                            .clicked()
+                        {
+                            commit = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+        }
+        if !keep_open {
+            cancel = true;
+        }
+        // Escape cancels even when the text field isn't focused; consume
+        // it so it doesn't also reach the tier-editing key handlers.
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            cancel = true;
+        }
+        if commit {
+            self.commit_pending_rename();
+        } else if cancel {
+            self.pending_rename = None;
+        }
+    }
+
+    /// Applies the pending rename via the engine. Closes the modal on
+    /// success; on failure surfaces the error and leaves the modal open
+    /// for a retry. The sidebar re-queries `bundles()` each frame, so
+    /// the new name appears without any cached-name invalidation.
+    fn commit_pending_rename(&mut self) {
+        let Some(pending) = self.pending_rename.as_ref() else {
+            return;
+        };
+        let id = pending.id;
+        let new_name = pending.name.trim().to_string();
+        if new_name.is_empty() {
+            return;
+        }
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        match project.rename_bundle(id, &new_name) {
+            Ok(()) => {
+                self.error = None;
+                self.pending_rename = None;
+                self.set_info(format!("Renamed bundle to “{new_name}”."));
+            }
+            Err(e) => self.set_error(format!("Rename failed: {e}")),
+        }
+    }
+
     /// Opens the recording-modal dialog. State is reset on every
     /// open.
     fn open_record_dialog(&mut self) {
@@ -738,7 +862,7 @@ impl SaddaApp {
     }
 
     /// Begins capture using `self.record_dialog`'s configured device
-    /// + format. Builds the engine session, spawns the cpal stream
+    /// and format. Builds the engine session, spawns the cpal stream
     /// thread, and flips the dialog into `Recording`. Errors surface
     /// in the dialog's status line.
     fn record_dialog_start(&mut self) {
@@ -1943,6 +2067,9 @@ impl eframe::App for SaddaApp {
         // H1 bundle-delete confirmation modal.
         self.render_pending_delete(ui.ctx());
 
+        // Bundle-rename modal.
+        self.render_pending_rename(ui.ctx());
+
         egui::Panel::top("menu").show_inside(ui, |ui| self.menu_bar(ui));
 
         if let AppState::ProjectLoaded { name, root, .. } = &self.app_state {
@@ -2230,6 +2357,7 @@ impl SaddaApp {
         let mut to_select: Option<i64> = None;
         let mut to_reveal: Option<(i64, String)> = None;
         let mut to_delete_prompt: Option<(i64, String)> = None;
+        let mut to_rename_prompt: Option<(i64, String)> = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for b in &bundles {
                 let is_selected = selected == Some(b.id);
@@ -2242,6 +2370,10 @@ impl SaddaApp {
                     to_select = Some(b.id);
                 }
                 row.context_menu(|ui| {
+                    if ui.button("Rename…").clicked() {
+                        to_rename_prompt = Some((b.id, b.name.clone()));
+                        ui.close();
+                    }
                     if ui.button("Reveal in file manager").clicked() {
                         to_reveal = Some((b.id, b.audio_relative_path.clone()));
                         ui.close();
@@ -2278,6 +2410,13 @@ impl SaddaApp {
         if let Some((id, name)) = to_delete_prompt {
             self.pending_delete = Some(PendingBundleDelete { id, name });
         }
+        if let Some((id, name)) = to_rename_prompt {
+            self.pending_rename = Some(PendingBundleRename {
+                id,
+                name,
+                just_started: true,
+            });
+        }
     }
 
     /// Central content for a loaded project: waveform on top
@@ -2290,6 +2429,10 @@ impl SaddaApp {
             .resizable(true)
             .default_size(220.0)
             .min_size(80.0)
+            // Frameless: no implicit panel margin. Horizontal
+            // alignment across all lanes is owned by the shared
+            // SIGNAL_LEFT_GUTTER / y-axis gutter, not panel frames.
+            .frame(egui::Frame::NONE)
             .show_inside(ui, |ui| self.waveform_pane(ui));
 
         // Bottom sub-panel: tier strip. Resizable; default height
@@ -2300,9 +2443,15 @@ impl SaddaApp {
             .resizable(true)
             .default_size(default_strip_height)
             .min_size(TIER_LANE_HEIGHT + 8.0)
+            // Frameless, like the waveform panel — see note there.
+            .frame(egui::Frame::NONE)
             .show_inside(ui, |ui| self.tier_strip_pane(ui));
 
-        // Centre: spectrogram fills the remainder.
+        // Centre: spectrogram fills the remainder, drawn directly on
+        // the panel `ui`. With the waveform/tier panels now frameless,
+        // all three lanes share this `ui`'s content rect exactly, so
+        // their plot areas line up with no per-element margins to
+        // reconcile — alignment lives entirely in the 120px gutter.
         self.rebuild_spectrogram_if_stale(ui.ctx());
         self.spectrogram_pane(ui);
     }
@@ -2365,6 +2514,7 @@ impl SaddaApp {
         let n_buckets = buckets.len();
         let view_range = self.timeline.view_range();
         let view_start = self.timeline.view_start;
+        let view_end = self.timeline.view_end;
         let cursor = self.timeline.cursor;
         let mut clicked_time: Option<f64> = None;
 
@@ -2372,14 +2522,18 @@ impl SaddaApp {
             .show_axes([true, true])
             .y_axis_label("amplitude")
             .x_axis_label("seconds")
-            .include_y(-1.0)
-            .include_y(1.0)
-            .include_x(self.timeline.view_start)
-            .include_x(self.timeline.view_end)
+            .y_axis_min_width(SIGNAL_LEFT_GUTTER)
             .allow_drag(false)
             .allow_zoom(false)
             .allow_scroll(false)
             .show(ui, |plot_ui| {
+                // Own the bounds outright: visible window in x, full
+                // amplitude range in y. This disables auto-fit (so no
+                // edge margin) and matches the spectrogram's x-bounds
+                // exactly, so the shared cursor lands on the same pixel
+                // column in both panes.
+                plot_ui.set_plot_bounds_x(view_start..=view_end);
+                plot_ui.set_plot_bounds_y(-1.0..=1.0);
                 if n_buckets > 0 {
                     let dt = view_range / n_buckets as f64;
                     for (i, (mn, mx)) in buckets.iter().enumerate() {
@@ -2430,26 +2584,35 @@ impl SaddaApp {
 
         let duration = sc.duration_seconds;
         let nyquist = sc.nyquist_hz as f64;
-        // Image still covers the full bundle; the plot's
-        // include_x bounds crop the visible region for free.
+        // The texture spans the whole bundle ([0, duration] × [0,
+        // nyquist]); the explicit set_plot_bounds in the closure crops
+        // it to the visible window. `include_x` does NOT crop — the
+        // image's full extent dominates auto-bounds, which is why the
+        // plot used to show the whole file and pad past 0 Hz and the
+        // recording edges.
         let centre = egui_plot::PlotPoint::new(duration / 2.0, nyquist / 2.0);
         let size = egui::Vec2::new(duration as f32, nyquist as f32);
         let texture_id = sc.texture.id();
         let cursor = self.timeline.cursor;
+        let view_start = self.timeline.view_start;
+        let view_end = self.timeline.view_end;
         let mut clicked_time: Option<f64> = None;
 
         let plot_response = Plot::new("spectrogram")
             .show_axes([true, true])
             .y_axis_label("Hz")
             .x_axis_label("seconds")
-            .include_x(self.timeline.view_start)
-            .include_x(self.timeline.view_end)
-            .include_y(0.0)
-            .include_y(nyquist)
+            .y_axis_min_width(SIGNAL_LEFT_GUTTER)
             .allow_drag(false)
             .allow_zoom(false)
             .allow_scroll(false)
             .show(ui, |plot_ui| {
+                // Crop to the visible window in x and clamp y to
+                // [0, nyquist]: no negative-frequency band, nothing
+                // plotted past the recording edges, x aligned to the
+                // waveform.
+                plot_ui.set_plot_bounds_x(view_start..=view_end);
+                plot_ui.set_plot_bounds_y(0.0..=nyquist);
                 plot_ui.image(egui_plot::PlotImage::new(
                     "spectrogram_img",
                     texture_id,
@@ -2573,9 +2736,14 @@ impl SaddaApp {
         egui::ScrollArea::vertical().show(ui, |ui| {
             for tier in &tiers {
                 ui.horizontal(|ui| {
+                    // Drop the default inter-widget spacing so the
+                    // lane's left edge sits at exactly
+                    // (row_left + SIGNAL_LEFT_GUTTER), matching where
+                    // the plots' inner plot areas start.
+                    ui.spacing_mut().item_spacing.x = 0.0;
                     // Left gutter: tier name + type hint.
                     ui.allocate_ui_with_layout(
-                        egui::Vec2::new(TIER_LABEL_GUTTER, TIER_LANE_HEIGHT),
+                        egui::Vec2::new(SIGNAL_LEFT_GUTTER, TIER_LANE_HEIGHT),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
                             ui.label(egui::RichText::new(truncate_label(&tier.name, 16)).strong());

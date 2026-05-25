@@ -337,6 +337,12 @@ class Project:
         removes the underlying WAV from disk. No-op if `bundle_id`
         does not exist.
         """
+    def rename_bundle(self, bundle_id: builtins.int, new_name: builtins.str) -> None:
+        r"""
+        Renames a bundle's display name. The underlying WAV file is
+        left untouched. Raises if `bundle_id` does not exist or the
+        new name is empty / whitespace-only.
+        """
     def load_audio(self, bundle_id: builtins.int) -> Audio:
         r"""
         Loads the audio file for a bundle.

@@ -8,6 +8,7 @@ import tempfile
 import wave
 from pathlib import Path
 
+import pytest
 import sadda
 
 
@@ -112,6 +113,26 @@ def test_delete_bundle_is_idempotent_on_missing_id() -> None:
         proj = sadda.new_project(Path(td) / "p", "demo")
         # No bundles exist; deleting a non-existent id must not raise.
         proj.delete_bundle(9_999)
+
+
+def test_rename_bundle_updates_name_and_keeps_wav() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        proj = sadda.new_project(Path(td) / "p", "demo")
+        wav = Path(td) / "tone.wav"
+        _write_short_wav(wav)
+        bundle_id = proj.add_bundle("greeting", wav)
+        audio_rel = proj.bundles()[0].audio_relative_path
+
+        proj.rename_bundle(bundle_id, "  farewell  ")
+        assert proj.bundles()[0].name == "farewell"
+        # The WAV path is keyed independently of the display name.
+        assert proj.bundles()[0].audio_relative_path == audio_rel
+
+        # Empty name and unknown id both raise.
+        with pytest.raises(Exception):
+            proj.rename_bundle(bundle_id, "   ")
+        with pytest.raises(Exception):
+            proj.rename_bundle(9_999, "x")
 
 
 def test_audit_user_default_and_setter() -> None:
