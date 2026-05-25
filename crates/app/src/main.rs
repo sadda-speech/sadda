@@ -16,9 +16,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 use egui_plot::{Line, Plot, PlotPoints};
 use pyo3::prelude::*;
-use sadda_engine::{
-    LiveConfig, LiveResults, LiveSession, Project, StoppedSession, TierType,
-};
+use sadda_engine::{LiveConfig, LiveResults, LiveSession, Project, StoppedSession, TierType};
 
 use crate::playback::Playback;
 use crate::sadda_app::{
@@ -703,8 +701,7 @@ impl SaddaApp {
                 ));
                 ui.add_space(4.0);
                 ui.label(
-                    egui::RichText::new("The recorded WAV will also be removed from disk.")
-                        .weak(),
+                    egui::RichText::new("The recorded WAV will also be removed from disk.").weak(),
                 );
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -805,9 +802,7 @@ impl SaddaApp {
             dialog.state = state;
             return;
         };
-        let RecordingHandle {
-            engine, cpal, ..
-        } = handle;
+        let RecordingHandle { engine, cpal, .. } = handle;
         // 1. Drop the cpal stream first so no further callbacks fire.
         drop(cpal);
         // 2. Stop the engine session, which joins the consumer thread.
@@ -960,9 +955,7 @@ impl SaddaApp {
                                 .selected_text(&dialog.device)
                                 .show_ui(ui, |ui| {
                                     for d in &dialog.device_options {
-                                        ui.selectable_value(
-                                            &mut dialog.device, d.clone(), d,
-                                        );
+                                        ui.selectable_value(&mut dialog.device, d.clone(), d);
                                     }
                                 });
                         });
@@ -2056,8 +2049,7 @@ impl SaddaApp {
             ui.menu_button("Recent Projects", |ui| self.recent_projects_submenu(ui));
             ui.separator();
             let project_open = matches!(self.app_state, AppState::ProjectLoaded { .. });
-            let bundle_selected =
-                project_open && self.selected_bundle_id.is_some();
+            let bundle_selected = project_open && self.selected_bundle_id.is_some();
             if ui
                 .add_enabled(project_open, egui::Button::new("Open Bundle…"))
                 .on_disabled_hover_text("Open or create a project first")
@@ -2099,7 +2091,9 @@ impl SaddaApp {
                 });
                 if !import_enabled {
                     ui.label(
-                        egui::RichText::new("(select a bundle first)").weak().small(),
+                        egui::RichText::new("(select a bundle first)")
+                            .weak()
+                            .small(),
                     );
                 }
             });
@@ -2122,7 +2116,9 @@ impl SaddaApp {
                 });
                 if !export_enabled {
                     ui.label(
-                        egui::RichText::new("(select a bundle first)").weak().small(),
+                        egui::RichText::new("(select a bundle first)")
+                            .weak()
+                            .small(),
                     );
                 }
             });
@@ -2252,9 +2248,10 @@ impl SaddaApp {
                     }
                     ui.separator();
                     if ui
-                        .button(egui::RichText::new("Delete bundle…").color(
-                            egui::Color32::from_rgb(220, 80, 80),
-                        ))
+                        .button(
+                            egui::RichText::new("Delete bundle…")
+                                .color(egui::Color32::from_rgb(220, 80, 80)),
+                        )
                         .clicked()
                     {
                         to_delete_prompt = Some((b.id, b.name.clone()));
