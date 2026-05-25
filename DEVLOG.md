@@ -6,6 +6,48 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-25 — HNR (B5, part 1): faithful Boersma cross-correlation harmonicity, Praat-validated
+
+Second cluster-B measure: mean harmonics-to-noise ratio over a sustained phonation, via the Boersma-1993 **cross-correlation** method (Praat's `To Harmonicity (cc)`). CPP/CPPS (the rest of B5) follows.
+
+### The finding that shaped this
+
+First attempt reused the pitch tracker's voicing — `HNR = 10·log10(r/(1−r))` with `r` = the window-corrected normalized autocorrelation peak. **Dead end**: that mapping is hypersensitive near `r → 1`, where a clean tone lives. On a 25 dB-SNR tone, Praat's `r ≈ 0.997` (→25 dB) but the pitch tracker's `r ≈ 0.99995` (→43 dB) — an **18 dB error** from a 0.003 difference in `r`. The plain (un-corrected) autocorrelation went the other way (Hann taper → r under-reads → 4 dB). Neither tracks Praat.
+
+The fix is the **cross-correlation** `r` Praat actually uses:
+
+```
+r(τ) = Σ xᵢ·xᵢ₊τ / √( Σ xᵢ² · Σ xᵢ₊τ² )
+```
+
+The **geometric-mean** energy normalization (vs autocorrelation's `R(0)` and its taper/correction games) is what makes `r` track Praat near 1. Implemented standalone in `engine::clinical::hnr` (not via the pitch tracker): per-frame max `r` over the pitch lag range → HNR, mean over non-silent frames (1%-energy silence gate). Matches Praat within **3 dB** on the fixtures (25 dB and 12 dB cases).
+
+### Fixtures
+
+The HNR signals are **sustained harmonic tones** (1/h-harmonic glottal-source-like) + additive noise at a target SNR — *not* the B4 pulse trains, which are built for discrete-pulse jitter/shimmer and whose autocorrelation at the period lag sits well below R(0). The synth harness (`synth_fixtures.py`) grew a harmonic-tone branch; the Praat script grew an HNR column (`To Harmonicity (cc)` → mean); golden values committed.
+
+### Three surfaces
+
+`engine::clinical::hnr` + `sadda.clinical.hnr` (`stable_clinical`). GUI: via the embedded script panel (as with B4); dedicated display with cluster D.
+
+### What this doesn't do
+
+- **CPP / CPPS** — the other half of B5; next.
+- **FFT-accelerated cross-correlation** — the per-frame O(lags·window) cc is fine for test/analysis sizes; optimize if a long-file path needs it.
+
+### Layout
+
+- `crates/engine/src/clinical.rs` — `hnr` + `HnrConfig`.
+- `crates/python/src/lib.rs` — `hnr` pyfunction; `python/sadda/clinical/__init__.py` re-export.
+- `tests/clinical/praat/*` — harmonic-tone synth branch + HNR Praat column; `clinical_perturbation.rs` HNR test.
+
+### Sources / references
+
+- Boersma, P. (1993) — the cross-correlation HNR (also the project's pitch citation)
+- 2026-05-25 clinical-validation-references entry (Praat-primary, tolerance-match) + B4 entry (the harness this extends)
+
+---
+
 ## 2026-05-25 — Jitter + shimmer (B4): engine::clinical perturbation, pitch-synchronous period extraction, Praat-validated
 
 First **cluster B (clinical algorithms)** slice. Jitter (local / rap / ppq5) and shimmer (local / local-dB / apq3 / apq5) over a sustained phonation, validated against Praat per the same-day validation-references entry.
