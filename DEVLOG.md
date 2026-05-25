@@ -6,6 +6,50 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-25 — Jitter + shimmer (B4): engine::clinical perturbation, pitch-synchronous period extraction, Praat-validated
+
+First **cluster B (clinical algorithms)** slice. Jitter (local / rap / ppq5) and shimmer (local / local-dB / apq3 / apq5) over a sustained phonation, validated against Praat per the same-day validation-references entry.
+
+### What B4 delivers
+
+- **`engine::clinical::perturbation`** — estimates a nominal f0 (autocorrelation pitch median), detects one glottal pulse per period by **pitch-synchronous peak-picking**, and computes the perturbation quotients over the realized period / peak-amplitude sequences. Returns a `PerturbationReport` using the A2 units (jitter + relative shimmers as `Ratio`, `shimmer_local_db` as `Decibels`). Too few periods / no voiced f0 → the A2 `EngineError::Unreliable` (no fabricated number).
+- **Validation harness** (`crates/engine/tests/clinical/`) — `synth_fixtures.py` synthesizes controlled-jitter/shimmer signals (deterministic pseudo-random perturbation → analytic ground truth in `injected.json`); `jitter_shimmer.praat` measures them with Praat 6.2.09 → `praat_golden.tsv`. Both committed with a README. The engine + Python tests assert their output is **within per-measure tolerance of the Praat golden value** (≈20–25% relative + an absolute floor) and in the ballpark of the analytic value.
+- **Python** — `sadda.clinical.perturbation(audio) -> PerturbationReport`, tiered **`stable_clinical`**.
+
+### Design notes
+
+- **Period extraction = peak-picking, not Praat's cross-correlation.** A one-period search window starting ~0.7 period past the previous peak tolerates the jitter being measured. On the synthetic fixtures it matches Praat within tolerance (e.g. shimmer_local 6.0% vs Praat 6.3%; combined-signal jitter 1.5% vs Praat 1.5%). Cruder than Praat's cc for messy real voice — acceptable for v1's synthetic-primary corpus; a cc/refined extractor is a later improvement.
+- **Fixtures use pseudo-random, not alternating, perturbation** — alternating jitter/shimmer drives the pitch tracker into period-doubling (the 200 Hz case read ~0% until switched). Praat golden values are committed, so **CI never needs Praat**.
+
+### Three surfaces
+
+Engine + Python as above. **GUI**: clinical measures are already reachable in-app via the **embedded CPython script panel** (E8/E9) — `sadda.clinical.perturbation` runs there today. A *dedicated* measures display (tracks + readouts) belongs with the **cluster-D overlays**, so no standalone widget lands here (same pattern as A3's deferred SPL display).
+
+### What B4 deliberately doesn't ship
+
+- **Praat's exact period detection** — the peak-picker is an approximation validated to tolerance, not a cc reimplementation.
+- **Real-voice validation** — synthetic-primary; the small real set awaits a clean-licensed source (validation-references entry's open item).
+- **Auto-recorded provenance** — `perturbation` is a pure function (no `Project`), like the DSP measures; a `clinical_measure` ProcessingRun is recorded when a result is *persisted* (the A1 persistence-boundary pattern), not inside the pure call.
+- **A dedicated GUI display** — rides with cluster D.
+
+### Layout
+
+- `crates/engine/src/clinical.rs` (new); `crates/engine/tests/clinical_perturbation.rs` + `tests/clinical/{praat,fixtures}/`.
+- `crates/python/src/lib.rs` — `PyPerturbationReport` + `perturbation`; `python/sadda/clinical/__init__.py` (new submodule).
+- Tests: 4 engine fixture + 2 engine unit + 4 Python.
+
+### Next
+
+B5 (HNR + CPP / CPPS), then B6 (AVQI + ABI) — each Praat-validated against committed golden fixtures.
+
+### Sources / references
+
+- 2026-05-25 clinical-validation-references entry (the contract this implements)
+- Praat (Boersma & Weenink) — Voice report jitter/shimmer definitions
+- 2026-05-25 A2 entry (units + `Unreliable`); A1 entry (provenance at the persistence boundary)
+
+---
+
 ## 2026-05-25 — Clinical validation references: Praat-primary, tolerance-match, synthetic + small-real corpus
 
 Goal: settle the validation contract for cluster B's clinical measures — the prerequisite both the Phase-3 slicing entry and the 2026-05-18 clinical-regulatory entry flagged as required *before* B4. Cluster A (substrate) is complete; this entry unblocks the algorithms. It fixes *what* each measure is validated against, *how* "validated" is defined, and *on what data* — not the algorithms themselves (those land per B-slice).

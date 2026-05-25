@@ -5,6 +5,7 @@
 
 pub mod audio;
 pub mod citation;
+pub mod clinical;
 pub mod corpus;
 pub mod dsp;
 pub mod error;
@@ -16,6 +17,7 @@ pub mod units;
 
 pub use audio::Audio;
 pub use citation::{Citation, citation_for};
+pub use clinical::{PerturbationConfig, PerturbationReport, perturbation};
 pub use corpus::{
     Bundle, BundleSpec, Calibration, DerivedSignal, Instrument, InstrumentSpec, Interval,
     IntervalSpec, Point, PointSpec, ProcessingRunKind, ProcessingRunRow, ProcessingRunSpec,
