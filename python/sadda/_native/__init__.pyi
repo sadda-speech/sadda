@@ -16,6 +16,7 @@ __all__ = [
     "FormantFrame",
     "Instrument",
     "Interval",
+    "PerturbationReport",
     "Point",
     "ProcessingRun",
     "Project",
@@ -35,6 +36,7 @@ __all__ = [
     "mfcc",
     "new_project",
     "open_project",
+    "perturbation",
     "schema_version",
     "spectrogram",
     "stft",
@@ -356,6 +358,55 @@ class Interval:
     def extra(self) -> typing.Optional[builtins.str]:
         r"""
         JSON `extra` payload.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class PerturbationReport:
+    r"""
+    Jitter + shimmer over a sustained phonation. Fields are floats:
+    jitter / relative shimmers are fractions (0.01 = 1%);
+    `shimmer_local_db` is in dB.
+    """
+    @property
+    def n_periods(self) -> builtins.int:
+        r"""
+        Glottal periods the measures were computed over.
+        """
+    @property
+    def jitter_local(self) -> builtins.float:
+        r"""
+        Jitter (local) — fraction.
+        """
+    @property
+    def jitter_rap(self) -> builtins.float:
+        r"""
+        Jitter (rap) — fraction.
+        """
+    @property
+    def jitter_ppq5(self) -> builtins.float:
+        r"""
+        Jitter (ppq5) — fraction.
+        """
+    @property
+    def shimmer_local(self) -> builtins.float:
+        r"""
+        Shimmer (local) — fraction.
+        """
+    @property
+    def shimmer_local_db(self) -> builtins.float:
+        r"""
+        Shimmer (local) — dB.
+        """
+    @property
+    def shimmer_apq3(self) -> builtins.float:
+        r"""
+        Shimmer (apq3) — fraction.
+        """
+    @property
+    def shimmer_apq5(self) -> builtins.float:
+        r"""
+        Shimmer (apq5) — fraction.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -977,6 +1028,13 @@ def open_project(path: builtins.str | os.PathLike | pathlib.Path) -> Project:
     r"""
     Opens an existing sadda project at `path`. Applies any pending schema
     migrations first, writing a `corpus.db.bak.<old_version>` backup.
+    """
+
+def perturbation(audio: Audio, *, pitch_floor_hz: builtins.float = 75.0, pitch_ceiling_hz: builtins.float = 600.0) -> PerturbationReport:
+    r"""
+    Computes jitter + shimmer for a sustained phonation. Raises
+    `ValueError` if no voiced f0 is found or too few periods are
+    detected (no-silent-fallback). Praat is the validation reference.
     """
 
 def schema_version() -> builtins.int:

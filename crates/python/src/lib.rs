@@ -1907,6 +1907,89 @@ fn mfcc<'py>(
     arr.into_pyarray(py)
 }
 
+/// Jitter + shimmer over a sustained phonation. Fields are floats:
+/// jitter / relative shimmers are fractions (0.01 = 1%);
+/// `shimmer_local_db` is in dB.
+#[gen_stub_pyclass]
+#[pyclass(name = "PerturbationReport", frozen)]
+struct PyPerturbationReport {
+    inner: sadda_engine::PerturbationReport,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyPerturbationReport {
+    /// Glottal periods the measures were computed over.
+    #[getter]
+    fn n_periods(&self) -> usize {
+        self.inner.n_periods
+    }
+    /// Jitter (local) — fraction.
+    #[getter]
+    fn jitter_local(&self) -> f32 {
+        self.inner.jitter_local.value()
+    }
+    /// Jitter (rap) — fraction.
+    #[getter]
+    fn jitter_rap(&self) -> f32 {
+        self.inner.jitter_rap.value()
+    }
+    /// Jitter (ppq5) — fraction.
+    #[getter]
+    fn jitter_ppq5(&self) -> f32 {
+        self.inner.jitter_ppq5.value()
+    }
+    /// Shimmer (local) — fraction.
+    #[getter]
+    fn shimmer_local(&self) -> f32 {
+        self.inner.shimmer_local.value()
+    }
+    /// Shimmer (local) — dB.
+    #[getter]
+    fn shimmer_local_db(&self) -> f32 {
+        self.inner.shimmer_local_db.value()
+    }
+    /// Shimmer (apq3) — fraction.
+    #[getter]
+    fn shimmer_apq3(&self) -> f32 {
+        self.inner.shimmer_apq3.value()
+    }
+    /// Shimmer (apq5) — fraction.
+    #[getter]
+    fn shimmer_apq5(&self) -> f32 {
+        self.inner.shimmer_apq5.value()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PerturbationReport(n_periods={}, jitter_local={:.4}, shimmer_local={:.4})",
+            self.inner.n_periods,
+            self.inner.jitter_local.value(),
+            self.inner.shimmer_local.value()
+        )
+    }
+}
+
+/// Computes jitter + shimmer for a sustained phonation. Raises
+/// `ValueError` if no voiced f0 is found or too few periods are
+/// detected (no-silent-fallback). Praat is the validation reference.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (audio, *, pitch_floor_hz=75.0, pitch_ceiling_hz=600.0))]
+fn perturbation(
+    audio: &PyAudio,
+    pitch_floor_hz: f32,
+    pitch_ceiling_hz: f32,
+) -> PyResult<PyPerturbationReport> {
+    let cfg = sadda_engine::PerturbationConfig {
+        pitch_floor_hz,
+        pitch_ceiling_hz,
+    };
+    sadda_engine::perturbation(&audio.inner, &cfg)
+        .map(|inner| PyPerturbationReport { inner })
+        .map_err(engine_err_to_py)
+}
+
 /// sadda._native — Rust extension submodule. End users should `import sadda`
 /// and use the decorated re-exports in `sadda.__init__` rather than reaching
 /// in here directly.
@@ -1927,6 +2010,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(voiced_pitch, m)?)?;
     m.add_function(wrap_pyfunction!(formants, m)?)?;
     m.add_function(wrap_pyfunction!(mfcc, m)?)?;
+    m.add_function(wrap_pyfunction!(perturbation, m)?)?;
     m.add_function(wrap_pyfunction!(new_project, m)?)?;
     m.add_function(wrap_pyfunction!(open_project, m)?)?;
     m.add_class::<PyAudio>()?;
@@ -1939,6 +2023,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyReference>()?;
     m.add_class::<PyDerivedSignal>()?;
     m.add_class::<PyFormantFrame>()?;
+    m.add_class::<PyPerturbationReport>()?;
     m.add_class::<PyProcessingRun>()?;
     m.add_class::<PyCitation>()?;
     m.add_class::<PyCalibration>()?;
