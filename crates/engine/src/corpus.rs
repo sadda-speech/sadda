@@ -732,18 +732,12 @@ impl Project {
                 [bundle_id],
             )?;
         }
-        tx.execute(
-            "DELETE FROM tier WHERE bundle_id = ?1",
-            [bundle_id],
-        )?;
+        tx.execute("DELETE FROM tier WHERE bundle_id = ?1", [bundle_id])?;
         tx.execute(
             "DELETE FROM processing_run WHERE bundle_id = ?1",
             [bundle_id],
         )?;
-        tx.execute(
-            "DELETE FROM bundle WHERE id = ?1",
-            [bundle_id],
-        )?;
+        tx.execute("DELETE FROM bundle WHERE id = ?1", [bundle_id])?;
         tx.commit()?;
 
         // Best-effort WAV removal; an orphan file is recoverable
