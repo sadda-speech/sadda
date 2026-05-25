@@ -303,6 +303,198 @@ pub fn hnr(audio: &Audio, config: &HnrConfig) -> Result<Decibels> {
     Ok(Decibels::new((sum / count as f64) as f32))
 }
 
+/// Configuration for [`cpps`].
+#[derive(Debug, Clone)]
+pub struct CppsConfig {
+    /// Cepstral-peak search lower bound, in Hz (quefrency `1/f`).
+    pub pitch_floor_hz: f32,
+    /// Cepstral-peak search upper bound, in Hz.
+    pub pitch_ceiling_hz: f32,
+    /// FFT / analysis-window length in samples (power of two).
+    pub frame_size: usize,
+    /// Frame advance, in seconds.
+    pub hop_seconds: f32,
+    /// Tilt-regression quefrency range, in seconds.
+    pub tilt_quefrency_min_s: f32,
+    /// Tilt-regression quefrency upper bound, in seconds.
+    pub tilt_quefrency_max_s: f32,
+    /// Quefrency smoothing window, in seconds (Praat's CPPS quefrency
+    /// averaging — lowers the sharp peak toward the smoothed prominence).
+    pub quefrency_smooth_s: f32,
+}
+
+impl Default for CppsConfig {
+    fn default() -> Self {
+        Self {
+            pitch_floor_hz: 60.0,
+            pitch_ceiling_hz: 330.0,
+            frame_size: 4096,
+            hop_seconds: 0.005,
+            tilt_quefrency_min_s: 0.001,
+            tilt_quefrency_max_s: 0.05,
+            quefrency_smooth_s: 0.00015,
+        }
+    }
+}
+
+/// Smoothed cepstral peak prominence (dB) of a sustained phonation —
+/// the prominence of the cepstral peak (at the f0 quefrency) above the
+/// cepstrum's regression tilt line, averaged over frames. Praat's
+/// `PowerCepstrogram` → `Get CPPS`.
+///
+/// The prominence (peak − tilt line) is invariant to the cepstrum's
+/// overall scaling, so it's robust to FFT-normalization / log-base /
+/// power-vs-magnitude conventions — only the cepstrum *shape* and the
+/// regression matter. A robust (outlier-downweighted) tilt fit keeps the
+/// peak itself from dragging the line up.
+pub fn cpps(audio: &Audio, config: &CppsConfig) -> Result<Decibels> {
+    use realfft::RealFftPlanner;
+    use rustfft::num_complex::Complex;
+
+    let sr = audio.sample_rate as f32;
+    let x: Vec<f32> = audio.mono_samples().collect();
+    let n = config.frame_size;
+    if x.len() < n {
+        return Err(EngineError::unreliable(
+            "cpps",
+            "signal shorter than one analysis frame",
+        ));
+    }
+    let window = crate::dsp::windowing::hann(n);
+    let mut planner = RealFftPlanner::<f32>::new();
+    let fwd = planner.plan_fft_forward(n);
+    let inv = planner.plan_fft_inverse(n);
+    let mut frame = fwd.make_input_vec();
+    let mut spec = fwd.make_output_vec();
+    let mut logspec = inv.make_input_vec();
+    let mut ceps = inv.make_output_vec();
+
+    let q_peak_lo = (sr / config.pitch_ceiling_hz) as usize;
+    let q_peak_hi = ((sr / config.pitch_floor_hz) as usize).min(n - 1);
+    let q_tilt_lo = ((config.tilt_quefrency_min_s * sr) as usize).max(1);
+    let q_tilt_hi = ((config.tilt_quefrency_max_s * sr) as usize).min(n / 2);
+    let hop = ((config.hop_seconds * sr) as usize).max(1);
+    if q_peak_lo >= q_peak_hi || q_tilt_lo >= q_tilt_hi {
+        return Err(EngineError::unreliable(
+            "cpps",
+            "degenerate quefrency ranges",
+        ));
+    }
+
+    let mut cpp_sum = 0.0_f64;
+    let mut count = 0usize;
+    let mut s = 0;
+    while s + n <= x.len() {
+        for i in 0..n {
+            frame[i] = x[s + i] * window[i];
+        }
+        fwd.process(&mut frame, &mut spec)
+            .expect("fft sized via make_*_vec");
+        for (dst, c) in logspec.iter_mut().zip(spec.iter()) {
+            *dst = Complex::new((c.norm_sqr() + 1e-12).ln(), 0.0);
+        }
+        inv.process(&mut logspec, &mut ceps)
+            .expect("ifft sized via make_*_vec");
+
+        // Quefrency-smooth the *power* cepstrum (Praat stores power, and
+        // power-domain averaging lowers the peak ~10·log10 rather than the
+        // harsher 20·log10 of magnitude smoothing), then dB. The dB offset
+        // still cancels in peak − tilt.
+        let qsmooth = ((config.quefrency_smooth_s * sr) as usize).max(1);
+        let power: Vec<f64> = ceps.iter().map(|&c| (c as f64) * (c as f64)).collect();
+        let smoothed = moving_average(&power, qsmooth);
+        let ceps_db: Vec<f64> = smoothed
+            .iter()
+            .map(|&p| 10.0 * (p + 1e-12).log10())
+            .collect();
+
+        // Peak in the f0 quefrency band.
+        let mut peak_q = q_peak_lo;
+        let mut peak_v = ceps_db[q_peak_lo];
+        for (q, &v) in ceps_db
+            .iter()
+            .enumerate()
+            .take(q_peak_hi + 1)
+            .skip(q_peak_lo)
+        {
+            if v > peak_v {
+                peak_v = v;
+                peak_q = q;
+            }
+        }
+        // Robust (IRLS) straight-line tilt over the regression band.
+        let (a, b) = robust_line(&ceps_db, q_tilt_lo, q_tilt_hi);
+        let line_at_peak = a + b * peak_q as f64;
+        cpp_sum += peak_v - line_at_peak;
+        count += 1;
+        s += hop;
+    }
+    if count == 0 {
+        return Err(EngineError::unreliable("cpps", "no frames"));
+    }
+    Ok(Decibels::new((cpp_sum / count as f64) as f32))
+}
+
+/// Centered moving-average smoothing with a window of `width` samples.
+fn moving_average(x: &[f64], width: usize) -> Vec<f64> {
+    if width <= 1 {
+        return x.to_vec();
+    }
+    let h = width / 2;
+    let n = x.len();
+    let mut out = vec![0.0; n];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let lo = i.saturating_sub(h);
+        let hi = (i + h + 1).min(n);
+        let win = &x[lo..hi];
+        *slot = win.iter().sum::<f64>() / win.len() as f64;
+    }
+    out
+}
+
+/// Iteratively-reweighted least-squares straight-line fit of `y[lo..=hi]`
+/// against the index, returning `(intercept, slope)`. Bisquare weights
+/// downweight outliers (e.g. the cepstral peak) so the line tracks the
+/// baseline tilt — matching Praat's "Robust" fit.
+fn robust_line(y: &[f64], lo: usize, hi: usize) -> (f64, f64) {
+    let xs: Vec<f64> = (lo..=hi).map(|q| q as f64).collect();
+    let ys: &[f64] = &y[lo..=hi];
+    let mut w = vec![1.0_f64; xs.len()];
+    let (mut a, mut b) = (0.0, 0.0);
+    for _ in 0..5 {
+        let sw: f64 = w.iter().sum();
+        let swx: f64 = w.iter().zip(&xs).map(|(w, x)| w * x).sum();
+        let swy: f64 = w.iter().zip(ys).map(|(w, y)| w * y).sum();
+        let swxx: f64 = w.iter().zip(&xs).map(|(w, x)| w * x * x).sum();
+        let swxy: f64 = w
+            .iter()
+            .zip(xs.iter().zip(ys))
+            .map(|(w, (x, y))| w * x * y)
+            .sum();
+        let denom = sw * swxx - swx * swx;
+        if denom.abs() < 1e-12 {
+            break;
+        }
+        b = (sw * swxy - swx * swy) / denom;
+        a = (swy - b * swx) / sw;
+        // Update bisquare weights from residuals.
+        let res: Vec<f64> = xs.iter().zip(ys).map(|(x, y)| y - (a + b * x)).collect();
+        let mut absr: Vec<f64> = res.iter().map(|r| r.abs()).collect();
+        absr.sort_by(|p, q| p.partial_cmp(q).unwrap());
+        let mad = absr[absr.len() / 2].max(1e-9);
+        let c = 4.685 * 1.4826 * mad;
+        for (wi, r) in w.iter_mut().zip(&res) {
+            let u = r / c;
+            *wi = if u.abs() < 1.0 {
+                (1.0 - u * u).powi(2)
+            } else {
+                0.0
+            };
+        }
+    }
+    (a, b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

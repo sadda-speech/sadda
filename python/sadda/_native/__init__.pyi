@@ -25,6 +25,7 @@ __all__ = [
     "Speaker",
     "Tier",
     "blackman",
+    "cpps",
     "f0",
     "formants",
     "gaussian",
@@ -953,6 +954,13 @@ def blackman(n: builtins.int) -> numpy.typing.NDArray[numpy.float32]:
     r"""
     Blackman window:
     `0.42 - 0.5*cos(2π n / (N-1)) + 0.08*cos(4π n / (N-1))`.
+    """
+
+def cpps(audio: Audio, *, pitch_floor_hz: builtins.float = 60.0, pitch_ceiling_hz: builtins.float = 330.0) -> builtins.float:
+    r"""
+    Smoothed cepstral peak prominence (dB) of a sustained phonation
+    (Praat's `PowerCepstrogram` → `Get CPPS`). Raises `ValueError` if the
+    signal is too short. Intended for sustained vowels.
     """
 
 def f0(audio: Audio, *, frame_size_seconds: builtins.float = 0.029999999329447746, hop_size_seconds: builtins.float = 0.009999999776482582, min_freq_hz: builtins.float = 75.0, max_freq_hz: builtins.float = 500.0) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float32]]:

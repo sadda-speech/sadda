@@ -25,7 +25,7 @@ out$ = fixtures_dir$ + "/praat_golden.tsv"
 writeFileLine: out$,
     ... "signal", tab$, "jitter_local", tab$, "jitter_rap", tab$, "jitter_ppq5",
     ... tab$, "shimmer_local", tab$, "shimmer_local_db", tab$, "shimmer_apq3",
-    ... tab$, "shimmer_apq5", tab$, "hnr_db"
+    ... tab$, "shimmer_apq5", tab$, "hnr_db", tab$, "cpps"
 
 # Voice-report defaults.
 shortest = 0.0001
@@ -64,11 +64,17 @@ for i to n
     harm = To Harmonicity (cc): 0.01, pitch_floor, 0.1, 1.0
     hnr = Get mean: 0, 0
 
+    # CPPS (B5b) — smoothed cepstral peak prominence.
+    selectObject: sound
+    pc = To PowerCepstrogram: 60, 0.002, 5000, 50
+    cpps = Get CPPS: "yes", 0.02, 0.0005, 60, 330, 0.05, "Parabolic",
+        ... 0.001, 0.05, "Straight", "Robust slow"
+
     appendFileLine: out$, stem$, tab$, jit_local, tab$, jit_rap, tab$, jit_ppq5,
         ... tab$, shim_local, tab$, shim_db, tab$, shim_apq3, tab$, shim_apq5,
-        ... tab$, hnr
+        ... tab$, hnr, tab$, cpps
 
-    removeObject: sound, pitch, pp, harm
+    removeObject: sound, pitch, pp, harm, pc
 endfor
 removeObject: strings
 writeInfoLine: "Wrote ", n, " rows to ", out$

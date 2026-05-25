@@ -49,8 +49,19 @@ def test_hnr_on_sustained_tones() -> None:
     assert 8.0 < sadda.clinical.hnr(mid) < 16.0
 
 
+def test_cpps_on_sustained_tones() -> None:
+    high = sadda.load_wav(str(FIXTURES / "hnr_high_120hz.wav"))
+    mid = sadda.load_wav(str(FIXTURES / "hnr_mid_120hz.wav"))
+    cpps_high = sadda.clinical.cpps(high)
+    cpps_mid = sadda.clinical.cpps(mid)
+    # Cleaner tone → higher cepstral prominence than the noisier one.
+    assert cpps_high > cpps_mid
+    assert 15.0 < cpps_high < 27.0
+
+
 def test_clinical_surface_is_stable_clinical() -> None:
     from sadda._stability import get_stability
 
     assert get_stability(sadda.clinical.perturbation) == "stable-clinical"
     assert get_stability(sadda.clinical.hnr) == "stable-clinical"
+    assert get_stability(sadda.clinical.cpps) == "stable-clinical"
