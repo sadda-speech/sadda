@@ -6,6 +6,36 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-25 — AVQI (B6, part 1): clean-room v03.01 formula, PROVISIONAL pending author confirmation
+
+The Acoustic Voice Quality Index — a single 0–10 dysphonia score from a weighted combination of CPPS, HNR, shimmer-local (%), shimmer-local-dB, LTAS slope, and LTAS tilt. All six component measures now exist (B4/B5 + LTAS), so this slice adds the composite.
+
+### Clean-room discipline (the governing constraint)
+
+The reference AVQI implementation is the **Phonanium Praat plugin, by Youri Maryn** (the AVQI author) — proprietary/paywalled. We implement the formula **clean-room from the peer-reviewed publications**, and will use the proprietary script (if obtained) *only as a black-box oracle to confirm output*, never as a model. (See the `clean-room-clinical-algorithms` policy.) **Validation oracles must be the authors' own artifacts** — the Phonanium script (Maryn's) or the papers' worked examples — *not* third-party reimplementations (e.g. `superassp`'s `praat_avqi`), which are just other reproductions and validate nothing.
+
+### What landed
+
+`engine::clinical::avqi(cpps, hnr, shimmer_local_pct, shimmer_local_db, slope, tilt) -> f32` — the published **v03.01** formula `2.571·(3.295 − 0.111·CPPS − 0.073·HNR − 0.213·SL + 2.789·SLdB − 0.032·Slope + 0.077·Tilt)`, clamped to [0, 10]. Exposed as `sadda.clinical.avqi`, tiered **`provisional`** (not `stable_clinical`) — a deliberate honesty marker: it is not yet reference-confirmed, so its absolute values may change.
+
+### What's verified vs not
+
+- **Verified**: the formula arithmetic, and that the published worked-example component vectors order correctly (Maryn 2015 Fig 1 normal → 1.13 here < Fig 2 dysphonic → 4.82) and stay in [0, 10].
+- **Not verified (open, for the authors)**: ① the v03.01 coefficients couldn't be byte-checked against a *v03.01* worked example — the accessible examples are script v02.02 and read 2.76 / 5.92 for those same vectors (a version-scaling difference); ② AVQI's exact **slope/tilt definitions** (tilt is a dB trendline value, not the dB/kHz `Ltas::tilt`; slope's LTAS bands). Because ② is unsettled, the **audio→AVQI wiring is deliberately deferred** — `avqi()` takes the six components directly, leaving their AVQI-protocol measurement to be pinned once confirmed.
+
+### Deferred
+
+- **`avqi_from_audio`** — pending the slope/tilt definitions.
+- **ABI** — needs ~5 measures we don't have (GNE, H1–H2, PSD, Hₙₒ‑6000, HNR‑D); its own cluster of work.
+
+### Sources / references
+
+- Maryn & Weenink (2015), *J. Voice* 29(1) — CPPS + AVQI (primary; worked examples)
+- Barsties von Latoszek et al. — AVQI v03.01 (coefficients)
+- `clean-room-clinical-algorithms` policy (this session)
+
+---
+
 ## 2026-05-25 — Long-term average spectrum (LTAS) as a first-class feature
 
 Promoted from "an AVQI helper" to a first-class `sadda.dsp` feature at the user's request — LTAS is a core phonetics tool (spectral slope, tilt, alpha ratio underpin voice-quality work broadly), and it's also where B6's AVQI slope/tilt parameters come from.

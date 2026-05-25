@@ -25,6 +25,7 @@ __all__ = [
     "Session",
     "Speaker",
     "Tier",
+    "avqi",
     "blackman",
     "cpps",
     "f0",
@@ -988,6 +989,14 @@ class Tier:
         ISO 8601 UTC creation timestamp.
         """
     def __repr__(self) -> builtins.str: ...
+
+def avqi(cpps: builtins.float, hnr: builtins.float, shimmer_local_pct: builtins.float, shimmer_local_db: builtins.float, slope: builtins.float, tilt: builtins.float) -> builtins.float:
+    r"""
+    Acoustic Voice Quality Index v03.01 from its six components. Clean-room
+    from the publications; **not yet confirmed against the reference Praat
+    script** (exposed as PROVISIONAL). Units: CPPS / HNR / shimmer-dB /
+    slope / tilt in dB, shimmer-local as a percent.
+    """
 
 def blackman(n: builtins.int) -> numpy.typing.NDArray[numpy.float32]:
     r"""
