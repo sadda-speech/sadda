@@ -1,6 +1,6 @@
 # sadda
 
-*Sadda* (Pali: सद्द) — *sound, voice*.
+_Sadda_ ([Pali](https://en.wikipedia.org/wiki/Pali): सद्द) — _sound, voice_.
 
 An open-source toolkit for phonetics and speech-science research.
 
@@ -10,10 +10,10 @@ sadda is **for research, education, and non-diagnostic use only.** It is
 not a medical device and makes no diagnostic, therapeutic, or treatment
 claims. Its clinical-style measures (jitter, shimmer, HNR, CPP, AVQI,
 ABI, …) are provided for research and education; they are implemented
-with validation suites and provenance so a downstream entity *could*
+with validation suites and provenance so a downstream entity _could_
 pursue regulatory clearance, but sadda itself is not cleared and takes
 no liability for clinical decisions made with it. "Research use" by
-long convention includes clinical-*research* contexts.
+long convention includes clinical-_research_ contexts.
 
 ## Install
 
@@ -82,11 +82,11 @@ Full walk-through at the [quickstart](https://sadda-speech.github.io/sadda/quick
 
 Status by module:
 
-| Tier | Modules |
-|---|---|
-| **Stable** | `sadda.corpus`, `sadda.dsp`, top-level project loaders |
-| **Provisional** | `sadda.live`, `sadda.recipe` |
-| **Experimental** | none yet |
+| Tier             | Modules                                                |
+| ---------------- | ------------------------------------------------------ |
+| **Stable**       | `sadda.corpus`, `sadda.dsp`, top-level project loaders |
+| **Provisional**  | `sadda.live`, `sadda.recipe`                           |
+| **Experimental** | none yet                                               |
 
 ## Documentation
 
@@ -169,3 +169,7 @@ Dual-licensed under either of:
 at your option.
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual-licensed as above, without any additional terms or conditions.
+
+## AI and human acknowledgement
+
+This project was developed with the assistance of an AI tool (Claude Code, made by Anthropic). Large language models like Claude are trained on large corpora of text and code, which include publicly available source code written by many human developers. While the model does not copy or retrieve specific files when generating suggestions, its capabilities are fundamentally built upon patterns learned from this collective body of human work. We acknowledge that the AI assistance used in this project rests on the contributions of countless developers whose code formed part of that training, even though they cannot be individually credited.
