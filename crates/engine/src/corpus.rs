@@ -785,6 +785,71 @@ impl Project {
         Ok(name)
     }
 
+    /// Path to the project's `project.toml` marker/config file.
+    fn project_toml_path(&self) -> PathBuf {
+        self.root.join("project.toml")
+    }
+
+    /// Parses `project.toml` into a TOML table (empty table if absent).
+    fn read_project_toml(&self) -> Result<toml::Table> {
+        let path = self.project_toml_path();
+        if !path.exists() {
+            return Ok(toml::Table::new());
+        }
+        let text = std::fs::read_to_string(&path)?;
+        toml::from_str(&text)
+            .map_err(|e| EngineError::RefDist(format!("invalid project.toml: {e}")))
+    }
+
+    /// Pins a reference distribution `id` to a specific `version` for this
+    /// project, recorded under `[refdist]` in `project.toml` so the choice
+    /// travels with the project and reopens reproducibly (C7). Overwrites
+    /// any existing pin for the same id.
+    pub fn pin_refdist(&self, id: &str, version: &str) -> Result<()> {
+        let mut doc = self.read_project_toml()?;
+        let table = doc
+            .entry("refdist".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let toml::Value::Table(pins) = table else {
+            return Err(EngineError::RefDist(
+                "project.toml [refdist] is not a table".into(),
+            ));
+        };
+        pins.insert(id.to_string(), toml::Value::String(version.to_string()));
+        std::fs::write(self.project_toml_path(), toml::to_string(&doc).unwrap())?;
+        Ok(())
+    }
+
+    /// The reference distributions this project has pinned, as
+    /// `(id, version)` pairs sorted by id.
+    pub fn refdist_pins(&self) -> Result<Vec<(String, String)>> {
+        let doc = self.read_project_toml()?;
+        let mut out = Vec::new();
+        if let Some(toml::Value::Table(pins)) = doc.get("refdist") {
+            for (id, v) in pins {
+                if let Some(version) = v.as_str() {
+                    out.push((id.clone(), version.to_string()));
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    /// Removes a reference-distribution pin. Returns `true` if a pin for
+    /// `id` was present.
+    pub fn remove_refdist_pin(&self, id: &str) -> Result<bool> {
+        let mut doc = self.read_project_toml()?;
+        let removed = match doc.get_mut("refdist") {
+            Some(toml::Value::Table(pins)) => pins.remove(id).is_some(),
+            _ => false,
+        };
+        if removed {
+            std::fs::write(self.project_toml_path(), toml::to_string(&doc).unwrap())?;
+        }
+        Ok(removed)
+    }
+
     /// Registers a new bundle by copying `source_audio_path` into the project's
     /// `signals/original/` directory and recording its metadata in the corpus
     /// database. Returns the new bundle's id. Convenience wrapper around
@@ -3228,6 +3293,57 @@ mod tests {
         assert!(root.join("attachments").is_dir());
         assert!(root.join("exports").is_dir());
         assert_eq!(project.name().unwrap(), "test_project");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn refdist_pins_round_trip_in_project_toml() {
+        let root = unique_dir("refdist_pins");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let project = Project::create(&root, "p_pins").unwrap();
+        assert!(project.refdist_pins().unwrap().is_empty());
+
+        project
+            .pin_refdist("hillenbrand-1995-amE-vowels", "1.0.0")
+            .unwrap();
+        project
+            .pin_refdist("clinical-jitter-norms", "0.2.0")
+            .unwrap();
+        // Overwriting an existing pin replaces the version.
+        project
+            .pin_refdist("clinical-jitter-norms", "0.3.0")
+            .unwrap();
+
+        let pins = project.refdist_pins().unwrap();
+        assert_eq!(
+            pins,
+            vec![
+                ("clinical-jitter-norms".to_string(), "0.3.0".to_string()),
+                (
+                    "hillenbrand-1995-amE-vowels".to_string(),
+                    "1.0.0".to_string()
+                ),
+            ]
+        );
+
+        // The original project.toml keys survive the rewrite.
+        let reopened = Project::open(&root).unwrap();
+        assert_eq!(reopened.name().unwrap(), "p_pins");
+        assert_eq!(reopened.refdist_pins().unwrap().len(), 2);
+
+        assert!(
+            reopened
+                .remove_refdist_pin("clinical-jitter-norms")
+                .unwrap()
+        );
+        assert!(
+            !reopened
+                .remove_refdist_pin("clinical-jitter-norms")
+                .unwrap()
+        );
+        assert_eq!(reopened.refdist_pins().unwrap().len(), 1);
 
         let _ = std::fs::remove_dir_all(&root);
     }

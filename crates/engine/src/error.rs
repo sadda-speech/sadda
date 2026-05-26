@@ -32,6 +32,11 @@ pub enum EngineError {
     #[error("corpus error: {0}")]
     Corpus(String),
 
+    /// A reference-distribution manifest failed to parse or a store
+    /// operation failed (bad `refdist.toml`, missing data file, …).
+    #[error("reference-distribution error: {0}")]
+    RefDist(String),
+
     /// The corpus database is at a higher schema version than this engine
     /// knows how to read. Forward-compat clamp: the engine refuses to open
     /// rather than risk operating on tables it doesn't understand. Resolution

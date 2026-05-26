@@ -674,6 +674,21 @@ class Project:
         Sets the user string written into `audit_log.user` for subsequent
         mutations on this connection.
         """
+    def pin_refdist(self, id: builtins.str, version: builtins.str) -> None:
+        r"""
+        Pins a reference distribution `id` to a specific `version` in
+        `project.toml`, so the project reopens against the same data for
+        reproducibility (C7). Overwrites any existing pin for that id.
+        """
+    def refdist_pins(self) -> builtins.dict[builtins.str, builtins.str]:
+        r"""
+        The reference distributions this project has pinned, as a
+        `{id: version}` dict.
+        """
+    def remove_refdist_pin(self, id: builtins.str) -> builtins.bool:
+        r"""
+        Removes a reference-distribution pin; returns whether one existed.
+        """
     def add_tier(self, bundle_id: builtins.int, name: builtins.str, r#type: builtins.str, *, parent_id: typing.Optional[builtins.int] = None, cardinality: typing.Optional[builtins.str] = None, schema: typing.Optional[builtins.str] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
         r"""
         Inserts a Tier row. `type` is one of `interval`, `point`, `reference`,

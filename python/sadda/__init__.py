@@ -12,7 +12,7 @@ entry and the 2026-05-21 A2 entry.
 
 from __future__ import annotations
 
-from sadda import _native, clinical, dsp
+from sadda import _native, clinical, dsp, refdist
 from sadda._stability import (
     ExperimentalAPIWarning,
     ProvisionalAPIWarning,
@@ -49,6 +49,7 @@ __all__ = [
     "new_project",
     "open_project",
     "provisional",
+    "refdist",
     "schema_version",
     "stable",
     "stable_clinical",
