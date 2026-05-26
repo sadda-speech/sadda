@@ -40,7 +40,15 @@ from typing import Any, Optional
 from sadda import _native
 from sadda._stability import provisional
 
-__all__ = ["RefDist", "get", "install", "list_all", "query", "store_root"]
+__all__ = [
+    "RefDist",
+    "get",
+    "install",
+    "list_all",
+    "query",
+    "scaffold",
+    "store_root",
+]
 
 RefDist = _native.refdist.RefDist
 
@@ -107,6 +115,79 @@ def install(src_dir: str, *, root: Optional[str] = None) -> RefDist:
     file) into the store by copying it in — how the bundled starter set
     seeds the user cache. Returns the installed distribution."""
     return _native.refdist.install(src_dir, root=root)
+
+
+@provisional
+def scaffold(
+    dest_dir: str,
+    data: Any,
+    *,
+    id: str,  # noqa: A002
+    version: str,
+    kind: str,
+    parameters: "Optional[list[str]]" = None,
+    title: Optional[str] = None,
+    doi: Optional[str] = None,
+    license: Optional[str] = None,  # noqa: A002
+    language: Optional[str] = None,
+    variety: Optional[str] = None,
+    sex: "Optional[list[str]]" = None,
+    age_band: "Optional[list[str]]" = None,
+    units: Optional[str] = None,
+    phones: "Optional[list[str]]" = None,
+    shareability: Optional[str] = None,
+    min_n_per_subgroup: Optional[int] = None,
+    authors: "Optional[list[str]]" = None,
+    year: Optional[int] = None,
+    provenance: Optional[str] = None,
+) -> RefDist:
+    """Scaffold a publishable distribution directory from an analysis
+    result (C9). Writes ``data.parquet`` from ``data`` (a
+    ``polars.DataFrame``), then ``refdist.toml`` + ``provenance.md`` + a
+    ``LICENSE`` stub from the metadata. ``schema.columns`` is taken from
+    the DataFrame, and ``n_speakers`` is inferred from a ``speaker_id``
+    column if present.
+
+    The result is immediately resolvable and passes the registry
+    validator once you (a) replace the LICENSE stub with the full license
+    text and (b) fill in real provenance. To submit, copy the directory
+    under the registry's ``tier3/<id>/`` and open a fork-and-PR (the auth
+    is your GitHub credentials, not sadda's).
+    """
+    import polars as pl
+    from pathlib import Path
+
+    if not isinstance(data, pl.DataFrame):
+        raise TypeError("data must be a polars.DataFrame")
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    data.write_parquet(dest / "data.parquet")
+
+    n_speakers = data["speaker_id"].n_unique() if "speaker_id" in data.columns else None
+    return _native.refdist.scaffold(
+        str(dest),
+        id=id,
+        version=version,
+        kind=kind,
+        columns=list(data.columns),
+        parameters=parameters,
+        data_file="data.parquet",
+        title=title,
+        doi=doi,
+        license=license,
+        language=language,
+        variety=variety,
+        sex=sex,
+        age_band=age_band,
+        n_speakers=n_speakers,
+        units=units,
+        phones=phones,
+        shareability=shareability,
+        min_n_per_subgroup=min_n_per_subgroup,
+        authors=authors,
+        year=year,
+        provenance=provenance,
+    )
 
 
 @provisional

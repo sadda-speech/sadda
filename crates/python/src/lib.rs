@@ -2346,6 +2346,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     refdist_mod.add_function(wrap_pyfunction!(refdist::get, &refdist_mod)?)?;
     refdist_mod.add_function(wrap_pyfunction!(refdist::list_all, &refdist_mod)?)?;
     refdist_mod.add_function(wrap_pyfunction!(refdist::install, &refdist_mod)?)?;
+    refdist_mod.add_function(wrap_pyfunction!(refdist::scaffold, &refdist_mod)?)?;
     refdist_mod.add_function(wrap_pyfunction!(refdist::store_root, &refdist_mod)?)?;
     refdist_mod.add_class::<refdist::PyRefDist>()?;
     m.add_submodule(&refdist_mod)?;
