@@ -31,6 +31,7 @@ __all__ = [
     "f0",
     "formants",
     "gaussian",
+    "gne",
     "h1_h2",
     "hamming",
     "hann",
@@ -1035,6 +1036,14 @@ def formants(audio: Audio, *, frame_size_seconds: builtins.float = 0.02500000037
 def gaussian(n: builtins.int, sigma: builtins.float) -> numpy.typing.NDArray[numpy.float32]:
     r"""
     Gaussian window of length `n` with standard deviation `sigma` (in samples).
+    """
+
+def gne(audio: Audio, *, downsample_hz: builtins.int = 10000, lpc_order: builtins.int = 13, bandwidth_hz: builtins.float = 1000.0, fshift_hz: builtins.float = 300.0) -> builtins.float:
+    r"""
+    Glottal-to-Noise Excitation ratio (Michaelis et al. 1997), in [0, 1] — a
+    breathiness / turbulent-noise correlate and an ABI component. ~1 for
+    pulsatile (glottal) excitation, toward 0 for turbulent noise. Raises
+    `ValueError` if the signal is too short. Intended for sustained vowels.
     """
 
 def h1_h2(audio: Audio, *, pitch_floor_hz: builtins.float = 75.0, pitch_ceiling_hz: builtins.float = 600.0) -> builtins.float:

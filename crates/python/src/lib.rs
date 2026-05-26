@@ -2111,6 +2111,31 @@ fn h1_h2(audio: &PyAudio, pitch_floor_hz: f32, pitch_ceiling_hz: f32) -> PyResul
         .map_err(engine_err_to_py)
 }
 
+/// Glottal-to-Noise Excitation ratio (Michaelis et al. 1997), in [0, 1] — a
+/// breathiness / turbulent-noise correlate and an ABI component. ~1 for
+/// pulsatile (glottal) excitation, toward 0 for turbulent noise. Raises
+/// `ValueError` if the signal is too short. Intended for sustained vowels.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (audio, *, downsample_hz=10_000, lpc_order=13, bandwidth_hz=1000.0, fshift_hz=300.0))]
+fn gne(
+    audio: &PyAudio,
+    downsample_hz: u32,
+    lpc_order: usize,
+    bandwidth_hz: f32,
+    fshift_hz: f32,
+) -> PyResult<f32> {
+    let cfg = sadda_engine::GneConfig {
+        downsample_hz,
+        lpc_order,
+        bandwidth_hz,
+        fshift_hz,
+    };
+    sadda_engine::gne(&audio.inner, &cfg)
+        .map(|r| r.value())
+        .map_err(engine_err_to_py)
+}
+
 /// Acoustic Voice Quality Index v03.01 from its six components. Clean-room
 /// from the publications; **not yet confirmed against the reference Praat
 /// script** (exposed as PROVISIONAL). Units: CPPS / HNR / shimmer-dB /
@@ -2153,6 +2178,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hnr, m)?)?;
     m.add_function(wrap_pyfunction!(cpps, m)?)?;
     m.add_function(wrap_pyfunction!(h1_h2, m)?)?;
+    m.add_function(wrap_pyfunction!(gne, m)?)?;
     m.add_function(wrap_pyfunction!(avqi, m)?)?;
     m.add_function(wrap_pyfunction!(new_project, m)?)?;
     m.add_function(wrap_pyfunction!(open_project, m)?)?;

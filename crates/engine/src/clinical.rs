@@ -626,6 +626,187 @@ pub fn h1_h2(audio: &Audio, config: &H1H2Config) -> Result<Decibels> {
     Ok(Decibels::new((sum / count as f64) as f32))
 }
 
+/// Configuration for [`gne`].
+#[derive(Debug, Clone)]
+pub struct GneConfig {
+    /// Analysis sample rate; the signal is band-limited and resampled to
+    /// this rate before analysis (Michaelis et al.: 10 kHz).
+    pub downsample_hz: u32,
+    /// LPC order of the inverse (whitening) filter, at `downsample_hz`.
+    pub lpc_order: usize,
+    /// Bandpass bandwidth, Hz (Michaelis et al. optimal: 1000).
+    pub bandwidth_hz: f32,
+    /// Center-frequency step between adjacent bands, Hz (Michaelis et al.
+    /// optimal: 300).
+    pub fshift_hz: f32,
+}
+
+impl Default for GneConfig {
+    fn default() -> Self {
+        Self {
+            downsample_hz: 10_000,
+            lpc_order: 13,
+            bandwidth_hz: 1000.0,
+            fshift_hz: 300.0,
+        }
+    }
+}
+
+/// Glottal-to-Noise Excitation ratio (Michaelis, Gramß & Strube 1997): a
+/// breathiness / turbulent-noise correlate in `[0, 1]` and an ABI
+/// component. Pulsatile (glottal) excitation drives all frequency bands
+/// synchronously → highly correlated band envelopes → GNE near 1;
+/// turbulent noise excites bands independently → low correlation → GNE
+/// toward 0.
+///
+/// Algorithm: band-limit + resample to `downsample_hz`, inverse-filter
+/// (LPC whitening) to the excitation residual, take the Hilbert envelope
+/// of each `bandwidth_hz` band stepped by `fshift_hz`, and return the
+/// maximum correlation over band pairs whose centers differ by at least
+/// half a bandwidth (non-overlapping passbands). Because the FFT bandpass
+/// is zero-phase, synchronous excitation shows up at lag 0, so the
+/// per-pair correlation is evaluated there.
+///
+/// [`EngineError::Unreliable`] if the signal is too short to form ≥2
+/// bands.
+pub fn gne(audio: &Audio, config: &GneConfig) -> Result<Ratio> {
+    use rustfft::{FftPlanner, num_complex::Complex};
+
+    let mono: Vec<f32> = audio.mono_samples().collect();
+    let x = resample_to_hz(&mono, audio.sample_rate, config.downsample_hz);
+    let fs = config.downsample_hz as f32;
+    if x.len() <= config.lpc_order * 4 || x.len() < 256 {
+        return Err(EngineError::unreliable("gne", "signal too short"));
+    }
+
+    // Inverse-filter (LPC whitening) → excitation residual e[n].
+    let lpc = crate::dsp::lpc::lpc(
+        &x,
+        config.lpc_order,
+        crate::dsp::lpc::LpcMethod::Autocorrelation,
+    )
+    .map_err(|_| EngineError::unreliable("gne", "LPC inverse filter failed"))?;
+    let residual = inverse_filter(&x, &lpc.coeffs);
+
+    // FFT the residual once; each band reuses it.
+    let l = residual.len();
+    let mut planner = FftPlanner::<f32>::new();
+    let fwd = planner.plan_fft_forward(l);
+    let inv = planner.plan_fft_inverse(l);
+    let mut spec: Vec<Complex<f32>> = residual.iter().map(|&v| Complex::new(v, 0.0)).collect();
+    fwd.process(&mut spec);
+
+    // Band center frequencies, and their Hilbert envelopes.
+    let half = config.bandwidth_hz / 2.0;
+    let mut centers = Vec::new();
+    let mut fc = half;
+    while fc <= fs / 2.0 - half {
+        centers.push(fc);
+        fc += config.fshift_hz;
+    }
+    if centers.len() < 2 {
+        return Err(EngineError::unreliable("gne", "too few frequency bands"));
+    }
+    let norm = 1.0 / l as f32;
+    let envelopes: Vec<Vec<f32>> = centers
+        .iter()
+        .map(|&fc| {
+            let klo = (((fc - half) * l as f32 / fs).round() as usize).max(1);
+            let khi = (((fc + half) * l as f32 / fs).round() as usize).min(l / 2);
+            // Analytic signal: keep this band's positive-freq bins (×2),
+            // zero everything else; |IFFT| is the Hilbert envelope.
+            let mut z = vec![Complex::<f32>::new(0.0, 0.0); l];
+            for k in klo..=khi {
+                z[k] = spec[k] * 2.0;
+            }
+            inv.process(&mut z);
+            z.iter().map(|c| c.norm() * norm).collect()
+        })
+        .collect();
+
+    // GNE = max correlation over non-overlapping band pairs.
+    let mut gne = 0.0_f32;
+    for i in 0..centers.len() {
+        for j in (i + 1)..centers.len() {
+            if (centers[i] - centers[j]).abs() >= half {
+                gne = gne.max(zero_lag_corr(&envelopes[i], &envelopes[j]));
+            }
+        }
+    }
+    Ok(Ratio::new(gne))
+}
+
+/// Linear-prediction inverse filter: `e[n] = x[n] + Σ_k a_k·x[n−k]`,
+/// where `coeffs = [a_1, …, a_p]`. Flattens (whitens) the spectrum,
+/// recovering the source excitation.
+fn inverse_filter(x: &[f32], coeffs: &[f32]) -> Vec<f32> {
+    let mut e = vec![0.0_f32; x.len()];
+    for n in 0..x.len() {
+        let mut acc = x[n];
+        for (k, &a) in coeffs.iter().enumerate() {
+            if n > k {
+                acc += a * x[n - k - 1];
+            }
+        }
+        e[n] = acc;
+    }
+    e
+}
+
+/// Zero-lag normalized (Pearson) correlation of two equal-length signals.
+fn zero_lag_corr(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len().min(b.len());
+    if n == 0 {
+        return 0.0;
+    }
+    let ma = a[..n].iter().map(|&v| v as f64).sum::<f64>() / n as f64;
+    let mb = b[..n].iter().map(|&v| v as f64).sum::<f64>() / n as f64;
+    let (mut num, mut da, mut db) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for i in 0..n {
+        let (xa, xb) = (a[i] as f64 - ma, b[i] as f64 - mb);
+        num += xa * xb;
+        da += xa * xa;
+        db += xb * xb;
+    }
+    if da <= 0.0 || db <= 0.0 {
+        return 0.0;
+    }
+    (num / (da.sqrt() * db.sqrt())) as f32
+}
+
+/// Band-limited resample of `signal` from `fs_in` to `fs_out` via the
+/// frequency domain (à la `scipy.signal.resample`): forward FFT, copy the
+/// in-band bins into a spectrum of the new length, inverse FFT. For
+/// downsampling this folds in the anti-alias low-pass. Approximate at the
+/// Nyquist bin — fine here since GNE uses bands strictly below it.
+fn resample_to_hz(signal: &[f32], fs_in: u32, fs_out: u32) -> Vec<f32> {
+    use rustfft::{FftPlanner, num_complex::Complex};
+
+    if fs_in == fs_out || signal.len() < 2 {
+        return signal.to_vec();
+    }
+    let n = signal.len();
+    let m = ((n as u64 * fs_out as u64) / fs_in as u64) as usize;
+    if m < 2 {
+        return signal.to_vec();
+    }
+    let mut planner = FftPlanner::<f32>::new();
+    let fwd = planner.plan_fft_forward(n);
+    let inv = planner.plan_fft_inverse(m);
+    let mut buf: Vec<Complex<f32>> = signal.iter().map(|&v| Complex::new(v, 0.0)).collect();
+    fwd.process(&mut buf);
+
+    let mut out = vec![Complex::<f32>::new(0.0, 0.0); m];
+    let half = n.min(m) / 2;
+    out[..=half].copy_from_slice(&buf[..=half]); // positive freqs incl. DC
+    for k in 1..=half {
+        out[m - k] = buf[n - k]; // mirror negatives
+    }
+    inv.process(&mut out);
+    let scale = 1.0 / n as f32;
+    out.iter().map(|c| c.re * scale).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

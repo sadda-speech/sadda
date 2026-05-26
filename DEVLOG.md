@@ -6,6 +6,40 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-25 — ABI component: GNE (glottal-to-noise excitation)
+
+Second ABI component. GNE asks whether the excitation is **pulsatile** (glottal-fold vibration drives every frequency band in lock-step) or **turbulent noise** (bands excited independently). A correlation in [0, 1]: ~1 for a clean voice, dropping toward 0 as breathiness/noise grows.
+
+### Algorithm (clean-room from Michaelis, Gramß & Strube 1997)
+
+`engine::clinical::gne(audio, &GneConfig) -> Result<Ratio>`:
+
+1. Band-limit + resample to 10 kHz (FFT-domain, scipy-`resample`-style — the anti-alias low-pass folds into the bin copy).
+2. **Inverse-filter** (LPC whitening, order 13) → the excitation residual `e[n]`, stripping the formant envelope so band energies reflect the *source*.
+3. For each band of bandwidth **1000 Hz** stepped by **300 Hz** (Michaelis et al.'s optimal screening parameters), take the **Hilbert envelope** (FFT bandpass → analytic signal → magnitude).
+4. **GNE = max correlation** over band pairs whose centers differ by ≥ ½·bandwidth (non-overlapping passbands). Because the FFT bandpass is **zero-phase**, synchronous excitation lands at lag 0, so the per-pair correlation is evaluated there (rather than searching the cross-correlation function over lags — equivalent here, fewer DOF for noise to exploit).
+
+The 10 kHz / order-13 / 1000 Hz / 300 Hz parametrization is the canonical one (the screening literature reports 90 % accuracy at bw=1000, fshift=300).
+
+### Validation (no Praat oracle → qualitative + analytic-extreme)
+
+There is **no Praat GNE**, so this is validated by its defining behaviour rather than a golden number:
+
+- **Synthetic extremes** (engine test): a periodic pulse train → GNE > 0.8 (measured ~1.0); white noise → GNE < 0.5. The measure separates the two regimes it's built to distinguish.
+- **Fixture ordering**: clean `hnr_high` (25 dB) **0.997** > noisy `hnr_mid` (12 dB) **0.962** > … ; the pure pulse-trains (`clean`, `shimmer`) read 1.000. GNE saturates near 1 for moderately clean voices and only falls with substantial noise — the expected, clinically-reported behaviour.
+
+### Stability tier
+
+`sadda.clinical.gne`, tiered **`provisional`** (like AVQI, unlike the analytically-pinned H1–H2): the algorithm follows the published canonical parametrization, but absolute values aren't yet confirmed against an authors'/reference oracle. Promotable once the Phonanium plugin (colleague pursuing) confirms.
+
+### Sources / references
+
+- Michaelis, Gramß & Strube (1997), *Acta Acustica* 83 — GNE, the original.
+- Godino-Llorente et al. (2010), *J. Voice* — "Effectiveness of GNE for screening": bw=1000 / fshift=300 optimal.
+- Barsties von Latoszek et al. (2017) — ABI and its component set (the assembly target).
+
+---
+
 ## 2026-05-25 — ABI component: H1–H2 (first of the breathiness measures)
 
 The Acoustic Breathiness Index (ABI), like AVQI, is a weighted composite — but of measures we mostly don't have yet (GNE, H1–H2, PSD, Hₙₒ‑6000, HNR‑D). Rather than land ABI as a black box, we're building each component as a **first-class, independently-useful measure**, then assembling the composite once all are validated. Starting with the most tractable and broadly-useful: **H1–H2**.

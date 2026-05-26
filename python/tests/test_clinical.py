@@ -77,6 +77,21 @@ def test_h1_h2_unreliable_raises(tmp_path) -> None:
         sadda.clinical.h1_h2(audio)
 
 
+def test_gne_orders_clean_above_noisy_and_is_provisional() -> None:
+    import warnings
+
+    from sadda._stability import get_stability
+
+    assert get_stability(sadda.clinical.gne) == "provisional"
+    high = sadda.load_wav(str(FIXTURES / "hnr_high_120hz.wav"))
+    mid = sadda.load_wav(str(FIXTURES / "hnr_mid_120hz.wav"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        g_high = sadda.clinical.gne(high)
+        g_mid = sadda.clinical.gne(mid)
+    assert 0.0 <= g_mid < g_high <= 1.0
+
+
 def test_avqi_formula_orders_and_is_provisional() -> None:
     import warnings
 
