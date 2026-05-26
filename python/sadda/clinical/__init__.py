@@ -19,6 +19,7 @@ __all__ = [
     "PerturbationReport",
     "avqi",
     "cpps",
+    "gne",
     "h1_h2",
     "hnr",
     "perturbation",
@@ -29,6 +30,13 @@ PerturbationReport = stable_clinical(_native.PerturbationReport)
 hnr = stable_clinical(_native.hnr)
 cpps = stable_clinical(_native.cpps)
 h1_h2 = stable_clinical(_native.h1_h2)
+
+# GNE is PROVISIONAL: the algorithm follows the canonical published
+# parametrization (Michaelis et al. 1997; bw=1000, fshift=300 Hz), and
+# its behaviour is validated qualitatively (discriminates pulsatile from
+# turbulent excitation, orders clean>noisy), but its absolute values are
+# not yet confirmed against a reference oracle — there is no Praat GNE.
+gne = provisional(_native.gne)
 
 # AVQI is PROVISIONAL, not stable_clinical: the v03.01 formula is
 # clean-room from the publications but not yet confirmed against the

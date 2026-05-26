@@ -184,6 +184,80 @@ fn h1_h2_on_one_over_h_harmonic_tone() {
 }
 
 #[test]
+fn gne_discriminates_pulsatile_from_noise() {
+    use sadda_engine::{GneConfig, gne};
+
+    let sr = 44_100u32;
+    let n = sr as usize; // 1 s
+
+    // A periodic glottal-like pulse train: every band is excited
+    // synchronously → GNE near 1.
+    let f0 = 120.0_f32;
+    let period = (sr as f32 / f0).round() as usize;
+    let mut pulses = vec![0.0_f32; n];
+    let mut i = 0;
+    while i < n {
+        // a short decaying ring per pulse (broadband excitation)
+        for k in 0..period / 2 {
+            if i + k >= n {
+                break;
+            }
+            let tau = k as f32 / sr as f32;
+            pulses[i + k] +=
+                (-tau / 0.0016).exp() * (2.0 * std::f32::consts::PI * 900.0 * tau).sin();
+        }
+        i += period;
+    }
+    let pulse_audio = Audio {
+        samples: pulses,
+        sample_rate: sr,
+        channels: 1,
+    };
+
+    // White noise: bands excited independently → GNE low.
+    let mut state = 0x2545_F491_4F6C_DD1Du64;
+    let noise: Vec<f32> = (0..n)
+        .map(|_| {
+            // xorshift64 → [-1, 1)
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f32 / (1u64 << 53) as f32 * 2.0 - 1.0
+        })
+        .collect();
+    let noise_audio = Audio {
+        samples: noise,
+        sample_rate: sr,
+        channels: 1,
+    };
+
+    let g_pulse = gne(&pulse_audio, &GneConfig::default()).unwrap().value();
+    let g_noise = gne(&noise_audio, &GneConfig::default()).unwrap().value();
+    assert!(g_pulse > 0.8, "pulsatile GNE {g_pulse}, expected near 1");
+    assert!(g_noise < 0.5, "noise GNE {g_noise}, expected low");
+    assert!(
+        g_pulse > g_noise + 0.3,
+        "pulse {g_pulse} vs noise {g_noise}"
+    );
+}
+
+#[test]
+fn gne_orders_clean_above_noisy_fixture() {
+    use sadda_engine::{GneConfig, gne};
+    // hnr_high (25 dB) is cleaner than hnr_mid (12 dB): more pulsatile,
+    // so higher GNE.
+    let high = Audio::from_wav_path(fixtures_dir().join("hnr_high_120hz.wav")).unwrap();
+    let mid = Audio::from_wav_path(fixtures_dir().join("hnr_mid_120hz.wav")).unwrap();
+    let g_high = gne(&high, &GneConfig::default()).unwrap().value();
+    let g_mid = gne(&mid, &GneConfig::default()).unwrap().value();
+    assert!(
+        g_high > g_mid,
+        "clean GNE {g_high} should exceed noisy {g_mid}"
+    );
+    assert!(g_high > 0.6, "clean GNE {g_high} unexpectedly low");
+}
+
+#[test]
 fn clean_signal_is_near_zero() {
     let r = measure("clean_120hz");
     assert!(
