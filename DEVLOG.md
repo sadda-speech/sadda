@@ -6,6 +6,45 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-25 — ABI assembled: Hfno-6000, HNR-D, and the composite (B6 complete)
+
+The last three pieces of the **Acoustic Breathiness Index** (Barsties von Latoszek et al. 2017): the two remaining component measures, plus the composite. With H1–H2, GNE, and PSD already done (and CPPS, jitter, shimmer, shimmer-dB from B4/B5), all **nine** ABI components now exist.
+
+### Found the published formula
+
+An open-access validation paper (Kankare/Finnish, *PMC10743974*) quotes the full v01 regression verbatim:
+
+```
+ABI = (5.0447740915 − 0.172·CPPS − 0.193·Jit − 1.283·GNE − 0.396·Hfno-6000
+       + 0.01·HNR-D + 0.017·H1−H2 + 1.473·Shim-dB − 0.088·Shim
+       − 68.295·PSD) × 2.9257400394,  clamped to [0, 10]
+```
+
+### The two new components
+
+- **`hfno(audio)` — Hfno-6000** (dB): the LTAS level difference between the 0–6 kHz and 6–10 kHz bands, `10·log10(P[0–6k]/P[6–10k])`. Reuses the LTAS feature. Needs ≥20 kHz sample rate. Validated: cleaner `hnr_high` **30.6 dB** > noisier `hnr_mid` **17.6 dB** (more HF noise ⇒ smaller difference). Tier **provisional** — the exact band-level convention isn't confirmed.
+- **`hnr_d(audio, …)` — HNR-D** (Dejonckere–Lebacq, dB): mean harmonic-peak power vs the inter-harmonic noise-floor power over the 500–1500 Hz formant zone, on an averaged 8192-pt periodogram. **CLEAN-ROOM from the ABI papers' one-line prose, not Dejonckere & Lebacq's exact procedure** (which wasn't accessible) — so explicitly provisional, with the gap flagged in the docstring. Validated: cleaner `hnr_high` **41.3 dB** > noisier `hnr_mid` **28.5 dB**.
+
+### The composite — `abi(...)`, PROVISIONAL, and *not* wired to audio
+
+`engine::clinical::abi(cpps, jit%, gne, hfno, hnr_d, h1_h2, shim_db, shim%, psd_s) -> f32` evaluates the published formula directly from the nine components (mirrors the approved `avqi(...)` pattern). Tiered **provisional**, with two unresolved gaps documented:
+
+1. **Component definitions** — HNR-D (and to a lesser degree Hfno) are reconstructed from prose, not confirmed against the authors' artifact.
+2. **Unit/scale conventions** — assumed CPPS/Hfno/HNR-D/H1−H2/shimmer-dB in dB, GNE a [0,1] ratio, jitter+shimmer as percents, PSD in seconds. Building the test surfaced a concrete symptom: feeding our `hfno()` (a ~30 dB level difference) into the −0.396 coefficient drives the score hard to the 0 clamp — i.e. **the regression expects component scales we haven't pinned**. So `abi_from_audio` is **deliberately deferred** (exactly as `avqi_from_audio` was), and the composite's absolute values are not to be trusted until confirmed against the authors' artifact (colleague pursuing the Phonanium ABI plugin). The test therefore checks only the formula arithmetic + ordering on illustrative in-range vectors — not clinical correctness.
+
+### Three surfaces
+
+All on `sadda.clinical`: `hfno`, `hnr_d`, `abi` (+ the earlier `period_std_s` on `PerturbationReport`), all tiered `provisional`. Engine + Python tests; stub regenerated.
+
+### Sources / references
+
+- Barsties von Latoszek, Maryn, et al. (2017), *J. Voice* 31(4): 511.e11–511.e27 — the ABI.
+- Kankare et al. (2023), *PMC10743974* — Finnish validation; quotes the full formula + component descriptions.
+- Dejonckere & Lebacq — HNR-D (cited via the ABI papers; exact procedure not yet sourced).
+- `clean-room-clinical-algorithms` policy.
+
+---
+
 ## 2026-05-25 — ABI component: GNE (glottal-to-noise excitation)
 
 Second ABI component. GNE asks whether the excitation is **pulsatile** (glottal-fold vibration drives every frequency band in lock-step) or **turbulent noise** (bands excited independently). A correlation in [0, 1]: ~1 for a clean voice, dropping toward 0 as breathiness/noise grows.

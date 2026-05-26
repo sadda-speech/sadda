@@ -18,8 +18,8 @@ pub mod units;
 pub use audio::Audio;
 pub use citation::{Citation, citation_for};
 pub use clinical::{
-    CppsConfig, GneConfig, H1H2Config, HnrConfig, PerturbationConfig, PerturbationReport, avqi,
-    cpps, gne, h1_h2, hnr, perturbation,
+    CppsConfig, GneConfig, H1H2Config, HnrConfig, HnrDConfig, PerturbationConfig,
+    PerturbationReport, abi, avqi, cpps, gne, h1_h2, hfno, hnr, hnr_d, perturbation,
 };
 pub use corpus::{
     Bundle, BundleSpec, Calibration, DerivedSignal, Instrument, InstrumentSpec, Interval,
