@@ -130,11 +130,17 @@ pub fn vad(audio: &Audio, model_path: &Path) -> Result<Vec<VadFrame>> {
             .map_err(ml_err)?;
 
         let speech_prob = {
-            let (_shape, prob) = outputs["output"].try_extract_tensor::<f32>().map_err(ml_err)?;
-            *prob.first().ok_or_else(|| EngineError::Ml("empty VAD output".into()))?
+            let (_shape, prob) = outputs["output"]
+                .try_extract_tensor::<f32>()
+                .map_err(ml_err)?;
+            *prob
+                .first()
+                .ok_or_else(|| EngineError::Ml("empty VAD output".into()))?
         };
         {
-            let (_shape, next) = outputs["stateN"].try_extract_tensor::<f32>().map_err(ml_err)?;
+            let (_shape, next) = outputs["stateN"]
+                .try_extract_tensor::<f32>()
+                .map_err(ml_err)?;
             if next.len() == VAD_STATE_LEN {
                 state.copy_from_slice(next);
             }
@@ -242,7 +248,10 @@ mod tests {
 
     #[test]
     fn speech_segments_empty_when_all_below() {
-        let frames = vec![VadFrame { time_seconds: 0.0, speech_prob: 0.1 }];
+        let frames = vec![VadFrame {
+            time_seconds: 0.0,
+            speech_prob: 0.1,
+        }];
         assert!(speech_segments(&frames, 0.5).is_empty());
     }
 

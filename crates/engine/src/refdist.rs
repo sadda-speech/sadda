@@ -350,9 +350,8 @@ impl RefDist {
         let path = self
             .data_path()
             .ok_or_else(|| EngineError::RefDist("distribution has no data file".into()))?;
-        let file = fs::File::open(&path).map_err(|e| {
-            EngineError::RefDist(format!("cannot open {}: {e}", path.display()))
-        })?;
+        let file = fs::File::open(&path)
+            .map_err(|e| EngineError::RefDist(format!("cannot open {}: {e}", path.display())))?;
         let reader = ParquetRecordBatchReaderBuilder::try_new(file)
             .map_err(map_parquet_err)?
             .build()
@@ -362,9 +361,9 @@ impl RefDist {
         for batch in reader {
             let batch = batch.map_err(map_arrow_err)?;
             let schema = batch.schema();
-            let col_idx = schema
-                .index_of(name)
-                .map_err(|_| EngineError::RefDist(format!("no column {name:?} in {}", path.display())))?;
+            let col_idx = schema.index_of(name).map_err(|_| {
+                EngineError::RefDist(format!("no column {name:?} in {}", path.display()))
+            })?;
             let values = batch.column(col_idx);
             // Resolve each filter column once per batch, materialised to
             // strings so Utf8 and LargeUtf8 (polars' default) are handled
@@ -372,9 +371,9 @@ impl RefDist {
             let filter_cols: Vec<(Vec<Option<String>>, &str)> = filters
                 .iter()
                 .map(|(fname, fval)| {
-                    let idx = schema.index_of(fname).map_err(|_| {
-                        EngineError::RefDist(format!("no filter column {fname:?}"))
-                    })?;
+                    let idx = schema
+                        .index_of(fname)
+                        .map_err(|_| EngineError::RefDist(format!("no filter column {fname:?}")))?;
                     let vals = string_column(batch.column(idx).as_ref()).ok_or_else(|| {
                         EngineError::RefDist(format!("filter column {fname:?} is not a string"))
                     })?;
@@ -1163,7 +1162,11 @@ columns = ["speaker_id", "phone", "F1", "F2"]
     fn observed_dist() -> RefDist {
         let dir = temp_store().join("amE-vowels");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("refdist.toml"), manifest_toml("amE-vowels", "1.0.0")).unwrap();
+        fs::write(
+            dir.join("refdist.toml"),
+            manifest_toml("amE-vowels", "1.0.0"),
+        )
+        .unwrap();
         write_parquet(
             &dir,
             vec![

@@ -37,6 +37,8 @@ pub use live::{
     LiveConfig, LiveFormantsFrame, LiveIntensityFrame, LivePitchFrame, LiveResults, LiveSession,
     MeterFrame, StoppedSession,
 };
+#[cfg(feature = "ml")]
+pub use ml::{SpeechSegment, VadFrame, speech_segments, vad, vad_bundled};
 pub use pitch::{PitchConfig, PitchFrame, autocorrelation};
 pub use refdist::{
     Citation as RefdistCitation, Histogram, Measure, MeasureKind, Population, Privacy, QuerySpec,
@@ -44,8 +46,6 @@ pub use refdist::{
     Summary, scaffold,
 };
 pub use units::{Decibels, Hertz, Ratio, Seconds};
-#[cfg(feature = "ml")]
-pub use ml::{SpeechSegment, VadFrame, speech_segments, vad, vad_bundled};
 
 /// Returns the engine crate's semver string, taken from `Cargo.toml` at build
 /// time. Useful as a sanity check at the language-binding boundaries.
