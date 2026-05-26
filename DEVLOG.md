@@ -6,6 +6,57 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-26 — GUI measure tracks + refdist overlays (D10)
+
+The first slice of cluster D and the payoff for clusters B and C: the GUI now *renders* analysis against the timeline and against reference distributions. Three coupled capabilities, on the user's call to ship all three refdist display forms (not just timeline bands).
+
+### Measure-track lanes (D10a)
+
+The engine has emitted `pitch()` / `formants()` / `intensity()` per-frame series since Phase 0, but the GUI never drew them. D10a adds **stacked lanes** below the spectrogram — f0 (dot contour), formants (one colour per slot F1..Fn), intensity (dB line) — each a frameless `egui_plot` lane sharing the `SIGNAL_LEFT_GUTTER` and the `view_start..=view_end` window, so the playback cursor draws one straight line through waveform → spectrogram → lanes → tiers. Computed in-app from the bundle samples and cached in a `MeasureTrackCache` keyed on bundle + `MeasureTrackConfig` (mirrors `SpectrogramCache` / `rebuild_*_if_stale`); a hidden lane costs nothing (the recompute skips it). Visibility + analysis params persist in `PersistedState`. Lanes chosen over Praat-style overlay-on-spectrogram per the user (separate y-axes, clean per-measure scaling).
+
+### Refdist `summary` / `histogram` / `points2d` (D10b, three-surface)
+
+So the band/scatter/hist numbers aren't app-internal, the overlay geometry is computed in the **engine** and exposed to **Python** identically:
+
+- `Summary { n, mean, sd, min, p5, p25, median, p75, p95, max }` — empirical for an observed distribution (`from_samples`, NumPy type-7 percentiles); a **normal model** of the published mean/SD for a `summary_normative_range` (`from_mean_sd`, z-quantile band), so both render through the same fields but only one is measured.
+- `Histogram { edges, counts }` (`from_samples`), `RefDist::{column_f64, summary, histogram, points2d}`, all taking an AND-combined `(column, value)` subgroup `filter` (sex / phone). Python: `rd.summary("F1", filter={"phone":"iy"})`, `.histogram`, `.points2d`, returning `Summary` / `Histogram` pyclasses.
+
+**Latent bug found + fixed:** the engine's `parquet` feature set was `["arrow","snap"]`, but polars' `write_parquet` (every refdist data file, and the C9 scaffolder's output) defaults to **zstd** with **LargeUtf8** strings — so the engine could not read its own refdist data at all. Added the `zstd` feature and a `LargeStringArray` path. Verified against the real bundled zstd file (/iy/ F1 mean ≈ 303, matching the synthetic 300 target).
+
+### Timeline band overlays (D10c)
+
+Horizontal bands on the f0 / intensity lanes, drawn behind the contour, with **`MeasureKind`-distinct encodings** so the 2026-05-18 governance rule holds — the GUI never conflates "what people do" with "what to aim for":
+
+- observed → cool neutral percentile band; normative → green clinical band; **target zone → amber goal region with a dashed border + a "TARGET" tag**.
+- Each draws an outer p5–p95 fill, inner p25–p75 fill, and a centre line. Picked per lane from a View-menu submenu listing store distributions whose parameter matches the lane, narrowed by subgroup (per-sex entries). Resolved + cached on selection change (a store + parquet read), not per frame.
+- **First-run seeding** (the C8-deferred app wiring): View → "Install bundled reference data" copies `refdist-bundled/` into the user store via `install_from_dir` (idempotent), located by `SADDA_REFDIST_BUNDLED` → exe-dir → dev workspace path.
+
+### Vowel-space scatter + 1-D histogram (D10d, D10e)
+
+A right-side **Reference panel** with one distribution picker feeding two views:
+
+- **Vowel space** — `points2d(params[0], params[1])` reference cloud in phonetic orientation (F2 on x and F1 on y, both axes inverted via egui_plot `invert_x/y`), plus the **measured vowel** (F1/F2 from the formant track at the cursor) as a red diamond. Phone filter combo.
+- **Histogram** — engine `Histogram` as a bar chart with dashed p5/p95 + solid median markers from the `Summary`, and a red "you" line at the measured value (median voiced f0 for the `f0` param; the cursor formant for F1/F2) with a "(interquartile)" / "(above p95)" position readout. Summary-only distributions say so and point at the band overlay (no raw samples to bin).
+
+### Validation
+
+Engine: 10 new `refdist` units (Summary/Histogram math + normal-band, `column_f64` filter + integer widening, observed vs normative `summary`, `points2d` alignment, histogram rejects summary-only) — 20 refdist units, 129 engine total. App: `MeasureTrackConfig::any_visible` + `nearest_frame_index` units — 48 total. Python: 6 new (`column`/`summary`/`histogram`/`points2d` incl. normative band + the zstd/LargeUtf8 real-data path) — 137 total. clippy clean. The plot rendering itself isn't unit-tested (consistent with the existing waveform/spectrogram panes); the pure logic under it is, and the data path is verified against the real bundled file.
+
+### Deferred
+
+- **Visual QA in a running window** — the lanes/overlays compile + their data is verified, but a human hasn't eyeballed the rendered app this session.
+- **Phonetic-convention niceties** — colour-by-phone in the vowel cloud (needs a string-column-aware 2-D reader); a secondary-axis intensity overlay-on-spectrogram option.
+- **CHANGELOG** — left for the 0.3.x release, matching the project's release-time-only CHANGELOG cadence (Phase-3 A/B/C aren't in it either).
+- **Real reference data** — overlays still ride the synthetic placeholder set until the license-cleared corpora (Hillenbrand/Peterson-Barney/clinical norms) land.
+
+### Sources / references
+
+- 2026-05-16 cross-cutting patterns (A: real-time/measure display undersupported; C: reference distributions are everyone's hidden problem).
+- 2026-05-18 reference-distribution governance (the `MeasureKind` distinction the encodings enforce).
+- 2026-05-25 C7/C8/C9 entries (the format, store, validator, and the C8-deferred first-run seeding this lands).
+
+---
+
 ## 2026-05-25 — In-app refdist publishing: scaffold from an analysis result (C9)
 
 Closes the reference-distribution loop (consume → publish). C9 turns an analysis result into a publishable distribution directory; the actual fork-and-PR submission uses the maintainer's own GitHub credentials, so that step is documented rather than automated (and waits on a live registry — see deferred).
