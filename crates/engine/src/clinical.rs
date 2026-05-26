@@ -821,6 +821,179 @@ fn resample_to_hz(signal: &[f32], fs_in: u32, fs_out: u32) -> Vec<f32> {
     out.iter().map(|c| c.re * scale).collect()
 }
 
+/// High-frequency noise level **Hfno-6000** (dB): the LTAS level
+/// difference between the 0–6 kHz and 6–10 kHz bands,
+/// `10·log10(P[0–6k] / P[6–10k])`. Larger ⇒ less high-frequency
+/// (turbulent) energy ⇒ less breathy. An ABI component. Needs a sample
+/// rate ≥ 20 kHz so the 6–10 kHz band exists. [`EngineError::Unreliable`]
+/// otherwise.
+pub fn hfno(audio: &Audio) -> Result<Decibels> {
+    if audio.sample_rate < 20_000 {
+        return Err(EngineError::unreliable(
+            "hfno",
+            "needs ≥20 kHz sample rate to cover the 6–10 kHz band",
+        ));
+    }
+    let mono: Vec<f32> = audio.mono_samples().collect();
+    let l = crate::dsp::ltas::ltas(&mono, audio.sample_rate, 100.0);
+    if l.levels_db.is_empty() {
+        return Err(EngineError::unreliable(
+            "hfno",
+            "signal shorter than one LTAS frame",
+        ));
+    }
+    // slope(low, high) = 10·log10(P_high / P_low), so (low=6–10k,
+    // high=0–6k) gives level(0–6k) − level(6–10k).
+    Ok(l.slope((6000.0, 10000.0), (0.0, 6000.0)))
+}
+
+/// Configuration for [`hnr_d`].
+#[derive(Debug, Clone)]
+pub struct HnrDConfig {
+    /// Lowest f0 to consider, in Hz.
+    pub pitch_floor_hz: f32,
+    /// Highest f0 to consider, in Hz.
+    pub pitch_ceiling_hz: f32,
+    /// Low edge of the analysis band, Hz.
+    pub band_lo_hz: f32,
+    /// High edge of the analysis band, Hz.
+    pub band_hi_hz: f32,
+    /// FFT length for the periodogram (large, to resolve harmonics).
+    pub frame_size: usize,
+}
+
+impl Default for HnrDConfig {
+    fn default() -> Self {
+        Self {
+            pitch_floor_hz: 75.0,
+            pitch_ceiling_hz: 600.0,
+            band_lo_hz: 500.0,
+            band_hi_hz: 1500.0,
+            frame_size: 8192,
+        }
+    }
+}
+
+/// **HNR-D** (dB): the Dejonckere–Lebacq harmonic-to-noise ratio — the
+/// harmonic structure against the inter-harmonic noise floor in the
+/// formant zone (500–1500 Hz), an ABI component.
+///
+/// CLEAN-ROOM / PROVISIONAL: implemented from the ABI papers' one-line
+/// description ("harmonic structure against noise in the LTAS in the
+/// 500–1500 Hz zone") rather than Dejonckere & Lebacq's exact procedure,
+/// which wasn't accessible. Here: over an averaged periodogram, the mean
+/// harmonic-peak power (within ±f0/4 of each harmonic) is compared to the
+/// mean inter-harmonic valley power; `10·log10(harmonic / noise)`. Higher
+/// ⇒ cleaner. [`EngineError::Unreliable`] if no voiced f0 or too few
+/// in-band harmonics.
+pub fn hnr_d(audio: &Audio, config: &HnrDConfig) -> Result<Decibels> {
+    let f0 = median_voiced_f0(audio, config.pitch_floor_hz, config.pitch_ceiling_hz)
+        .ok_or_else(|| EngineError::unreliable("hnr_d", "no voiced f0 detected"))?;
+    let mono: Vec<f32> = audio.mono_samples().collect();
+    if mono.len() < config.frame_size {
+        return Err(EngineError::unreliable(
+            "hnr_d",
+            "signal shorter than one analysis frame",
+        ));
+    }
+    let (power, bin_hz) = welch_power(&mono, audio.sample_rate, config.frame_size);
+    let last = power.len() - 1;
+    let bin_at = |f: f32| -> usize { ((f / bin_hz).round() as usize).min(last) };
+    let win = ((f0 * 0.25) / bin_hz).ceil().max(1.0) as usize;
+
+    let (mut harm, mut noise) = (Vec::new(), Vec::new());
+    let mut h = (config.band_lo_hz / f0).ceil() as usize;
+    while (h as f32) * f0 <= config.band_hi_hz {
+        let center = bin_at(h as f32 * f0);
+        let lo = center.saturating_sub(win);
+        let hi = (center + win).min(last);
+        harm.push(power[lo..=hi].iter().copied().fold(0.0_f64, f64::max));
+        // valley between this harmonic and the next
+        let nlo = (center + win + 1).min(last);
+        let nhi = bin_at((h as f32 + 1.0) * f0).saturating_sub(win).max(nlo);
+        let np = power[nlo..=nhi.max(nlo)]
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        noise.push(if np.is_finite() { np } else { power[nlo] });
+        h += 1;
+    }
+    if harm.len() < 2 {
+        return Err(EngineError::unreliable(
+            "hnr_d",
+            "too few harmonics in the 500–1500 Hz band",
+        ));
+    }
+    let mh = harm.iter().sum::<f64>() / harm.len() as f64;
+    let mn = (noise.iter().sum::<f64>() / noise.len() as f64).max(1e-30);
+    Ok(Decibels::new((10.0 * (mh / mn).log10()) as f32))
+}
+
+/// Mean power per real-FFT bin over `samples` (Welch, Hann, 50 % overlap)
+/// with an `n`-point FFT. Returns `(power[0..=n/2], fft_bin_hz)`.
+fn welch_power(samples: &[f32], sample_rate: u32, n: usize) -> (Vec<f64>, f32) {
+    use realfft::RealFftPlanner;
+
+    let mut planner = RealFftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(n);
+    let mut input = fft.make_input_vec();
+    let mut output = fft.make_output_vec();
+    let window = crate::dsp::windowing::hann(n);
+    let mut power = vec![0.0_f64; output.len()];
+    let hop = n / 2;
+    let (mut frames, mut s) = (0usize, 0usize);
+    while s + n <= samples.len() {
+        for (i, slot) in input.iter_mut().enumerate() {
+            *slot = samples[s + i] * window[i];
+        }
+        fft.process(&mut input, &mut output)
+            .expect("fft sized via make_*_vec");
+        for (acc, c) in power.iter_mut().zip(output.iter()) {
+            *acc += c.norm_sqr() as f64;
+        }
+        frames += 1;
+        s += hop;
+    }
+    if frames > 0 {
+        for p in &mut power {
+            *p /= frames as f64;
+        }
+    }
+    (power, sample_rate as f32 / n as f32)
+}
+
+/// Acoustic Breathiness Index v01 (Barsties von Latoszek et al. 2017),
+/// a 0–10 breathiness score, from its nine components.
+///
+/// CLEAN-ROOM / PROVISIONAL: the published regression formula, but with
+/// two open questions (so exposed PROVISIONAL, like [`avqi`]): ① the
+/// [`hnr_d`] and (to a lesser degree) [`hfno`] component *definitions*
+/// are reconstructed from prose, not confirmed against the authors'
+/// artifact; ② the unit conventions are assumed — CPPS / Hfno / HNR-D /
+/// H1−H2 / shimmer-dB in **dB**, GNE a **ratio** in [0,1], jitter and
+/// shimmer-local as **percents**, PSD in **seconds**.
+#[allow(clippy::too_many_arguments)]
+pub fn abi(
+    cpps: f32,
+    jitter_pct: f32,
+    gne: f32,
+    hfno: f32,
+    hnr_d: f32,
+    h1_h2: f32,
+    shimmer_db: f32,
+    shimmer_pct: f32,
+    psd_s: f32,
+) -> f32 {
+    // Published v01 coefficients (constants rounded to f32 precision).
+    let inner = 5.044_774 - 0.172 * cpps - 0.193 * jitter_pct - 1.283 * gne - 0.396 * hfno
+        + 0.01 * hnr_d
+        + 0.017 * h1_h2
+        + 1.473 * shimmer_db
+        - 0.088 * shimmer_pct
+        - 68.295 * psd_s;
+    (2.925_74 * inner).clamp(0.0, 10.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2141,6 +2141,80 @@ fn gne(
         .map_err(engine_err_to_py)
 }
 
+/// High-frequency noise level Hfno-6000 (dB): the LTAS level difference
+/// between the 0–6 kHz and 6–10 kHz bands. Larger ⇒ less high-frequency
+/// noise ⇒ less breathy. An ABI component. Requires a sample rate ≥ 20 kHz;
+/// raises `ValueError` otherwise.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn hfno(audio: &PyAudio) -> PyResult<f32> {
+    sadda_engine::hfno(&audio.inner)
+        .map(|d| d.value())
+        .map_err(engine_err_to_py)
+}
+
+/// HNR-D (dB): the Dejonckere–Lebacq harmonic-to-noise ratio in the
+/// 500–1500 Hz formant zone — an ABI component. CLEAN-ROOM / PROVISIONAL:
+/// reconstructed from the ABI papers' prose, not the authors' exact
+/// procedure. Raises `ValueError` if no voiced f0 or too few in-band
+/// harmonics. Intended for sustained vowels.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (audio, *, pitch_floor_hz=75.0, pitch_ceiling_hz=600.0, band_lo_hz=500.0, band_hi_hz=1500.0, frame_size=8192))]
+fn hnr_d(
+    audio: &PyAudio,
+    pitch_floor_hz: f32,
+    pitch_ceiling_hz: f32,
+    band_lo_hz: f32,
+    band_hi_hz: f32,
+    frame_size: usize,
+) -> PyResult<f32> {
+    let cfg = sadda_engine::HnrDConfig {
+        pitch_floor_hz,
+        pitch_ceiling_hz,
+        band_lo_hz,
+        band_hi_hz,
+        frame_size,
+    };
+    sadda_engine::hnr_d(&audio.inner, &cfg)
+        .map(|d| d.value())
+        .map_err(engine_err_to_py)
+}
+
+/// Acoustic Breathiness Index v01 (Barsties von Latoszek et al. 2017): a
+/// 0–10 breathiness score from its nine components. Clean-room from the
+/// published formula; **PROVISIONAL** — the HNR-D/Hfno definitions and the
+/// component unit conventions are not yet confirmed against the authors'
+/// artifact (so `abi_from_audio` is intentionally not provided). Units:
+/// CPPS / Hfno / HNR-D / H1−H2 / shimmer-dB in dB; GNE a ratio in [0,1];
+/// jitter and shimmer-local as percents; PSD in seconds.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn abi(
+    cpps: f32,
+    jitter_pct: f32,
+    gne: f32,
+    hfno: f32,
+    hnr_d: f32,
+    h1_h2: f32,
+    shimmer_db: f32,
+    shimmer_pct: f32,
+    psd_s: f32,
+) -> f32 {
+    sadda_engine::abi(
+        cpps,
+        jitter_pct,
+        gne,
+        hfno,
+        hnr_d,
+        h1_h2,
+        shimmer_db,
+        shimmer_pct,
+        psd_s,
+    )
+}
+
 /// Acoustic Voice Quality Index v03.01 from its six components. Clean-room
 /// from the publications; **not yet confirmed against the reference Praat
 /// script** (exposed as PROVISIONAL). Units: CPPS / HNR / shimmer-dB /
@@ -2184,6 +2258,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cpps, m)?)?;
     m.add_function(wrap_pyfunction!(h1_h2, m)?)?;
     m.add_function(wrap_pyfunction!(gne, m)?)?;
+    m.add_function(wrap_pyfunction!(hfno, m)?)?;
+    m.add_function(wrap_pyfunction!(hnr_d, m)?)?;
+    m.add_function(wrap_pyfunction!(abi, m)?)?;
     m.add_function(wrap_pyfunction!(avqi, m)?)?;
     m.add_function(wrap_pyfunction!(new_project, m)?)?;
     m.add_function(wrap_pyfunction!(open_project, m)?)?;

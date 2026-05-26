@@ -100,6 +100,36 @@ def test_gne_orders_clean_above_noisy_and_is_provisional() -> None:
     assert 0.0 <= g_mid < g_high <= 1.0
 
 
+def test_hfno_and_hnr_d_order_clean_above_noisy() -> None:
+    import warnings
+
+    from sadda._stability import get_stability
+
+    assert get_stability(sadda.clinical.hfno) == "provisional"
+    assert get_stability(sadda.clinical.hnr_d) == "provisional"
+    high = sadda.load_wav(str(FIXTURES / "hnr_high_120hz.wav"))
+    mid = sadda.load_wav(str(FIXTURES / "hnr_mid_120hz.wav"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert sadda.clinical.hfno(high) > sadda.clinical.hfno(mid)
+        assert sadda.clinical.hnr_d(high) > sadda.clinical.hnr_d(mid)
+
+
+def test_abi_formula_orders_and_is_provisional() -> None:
+    import warnings
+
+    from sadda._stability import get_stability
+
+    assert get_stability(sadda.clinical.abi) == "provisional"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        # (cpps, jit%, gne, hfno, hnr_d, h1h2, shim_db, shim%, psd_s)
+        clean = sadda.clinical.abi(12.0, 0.3, 0.85, 2.0, 8.0, 2.0, 0.2, 2.0, 0.0002)
+        breathy = sadda.clinical.abi(7.0, 1.0, 0.5, 1.0, 3.0, 8.0, 0.8, 6.0, 0.0005)
+    assert clean < breathy
+    assert 0.0 <= clean <= 10.0 and 0.0 <= breathy <= 10.0
+
+
 def test_avqi_formula_orders_and_is_provisional() -> None:
     import warnings
 

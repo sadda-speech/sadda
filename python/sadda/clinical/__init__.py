@@ -17,11 +17,14 @@ from sadda._stability import provisional, stable_clinical
 
 __all__ = [
     "PerturbationReport",
+    "abi",
     "avqi",
     "cpps",
     "gne",
     "h1_h2",
+    "hfno",
     "hnr",
+    "hnr_d",
     "perturbation",
 ]
 
@@ -37,6 +40,19 @@ h1_h2 = stable_clinical(_native.h1_h2)
 # turbulent excitation, orders clean>noisy), but its absolute values are
 # not yet confirmed against a reference oracle — there is no Praat GNE.
 gne = provisional(_native.gne)
+
+# ABI component measures. Hfno-6000 and HNR-D are PROVISIONAL: Hfno's
+# exact band-level convention and HNR-D's harmonic/noise separation are
+# reconstructed from the ABI papers' prose, not confirmed against the
+# authors' artifact.
+hfno = provisional(_native.hfno)
+hnr_d = provisional(_native.hnr_d)
+
+# ABI is PROVISIONAL: the published v01 regression formula, but the
+# component definitions (HNR-D/Hfno) and unit conventions aren't yet
+# confirmed against the authors' artifact, so its absolute values are not
+# to be trusted. Takes the nine components directly (no abi_from_audio).
+abi = provisional(_native.abi)
 
 # AVQI is PROVISIONAL, not stable_clinical: the v03.01 formula is
 # clean-room from the publications but not yet confirmed against the

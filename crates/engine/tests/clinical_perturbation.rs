@@ -278,6 +278,57 @@ fn psd_tracks_period_jitter() {
 }
 
 #[test]
+fn hfno_higher_for_cleaner_signal() {
+    use sadda_engine::hfno;
+    // hnr_high (25 dB) has less high-frequency noise than hnr_mid (12 dB),
+    // so a larger 0–6k vs 6–10k level difference.
+    let high = Audio::from_wav_path(fixtures_dir().join("hnr_high_120hz.wav")).unwrap();
+    let mid = Audio::from_wav_path(fixtures_dir().join("hnr_mid_120hz.wav")).unwrap();
+    let h = hfno(&high).unwrap().value();
+    let m = hfno(&mid).unwrap().value();
+    assert!(h > m, "hfno clean {h} should exceed noisy {m}");
+}
+
+#[test]
+fn hnr_d_higher_for_cleaner_signal() {
+    use sadda_engine::{HnrDConfig, hnr_d};
+    let high = Audio::from_wav_path(fixtures_dir().join("hnr_high_120hz.wav")).unwrap();
+    let mid = Audio::from_wav_path(fixtures_dir().join("hnr_mid_120hz.wav")).unwrap();
+    let h = hnr_d(&high, &HnrDConfig::default()).unwrap().value();
+    let m = hnr_d(&mid, &HnrDConfig::default()).unwrap().value();
+    assert!(h > m, "hnr_d clean {h} should exceed noisy {m}");
+    assert!(h > 0.0, "clean hnr_d {h} should be positive");
+}
+
+#[test]
+fn abi_formula_orders_and_clamps() {
+    use sadda_engine::abi;
+    // Component vectors (cpps, jit%, gne, hfno, hnr_d, h1h2, shim_db, shim%, psd_s)
+    // chosen to keep the score in-range, to exercise the published formula.
+    // NB these are illustrative magnitudes — the *scales* our component
+    // functions emit (notably hfno's ~tens-of-dB level difference) are NOT
+    // yet confirmed against the regression, which is why abi_from_audio is
+    // deferred. This only checks the formula arithmetic + ordering.
+    let clean = abi(12.0, 0.3, 0.85, 2.0, 8.0, 2.0, 0.2, 2.0, 0.0002);
+    let breathy = abi(7.0, 1.0, 0.5, 1.0, 3.0, 8.0, 0.8, 6.0, 0.0005);
+    assert!(
+        clean < breathy,
+        "abi clean {clean} should be < breathy {breathy}"
+    );
+    assert!(
+        (3.0..5.0).contains(&clean),
+        "clean abi {clean} off expected ~3.7"
+    );
+    assert!(
+        (9.0..10.5).contains(&breathy),
+        "breathy abi {breathy} off expected ~9.9"
+    );
+    // Clamps to [0, 10].
+    assert_eq!(abi(0.0, 10.0, 0.0, -50.0, 0.0, 30.0, 5.0, 30.0, 0.0), 10.0);
+    assert_eq!(abi(40.0, 0.0, 1.0, 50.0, 50.0, 0.0, 0.0, 0.0, 0.01), 0.0);
+}
+
+#[test]
 fn clean_signal_is_near_zero() {
     let r = measure("clean_120hz");
     assert!(

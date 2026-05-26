@@ -25,6 +25,7 @@ __all__ = [
     "Session",
     "Speaker",
     "Tier",
+    "abi",
     "avqi",
     "blackman",
     "cpps",
@@ -35,7 +36,9 @@ __all__ = [
     "h1_h2",
     "hamming",
     "hann",
+    "hfno",
     "hnr",
+    "hnr_d",
     "intensity",
     "kaiser",
     "load_wav",
@@ -997,6 +1000,17 @@ class Tier:
         """
     def __repr__(self) -> builtins.str: ...
 
+def abi(cpps: builtins.float, jitter_pct: builtins.float, gne: builtins.float, hfno: builtins.float, hnr_d: builtins.float, h1_h2: builtins.float, shimmer_db: builtins.float, shimmer_pct: builtins.float, psd_s: builtins.float) -> builtins.float:
+    r"""
+    Acoustic Breathiness Index v01 (Barsties von Latoszek et al. 2017): a
+    0–10 breathiness score from its nine components. Clean-room from the
+    published formula; **PROVISIONAL** — the HNR-D/Hfno definitions and the
+    component unit conventions are not yet confirmed against the authors'
+    artifact (so `abi_from_audio` is intentionally not provided). Units:
+    CPPS / Hfno / HNR-D / H1−H2 / shimmer-dB in dB; GNE a ratio in [0,1];
+    jitter and shimmer-local as percents; PSD in seconds.
+    """
+
 def avqi(cpps: builtins.float, hnr: builtins.float, shimmer_local_pct: builtins.float, shimmer_local_db: builtins.float, slope: builtins.float, tilt: builtins.float) -> builtins.float:
     r"""
     Acoustic Voice Quality Index v03.01 from its six components. Clean-room
@@ -1069,11 +1083,28 @@ def hann(n: builtins.int) -> numpy.typing.NDArray[numpy.float32]:
     Hann window: `0.5 * (1 - cos(2π n / (N-1)))`.
     """
 
+def hfno(audio: Audio) -> builtins.float:
+    r"""
+    High-frequency noise level Hfno-6000 (dB): the LTAS level difference
+    between the 0–6 kHz and 6–10 kHz bands. Larger ⇒ less high-frequency
+    noise ⇒ less breathy. An ABI component. Requires a sample rate ≥ 20 kHz;
+    raises `ValueError` otherwise.
+    """
+
 def hnr(audio: Audio, *, pitch_floor_hz: builtins.float = 75.0, pitch_ceiling_hz: builtins.float = 600.0, hop_seconds: builtins.float = 0.009999999776482582) -> builtins.float:
     r"""
     Mean harmonics-to-noise ratio (dB) of a sustained phonation, via the
     Boersma-1993 cross-correlation method (Praat's `To Harmonicity
     (cc)`). Raises `ValueError` if the signal is too short or silent.
+    """
+
+def hnr_d(audio: Audio, *, pitch_floor_hz: builtins.float = 75.0, pitch_ceiling_hz: builtins.float = 600.0, band_lo_hz: builtins.float = 500.0, band_hi_hz: builtins.float = 1500.0, frame_size: builtins.int = 8192) -> builtins.float:
+    r"""
+    HNR-D (dB): the Dejonckere–Lebacq harmonic-to-noise ratio in the
+    500–1500 Hz formant zone — an ABI component. CLEAN-ROOM / PROVISIONAL:
+    reconstructed from the ABI papers' prose, not the authors' exact
+    procedure. Raises `ValueError` if no voiced f0 or too few in-band
+    harmonics. Intended for sustained vowels.
     """
 
 def intensity(audio: Audio, *, frame_size_seconds: builtins.float = 0.029999999329447746, hop_seconds: builtins.float = 0.009999999776482582) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float32], numpy.typing.NDArray[numpy.float32]]:
