@@ -1,0 +1,35 @@
+# CI for the reference-distribution registry. Lives here so it travels
+# when this directory is split out into its own public repo
+# (sadda-speech/refdist-registry). In the main sadda repo, the same
+# validate.py / build_index.py are exercised by python/tests/test_refdist_registry.py.
+name: registry CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install polars
+        run: pip install "polars>=1.0"
+
+      - name: Validate all distributions
+        run: python validate.py .
+
+      - name: Build the Pages index
+        run: python build_index.py . -o index.json
+
+      - name: Upload index.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: registry-index
+          path: index.json

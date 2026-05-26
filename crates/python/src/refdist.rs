@@ -209,3 +209,15 @@ pub(crate) fn get(id: &str, version: &str, root: Option<String>) -> PyResult<Opt
         .get(id, version)
         .map(|inner| PyRefDist { inner }))
 }
+
+/// Installs a distribution directory (a `refdist.toml` + its data file)
+/// into the store by copying it in — how the bundled starter set seeds
+/// the user cache. Returns the installed distribution.
+#[pyfunction]
+#[pyo3(signature = (src_dir, *, root=None))]
+pub(crate) fn install(src_dir: &str, root: Option<String>) -> PyResult<PyRefDist> {
+    let inner = store_for(root)?
+        .install_from_dir(src_dir)
+        .map_err(engine_err_to_py)?;
+    Ok(PyRefDist { inner })
+}

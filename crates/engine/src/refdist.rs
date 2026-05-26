@@ -38,6 +38,11 @@ pub struct RefdistManifest {
     /// DOI, if one was minted.
     #[serde(default)]
     pub doi: Option<String>,
+    /// SPDX license identifier of the distribution data, e.g.
+    /// `"CC0-1.0"` / `"CC-BY-4.0"` / `"ODC-BY-1.0"`. The registry CI
+    /// (C8) enforces the per-tier license policy.
+    #[serde(default)]
+    pub license: Option<String>,
     /// Citation metadata (authors / year / journal / bibtex).
     #[serde(default)]
     pub citation: Citation,
@@ -334,6 +339,86 @@ impl RefdistStore {
             .into_iter()
             .find(|d| d.manifest.id == id && d.manifest.version == version)
     }
+
+    /// Installs the distribution at `src_dir` (a directory holding a
+    /// `refdist.toml` + its data file) into this store by copying it under
+    /// `<id>__<version>/`. This is how the bundled starter set seeds the
+    /// cache and how a fetched tarball lands once unpacked. Returns the
+    /// installed [`RefDist`]. Errors if `src_dir` has no valid manifest.
+    pub fn install_from_dir(&self, src_dir: impl AsRef<Path>) -> Result<RefDist> {
+        let src = src_dir.as_ref();
+        let manifest = load_manifest(src)?;
+        let dest = self
+            .root
+            .join(format!("{}__{}", manifest.id, manifest.version));
+        fs::create_dir_all(&dest)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                fs::copy(entry.path(), dest.join(entry.file_name()))?;
+            }
+        }
+        Ok(RefDist {
+            manifest,
+            dir: dest,
+        })
+    }
+}
+
+/// One entry in a registry's published `index.json` — the discovery
+/// metadata for a distribution available from a hosted registry, without
+/// its data file. The engine reads the index to list what's available;
+/// the data is fetched/installed separately (C8+).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RegistryEntry {
+    /// Distribution id.
+    pub id: String,
+    /// Distribution version.
+    pub version: String,
+    /// Registry tier (2 = curated, 3 = community).
+    #[serde(default)]
+    pub tier: u8,
+    /// Human-readable title.
+    #[serde(default)]
+    pub title: String,
+    /// Measure kind.
+    #[serde(default)]
+    pub kind: MeasureKind,
+    /// Measured parameters.
+    #[serde(default)]
+    pub parameters: Vec<String>,
+    /// Language (ISO 639-3).
+    #[serde(default)]
+    pub language: Option<String>,
+    /// SPDX license id.
+    #[serde(default)]
+    pub license: Option<String>,
+    /// Path to the distribution within the registry (e.g. `tier2/<dir>`),
+    /// resolved against the registry's base URL when fetching.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Whether this version has been yanked (still resolvable for pins,
+    /// surfaced with a warning).
+    #[serde(default)]
+    pub yanked: bool,
+}
+
+/// A registry's published index — the GitHub-Pages JSON the engine reads
+/// to discover what a hosted registry offers (C8).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RegistryIndex {
+    /// Index format version.
+    #[serde(default)]
+    pub schema_version: u32,
+    /// The distributions the registry publishes.
+    #[serde(default)]
+    pub entries: Vec<RegistryEntry>,
+}
+
+/// Parses a registry `index.json`.
+pub fn parse_index(json: &str) -> Result<RegistryIndex> {
+    serde_json::from_str(json)
+        .map_err(|e| EngineError::RefDist(format!("invalid registry index.json: {e}")))
 }
 
 #[cfg(test)]
@@ -479,5 +564,58 @@ columns = ["speaker_id", "phone", "F1", "F2"]
         assert!(wrong_kind.is_empty());
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn install_from_dir_copies_into_store() {
+        // A "bundled" source dir, installed into an (initially empty) store.
+        let src_root = temp_store();
+        write_dist(
+            &src_root,
+            "bundled-src",
+            &manifest_toml("starter-vowels", "1.0.0"),
+        );
+        let store_root = temp_store();
+        let store = RefdistStore::new(&store_root);
+        assert!(store.list().is_empty());
+
+        let installed = store
+            .install_from_dir(src_root.join("bundled-src"))
+            .unwrap();
+        assert_eq!(installed.manifest.id, "starter-vowels");
+        // Now resolvable from the store, with its data file copied over.
+        let got = store.get("starter-vowels", "1.0.0").unwrap();
+        assert!(got.data_path().unwrap().is_file());
+        assert_eq!(store.list().len(), 1);
+
+        fs::remove_dir_all(&src_root).ok();
+        fs::remove_dir_all(&store_root).ok();
+    }
+
+    #[test]
+    fn parses_registry_index() {
+        let json = r#"
+        {
+          "schema_version": 1,
+          "entries": [
+            {
+              "id": "hillenbrand-1995-amE-vowels", "version": "1.0.0", "tier": 2,
+              "title": "AmE vowels", "kind": "observed_distribution",
+              "parameters": ["F1", "F2"], "language": "eng",
+              "license": "CC0-1.0", "path": "tier2/hillenbrand-1995", "yanked": false
+            },
+            { "id": "f0-norms", "version": "0.1.0", "tier": 3 }
+          ]
+        }"#;
+        let index = parse_index(json).unwrap();
+        assert_eq!(index.schema_version, 1);
+        assert_eq!(index.entries.len(), 2);
+        assert_eq!(index.entries[0].tier, 2);
+        assert_eq!(index.entries[0].kind, MeasureKind::ObservedDistribution);
+        assert_eq!(index.entries[0].license.as_deref(), Some("CC0-1.0"));
+        // Defaulted fields on the sparse entry.
+        assert_eq!(index.entries[1].tier, 3);
+        assert!(!index.entries[1].yanked);
+        assert!(index.entries[1].parameters.is_empty());
     }
 }

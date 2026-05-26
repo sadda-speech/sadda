@@ -6,6 +6,48 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-25 — Reference-distribution registry: scaffold + CI + index + bundled set (C8)
+
+Builds on C7's format + local store. C8 stands up the **registry** (the public, separate-repo artifact) and the bundled starter set, with the engine able to consume a registry index. Real, license-cleared data is still being sourced, so everything here is wired against a **synthetic placeholder set** that exercises the whole pipeline end to end.
+
+### The registry (`refdist-registry/`)
+
+Scaffolded in-repo, designed to split out to `sadda-speech/refdist-registry`:
+
+- **`tier2/` (curated) + `tier3/` (community)** directory structure; `README.md` (tiers, submission-by-PR, license policy) + `SCHEMA.md` (the `refdist.toml` field reference, kept in sync with `engine::refdist`).
+- **`validate.py`** — the CI gate, self-contained (stdlib `tomllib` + `polars`, no sadda wheel, so it travels with the repo): required fields, known `measure.kind`, SPDX license + non-empty `LICENSE` file (tier 2 disallows NC/ND), `min_n_per_subgroup` present, **data-file column conformance**, and a k-anonymity proxy (distinct `speaker_id` ≥ `min_n` for `raw_samples` — tier 2 errors, tier 3 warns).
+- **`build_index.py`** — walks the tiers and emits `index.json` in exactly the shape `engine::refdist::RegistryIndex` deserializes (the GitHub-Pages artifact).
+- **`make_placeholders.py`** — regenerates the synthetic placeholder distributions deterministically.
+- **`.github/workflows/registry-ci.yml`** — runs validate + build-index, for when the registry is its own repo.
+
+### Placeholder starter set (synthetic — clearly marked)
+
+`make_placeholders.py` writes three distributions, every title + `provenance.md` shouting PLACEHOLDER, data from fixed seeds (no real corpus): `placeholder-amE-vowels` (tier 1, bundled, F1/F2 observed, CC0), `placeholder-f0-norms` (tier 2, f0 summary-normative, CC-BY-4.0), `placeholder-vot-norms` (tier 3, VOT observed, CC0). Tier 1 lives in **`refdist-bundled/`** (ships with the app); tier 2/3 under the registry.
+
+### Engine
+
+- `RegistryIndex` / `RegistryEntry` (serde) + `parse_index()` — the engine reads a registry's published `index.json` to discover what's available.
+- `RefdistStore::install_from_dir()` — copies a distribution into the store under `<id>__<version>/`. This is how the bundled set seeds the user cache and where a fetched-and-unpacked tarball will land. Added a top-level `license` field to `RefdistManifest`.
+- Python: `sadda.refdist.install(src_dir, root=…)` (provisional).
+
+### Validation surfaces
+
+Engine: 8 `refdist` unit tests (now incl. `parse_index`, `install_from_dir`). Python: `test_refdist_registry.py` exercises `validate.py` (pass on the placeholder set; **rejects** broken columns + missing LICENSE), `build_index.py` (entries + tier/kind/license carried through — the engine-schema contract checked from the Python side), and `install` round-trip (bundled → store → `.data()`). The main-repo CI runs these via pytest, so the registry gates run here too.
+
+### Deliberately deferred
+
+- **Real datasets** — Hillenbrand 1995 / Peterson-Barney 1952 / a clinical normative set, pending license clearance (user is following up). The placeholder set holds the contract until then.
+- **HTTP fetch** — there is no live registry to fetch from yet (the repo isn't pushed/hosted). `parse_index` + `install_from_dir` are the offline halves; the thin network GET lands when the registry goes live. No HTTP dependency added.
+- **Creating/pushing the public `refdist-registry` repo** — an outward action for the maintainer; the scaffold + its CI workflow are ready to split out.
+- **First-run seeding of the bundled set** by the app — an app-side (cluster D) wiring on top of `install_from_dir`.
+
+### Sources / references
+
+- 2026-05-18 "Reference distribution governance" entry (tiers, format, CI gates, license policy).
+- 2026-05-25 C7 entry (the format + `RefdistStore` this builds on).
+
+---
+
 ## 2026-05-25 — Reference distributions: format + resolver + query + pinning (C7)
 
 First slice of cluster C and the start of the **0.3.1** sub-release. C7 is the **consumption** side of the reference-distribution system (the 2026-05-18 governance entry's eight deliverables): parse a `refdist.toml` manifest, resolve distributions from a user-level cache, query them by population/measure facets, and let a project pin the versions it used. Deliberately independent of any *hosted* registry — HTTP fetch + the public registry repo + CI + bundled starter set are C8.

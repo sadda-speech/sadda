@@ -1,0 +1,28 @@
+id = "placeholder-f0-norms"
+version = "0.1.0"
+title = "PLACEHOLDER adult speaking f0 normative range (synthetic)"
+license = "CC-BY-4.0"
+
+[citation]
+authors = ["sadda placeholder generator"]
+year = 2026
+
+[population]
+language = "eng"
+sex = ["m", "f"]
+age_band = ["adult"]
+n_speakers = 200
+
+[measure]
+kind = "summary_normative_range"
+parameters = ["f0"]
+units = "Hz"
+
+[privacy]
+shareability = "summary_only"
+min_n_per_subgroup = 5
+
+[schema]
+data_file = "data.parquet"
+shape = "long"
+columns = ["sex", "stat", "f0"]
