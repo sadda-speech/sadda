@@ -33,15 +33,15 @@ pub struct RefdistManifest {
     /// Semantic version of this distribution.
     pub version: String,
     /// Human-readable title.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub title: String,
     /// DOI, if one was minted.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doi: Option<String>,
     /// SPDX license identifier of the distribution data, e.g.
     /// `"CC0-1.0"` / `"CC-BY-4.0"` / `"ODC-BY-1.0"`. The registry CI
     /// (C8) enforces the per-tier license policy.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
     /// Citation metadata (authors / year / journal / bibtex).
     #[serde(default)]
@@ -64,16 +64,16 @@ pub struct RefdistManifest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Citation {
     /// Author list.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub authors: Vec<String>,
     /// Publication year.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<i32>,
     /// Journal / venue.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub journal: Option<String>,
     /// A ready-to-paste BibTeX entry.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bibtex: Option<String>,
 }
 
@@ -81,22 +81,22 @@ pub struct Citation {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Population {
     /// ISO 639-3 language code, e.g. `"eng"`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     /// Variety / dialect, e.g. `"AmE"`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variety: Option<String>,
     /// Sexes represented, e.g. `["m", "f", "c"]`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sex: Vec<String>,
     /// Age bands represented, e.g. `["adult", "child"]`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub age_band: Vec<String>,
     /// Number of speakers.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n_speakers: Option<u64>,
     /// Number of tokens.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n_tokens: Option<u64>,
 }
 
@@ -121,19 +121,19 @@ pub struct Measure {
     #[serde(default)]
     pub kind: MeasureKind,
     /// Measured parameters, e.g. `["F1", "F2", "F3"]` or `["jitter_local"]`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parameters: Vec<String>,
     /// Units of the parameters, e.g. `"Hz"`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub units: Option<String>,
     /// Phones the distribution covers (ARPABET/IPA strings), if applicable.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub phones: Vec<String>,
     /// Phonetic context, e.g. `"hVd"`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<String>,
     /// Free-text description of how the measurement was made.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measurement_method: Option<String>,
 }
 
@@ -141,10 +141,10 @@ pub struct Measure {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Privacy {
     /// `"raw_samples"` or `"summary_only"`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shareability: Option<String>,
     /// k-anonymity floor per subgroup (default 5 enforced by the registry).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_n_per_subgroup: Option<u64>,
     /// Required `true` for small-language community data.
     #[serde(default)]
@@ -155,13 +155,13 @@ pub struct Privacy {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Schema {
     /// Data file name relative to the distribution directory.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_file: Option<String>,
     /// `"long"` or `"wide"`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<String>,
     /// Column names in the data file.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<String>,
 }
 
@@ -197,6 +197,52 @@ pub fn load_manifest(dir: impl AsRef<Path>) -> Result<RefdistManifest> {
     let text = fs::read_to_string(&path)
         .map_err(|e| EngineError::RefDist(format!("cannot read {}: {e}", path.display())))?;
     parse_manifest(&text)
+}
+
+/// Scaffolds a distribution directory from `manifest` (C9 in-app
+/// publishing): writes `refdist.toml`, a `provenance.md` carrying
+/// `provenance`, and a `LICENSE` stub keyed off the manifest's SPDX id.
+/// The **data file** named by `manifest.schema.data_file` is the caller's
+/// responsibility (e.g. `polars` `write_parquet` from the analysis
+/// result). Creates `dir` if needed and returns the resolved [`RefDist`].
+///
+/// The written manifest round-trips through [`parse_manifest`], so a
+/// scaffolded distribution is immediately resolvable and passes the
+/// registry validator (modulo the maintainer replacing the LICENSE stub
+/// with the full license text before submission).
+pub fn scaffold(
+    dir: impl AsRef<Path>,
+    manifest: &RefdistManifest,
+    provenance: &str,
+) -> Result<RefDist> {
+    let dir = dir.as_ref().to_path_buf();
+    fs::create_dir_all(&dir)?;
+    let toml_str = toml::to_string(manifest)
+        .map_err(|e| EngineError::RefDist(format!("cannot serialize manifest: {e}")))?;
+    fs::write(dir.join("refdist.toml"), toml_str)?;
+
+    let provenance = if provenance.trim().is_empty() {
+        "# Provenance\n\nTODO: describe the source corpus, sampling, and method.\n".to_string()
+    } else {
+        format!("{}\n", provenance.trim_end())
+    };
+    fs::write(dir.join("provenance.md"), provenance)?;
+
+    let spdx = manifest
+        .license
+        .as_deref()
+        .unwrap_or("LicenseRef-UNSPECIFIED");
+    let license = format!(
+        "SPDX-License-Identifier: {spdx}\n\n\
+         TODO: replace this stub with the full text of the {spdx} license \
+         before submitting to the registry.\n"
+    );
+    fs::write(dir.join("LICENSE"), license)?;
+
+    Ok(RefDist {
+        manifest: manifest.clone(),
+        dir,
+    })
 }
 
 /// A faceted query over a [`RefdistStore`]. Every `Some` / non-empty field
@@ -590,6 +636,62 @@ columns = ["speaker_id", "phone", "F1", "F2"]
 
         fs::remove_dir_all(&src_root).ok();
         fs::remove_dir_all(&store_root).ok();
+    }
+
+    #[test]
+    fn scaffold_round_trips_through_parser() {
+        let store = temp_store();
+        let manifest = RefdistManifest {
+            id: "my-vowels".into(),
+            version: "0.1.0".into(),
+            title: "My vowels".into(),
+            doi: None,
+            license: Some("CC-BY-4.0".into()),
+            citation: Citation {
+                authors: vec!["Me".into()],
+                year: Some(2026),
+                ..Default::default()
+            },
+            population: Population {
+                language: Some("eng".into()),
+                sex: vec!["m".into(), "f".into()],
+                ..Default::default()
+            },
+            measure: Measure {
+                kind: MeasureKind::ObservedDistribution,
+                parameters: vec!["F1".into(), "F2".into()],
+                units: Some("Hz".into()),
+                ..Default::default()
+            },
+            privacy: Privacy {
+                shareability: Some("raw_samples".into()),
+                min_n_per_subgroup: Some(5),
+                community_consent: false,
+            },
+            schema: Schema {
+                data_file: Some("data.parquet".into()),
+                shape: Some("long".into()),
+                columns: vec!["speaker_id".into(), "F1".into(), "F2".into()],
+            },
+        };
+        let dist_dir = store.join("my-vowels");
+        let rd = scaffold(&dist_dir, &manifest, "Synthetic test data.").unwrap();
+        assert!(dist_dir.join("refdist.toml").is_file());
+        assert!(dist_dir.join("provenance.md").is_file());
+        assert!(dist_dir.join("LICENSE").is_file());
+        assert_eq!(rd.data_path().unwrap(), dist_dir.join("data.parquet"));
+
+        // The written manifest parses back to the same fields (None
+        // Options were skipped, not emitted as nulls).
+        let reparsed = load_manifest(&dist_dir).unwrap();
+        assert_eq!(reparsed.id, "my-vowels");
+        assert_eq!(reparsed.license.as_deref(), Some("CC-BY-4.0"));
+        assert!(reparsed.doi.is_none());
+        assert_eq!(reparsed.measure.parameters, ["F1", "F2"]);
+        assert_eq!(reparsed.population.sex, ["m", "f"]);
+        assert_eq!(reparsed.privacy.min_n_per_subgroup, Some(5));
+
+        fs::remove_dir_all(&store).ok();
     }
 
     #[test]

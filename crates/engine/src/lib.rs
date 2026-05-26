@@ -36,7 +36,7 @@ pub use live::{
 pub use pitch::{PitchConfig, PitchFrame, autocorrelation};
 pub use refdist::{
     Citation as RefdistCitation, Measure, MeasureKind, Population, Privacy, QuerySpec, RefDist,
-    RefdistManifest, RefdistStore, RegistryEntry, RegistryIndex, Schema as RefdistSchema,
+    RefdistManifest, RefdistStore, RegistryEntry, RegistryIndex, Schema as RefdistSchema, scaffold,
 };
 pub use units::{Decibels, Hertz, Ratio, Seconds};
 

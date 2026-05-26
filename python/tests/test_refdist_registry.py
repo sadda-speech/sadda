@@ -71,6 +71,57 @@ def test_build_index_matches_engine_schema() -> None:
     assert f0["license"] == "CC-BY-4.0"
 
 
+def test_scaffold_produces_a_validatable_distribution(tmp_path) -> None:
+    # C9: scaffold a distribution from an analysis result, then prove it
+    # passes the C8 validator and resolves from a store.
+    df = pl.DataFrame(
+        {
+            "speaker_id": list(range(1, 9)),
+            "phone": ["iy"] * 8,
+            "F1": [300.0 + i for i in range(8)],
+            "F2": [2300.0 - i for i in range(8)],
+        }
+    )
+    dest = tmp_path / "tier3" / "my-vowels"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        rd = sadda.refdist.scaffold(
+            str(dest),
+            df,
+            id="my-amE-vowels",
+            version="0.1.0",
+            kind="observed_distribution",
+            parameters=["F1", "F2"],
+            units="Hz",
+            language="eng",
+            sex=["m", "f"],
+            license="CC0-1.0",
+            shareability="raw_samples",
+            min_n_per_subgroup=5,
+            authors=["Me"],
+            year=2026,
+            provenance="Real measurements from my study.",
+        )
+    assert rd.id == "my-amE-vowels"
+    assert (dest / "refdist.toml").is_file()
+    assert (dest / "data.parquet").is_file()
+
+    # The LICENSE stub must be replaced with real text before it validates
+    # under a strict reading, but presence + SPDX already pass the gate.
+    r = _run(str(REGISTRY / "validate.py"), str(tmp_path))
+    assert r.returncode == 0, r.stdout + r.stderr
+
+    # And it resolves once installed into a store.
+    store = str(tmp_path / "store")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        sadda.refdist.install(str(dest), root=store)
+        got = sadda.refdist.get("my-amE-vowels", "0.1.0", root=store)
+    assert got is not None
+    assert got.units == "Hz"
+    assert got.data().height == 8
+
+
 def test_install_bundled_into_store(tmp_path) -> None:
     store = str(tmp_path / "store")
     src = str(BUNDLED / "placeholder-amE-vowels")

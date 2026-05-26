@@ -6,6 +6,35 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-25 — In-app refdist publishing: scaffold from an analysis result (C9)
+
+Closes the reference-distribution loop (consume → publish). C9 turns an analysis result into a publishable distribution directory; the actual fork-and-PR submission uses the maintainer's own GitHub credentials, so that step is documented rather than automated (and waits on a live registry — see deferred).
+
+### Scaffold (the buildable, testable core)
+
+`engine::refdist::scaffold(dir, &RefdistManifest, provenance) -> RefDist` writes `refdist.toml` (serialized from the manifest), `provenance.md`, and a `LICENSE` stub keyed off the manifest's SPDX id. The data file is the caller's to write. The written manifest **round-trips through `parse_manifest`** — so a scaffolded distribution is immediately resolvable and passes the C8 validator (once the maintainer swaps the LICENSE stub for the full text and fills in real provenance).
+
+Making serialization work meant adding `skip_serializing_if` to the manifest's `Option`/`Vec`/empty-`String` fields (the `toml` serializer rejects `None`; we want absent-not-null and no noise arrays). Deserialization is unchanged (still `#[serde(default)]`).
+
+### Python ergonomics
+
+`sadda.refdist.scaffold(dest, data: polars.DataFrame, *, id, version, kind, parameters=…, units=…, language=…, sex=…, license=…, shareability=…, min_n_per_subgroup=…, authors=…, year=…, provenance=…)` (provisional): writes `data.parquet` from the DataFrame, infers `schema.columns` from it and `n_speakers` from a `speaker_id` column, then calls the engine scaffolder. One call from a result table to a submission-ready directory.
+
+### Validation
+
+Engine: a `scaffold` round-trip unit test (write → re-parse → fields match, `None`s skipped not nulled). Python: `test_scaffold_produces_a_validatable_distribution` scaffolds from a DataFrame, runs the **C8 `validate.py`** over it (exit 0 — the producer and the gate agree), then installs it into a store and resolves it back with `.data()`. 9 engine refdist units + the registry Python tests all green.
+
+### The submission flow (documented, deferred)
+
+Per the governance entry, "publication is a `git push` to a fork-and-PR flow; auth is the user's GitHub credentials, not ours." The `scaffold` docstring spells out the manual flow (copy under `tier3/<id>/`, branch, `gh pr create`). Automating it is deferred because (a) there is **no hosted registry repo to PR against yet** (same blocker as C8's HTTP fetch), and (b) the natural home for a guided "Publish…" flow is the **app GUI (cluster D)**, on top of this scaffolder. No git/GitHub action is taken automatically.
+
+### Sources / references
+
+- 2026-05-18 governance entry ("Tier 3 publishing is in-app … the manifest is scaffolded automatically").
+- 2026-05-25 C7 + C8 entries (the format, store, and validator this produces against).
+
+---
+
 ## 2026-05-25 — Reference-distribution registry: scaffold + CI + index + bundled set (C8)
 
 Builds on C7's format + local store. C8 stands up the **registry** (the public, separate-repo artifact) and the bundled starter set, with the engine able to consume a registry index. Real, license-cleared data is still being sourced, so everything here is wired against a **synthetic placeholder set** that exercises the whole pipeline end to end.

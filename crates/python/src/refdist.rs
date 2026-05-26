@@ -7,7 +7,10 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use sadda_engine::{MeasureKind, QuerySpec, RefDist, RefdistStore};
+use sadda_engine::{
+    Measure, MeasureKind, Population, Privacy, QuerySpec, RefDist, RefdistManifest, RefdistStore,
+};
+use sadda_engine::{RefdistCitation, RefdistSchema};
 
 use crate::engine_err_to_py;
 
@@ -218,6 +221,87 @@ pub(crate) fn get(id: &str, version: &str, root: Option<String>) -> PyResult<Opt
 pub(crate) fn install(src_dir: &str, root: Option<String>) -> PyResult<PyRefDist> {
     let inner = store_for(root)?
         .install_from_dir(src_dir)
+        .map_err(engine_err_to_py)?;
+    Ok(PyRefDist { inner })
+}
+
+/// Scaffolds a distribution directory (C9 publishing): writes
+/// `refdist.toml`, `provenance.md`, and a `LICENSE` stub from the given
+/// metadata. The caller writes the data file separately. `columns` should
+/// match the data file's columns. Returns the scaffolded distribution.
+#[pyfunction]
+#[pyo3(signature = (
+    dest_dir, *, id, version, kind, columns,
+    parameters=None, data_file=None, title=None, doi=None, license=None,
+    language=None, variety=None, sex=None, age_band=None, n_speakers=None,
+    units=None, phones=None, shareability=None, min_n_per_subgroup=None,
+    authors=None, year=None, provenance=None,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn scaffold(
+    dest_dir: &str,
+    id: String,
+    version: String,
+    kind: String,
+    columns: Vec<String>,
+    parameters: Option<Vec<String>>,
+    data_file: Option<String>,
+    title: Option<String>,
+    doi: Option<String>,
+    license: Option<String>,
+    language: Option<String>,
+    variety: Option<String>,
+    sex: Option<Vec<String>>,
+    age_band: Option<Vec<String>>,
+    n_speakers: Option<u64>,
+    units: Option<String>,
+    phones: Option<Vec<String>>,
+    shareability: Option<String>,
+    min_n_per_subgroup: Option<u64>,
+    authors: Option<Vec<String>>,
+    year: Option<i32>,
+    provenance: Option<String>,
+) -> PyResult<PyRefDist> {
+    let manifest = RefdistManifest {
+        id,
+        version,
+        title: title.unwrap_or_default(),
+        doi,
+        license,
+        citation: RefdistCitation {
+            authors: authors.unwrap_or_default(),
+            year,
+            journal: None,
+            bibtex: None,
+        },
+        population: Population {
+            language,
+            variety,
+            sex: sex.unwrap_or_default(),
+            age_band: age_band.unwrap_or_default(),
+            n_speakers,
+            n_tokens: None,
+        },
+        measure: Measure {
+            kind: parse_kind(&kind)?,
+            parameters: parameters.unwrap_or_default(),
+            units,
+            phones: phones.unwrap_or_default(),
+            context: None,
+            measurement_method: None,
+        },
+        privacy: Privacy {
+            shareability,
+            min_n_per_subgroup,
+            community_consent: false,
+        },
+        schema: RefdistSchema {
+            data_file: Some(data_file.unwrap_or_else(|| "data.parquet".to_string())),
+            shape: Some("long".to_string()),
+            columns,
+        },
+    };
+    let inner = sadda_engine::scaffold(dest_dir, &manifest, provenance.as_deref().unwrap_or(""))
         .map_err(engine_err_to_py)?;
     Ok(PyRefDist { inner })
 }
