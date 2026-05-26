@@ -262,8 +262,8 @@ fn psd_tracks_period_jitter() {
     // Period standard deviation (PSD): the jittered signal has a wider
     // spread of periods than the clean one, so a larger PSD. Both are
     // small and positive.
-    let clean = measure("clean_120hz").period_std_s.value() as f64;
-    let jittered = measure("jitter_150hz").period_std_s.value() as f64;
+    let clean = measure("clean_120hz").period_std_s.value();
+    let jittered = measure("jitter_150hz").period_std_s.value();
     assert!(
         clean >= 0.0 && jittered > 0.0,
         "psd clean {clean}, jit {jittered}"
