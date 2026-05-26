@@ -58,6 +58,7 @@ pub(crate) fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
         sadda_engine::EngineError::Unreliable { measure, reason } => {
             PyValueError::new_err(format!("measure '{measure}' unreliable: {reason}"))
         }
+        sadda_engine::EngineError::Ml(msg) => PyRuntimeError::new_err(format!("ml error: {msg}")),
     }
 }
 

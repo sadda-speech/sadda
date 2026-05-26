@@ -37,6 +37,12 @@ pub enum EngineError {
     #[error("reference-distribution error: {0}")]
     RefDist(String),
 
+    /// An ML-inference operation failed (E11): ONNX Runtime not loadable
+    /// (`ORT_DYLIB_PATH` unset / wrong version), a model failed to load,
+    /// or inference errored. Surfaced only with the `ml` feature.
+    #[error("ml error: {0}")]
+    Ml(String),
+
     /// The corpus database is at a higher schema version than this engine
     /// knows how to read. Forward-compat clamp: the engine refuses to open
     /// rather than risk operating on tables it doesn't understand. Resolution
