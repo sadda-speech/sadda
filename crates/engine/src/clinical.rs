@@ -687,7 +687,7 @@ pub fn gne(audio: &Audio, config: &GneConfig) -> Result<Ratio> {
     use rustfft::{FftPlanner, num_complex::Complex};
 
     let mono: Vec<f32> = audio.mono_samples().collect();
-    let x = resample_to_hz(&mono, audio.sample_rate, config.downsample_hz);
+    let x = crate::dsp::resample_to_hz(&mono, audio.sample_rate, config.downsample_hz);
     let fs = config.downsample_hz as f32;
     if x.len() <= config.lpc_order * 4 || x.len() < 256 {
         return Err(EngineError::unreliable("gne", "signal too short"));
@@ -793,34 +793,6 @@ fn zero_lag_corr(a: &[f32], b: &[f32]) -> f32 {
 /// in-band bins into a spectrum of the new length, inverse FFT. For
 /// downsampling this folds in the anti-alias low-pass. Approximate at the
 /// Nyquist bin — fine here since GNE uses bands strictly below it.
-fn resample_to_hz(signal: &[f32], fs_in: u32, fs_out: u32) -> Vec<f32> {
-    use rustfft::{FftPlanner, num_complex::Complex};
-
-    if fs_in == fs_out || signal.len() < 2 {
-        return signal.to_vec();
-    }
-    let n = signal.len();
-    let m = ((n as u64 * fs_out as u64) / fs_in as u64) as usize;
-    if m < 2 {
-        return signal.to_vec();
-    }
-    let mut planner = FftPlanner::<f32>::new();
-    let fwd = planner.plan_fft_forward(n);
-    let inv = planner.plan_fft_inverse(m);
-    let mut buf: Vec<Complex<f32>> = signal.iter().map(|&v| Complex::new(v, 0.0)).collect();
-    fwd.process(&mut buf);
-
-    let mut out = vec![Complex::<f32>::new(0.0, 0.0); m];
-    let half = n.min(m) / 2;
-    out[..=half].copy_from_slice(&buf[..=half]); // positive freqs incl. DC
-    for k in 1..=half {
-        out[m - k] = buf[n - k]; // mirror negatives
-    }
-    inv.process(&mut out);
-    let scale = 1.0 / n as f32;
-    out.iter().map(|c| c.re * scale).collect()
-}
-
 /// High-frequency noise level **Hfno-6000** (dB): the LTAS level
 /// difference between the 0–6 kHz and 6–10 kHz bands,
 /// `10·log10(P[0–6k] / P[6–10k])`. Larger ⇒ less high-frequency

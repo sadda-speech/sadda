@@ -8,8 +8,24 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# E11: ONNX-Runtime-backed ML inference. Default OFF so the base engine,
+# Python wheel, and app stay lean. `load-dynamic` means ORT is NOT linked
+# at build time — it's loaded at runtime from `ORT_DYLIB_PATH` (or the
+# system search path), so enabling `ml` adds only the ort bindings (~150
+# KB), never the ~23 MB ONNX Runtime, to the binary. See the 2026-05-26
+# ort-bundling spike in DEVLOG.
+ml = ["dep:ort", "dep:libloading"]
+
 [dependencies]
 arrow = { version = "58", default-features = false }
+# E11 ML inference (feature = "ml"). load-dynamic: no build-time ORT
+# download/link; the runtime ONNX Runtime is resolved at load time.
+ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = ["load-dynamic", "ndarray"] }
+# E11: probe the ONNX Runtime dylib for loadability before invoking `ort`,
+# which otherwise *panics* on a missing runtime. Already in the `ort`
+# (load-dynamic) tree; declared directly so the probe can use it.
+libloading = { version = "0.8", optional = true }
 cpal = "0.17"
 # C7 reference-distribution cache: per-OS data dir (~/.local/share/sadda).
 directories = "5"

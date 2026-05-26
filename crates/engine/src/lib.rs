@@ -11,6 +11,10 @@ pub mod dsp;
 pub mod error;
 pub mod io;
 pub mod live;
+/// E11 ML inference (ONNX Runtime). Behind the `ml` feature; ONNX Runtime
+/// is loaded at runtime (`load-dynamic`), not linked at build time.
+#[cfg(feature = "ml")]
+pub mod ml;
 pub mod pitch;
 pub mod refdist;
 pub mod storage;
@@ -40,6 +44,8 @@ pub use refdist::{
     Summary, scaffold,
 };
 pub use units::{Decibels, Hertz, Ratio, Seconds};
+#[cfg(feature = "ml")]
+pub use ml::{SpeechSegment, VadFrame, speech_segments, vad, vad_bundled};
 
 /// Returns the engine crate's semver string, taken from `Cargo.toml` at build
 /// time. Useful as a sanity check at the language-binding boundaries.

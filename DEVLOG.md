@@ -6,6 +6,49 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-26 — ML inference: ort-bundling spike + first bundled model (E11, part 1)
+
+Opens cluster E (ML inference, 0.3.2). The plan mandated an **`ort`-bundling spike before E11**, because 0.3.2's headline risks are binary size and cross-platform ONNX Runtime linking. Ran the spike, settled the integration strategy, then landed the engine half of E11: a feature-gated ML path and the first bundled model (Silero VAD), end to end.
+
+### The spike (throwaway, `/tmp`)
+
+Goal: confirm `ort` links + bundles cleanly and measure the size hit, before committing. Findings:
+
+- **`ort` 2.0.0-rc.10 + `load-dynamic` compiles in our toolchain** (Rust 1.93.1) in ~8 s, pulling only `libloading` — **no ONNX Runtime downloaded or linked at build time**.
+- **Binary-size answer (the headline risk): `load-dynamic` keeps the ~23 MB ORT out of every artifact.** The spike binary gained ~150 KB (just the bindings); the 23 MB `libonnxruntime.so` is an external sidecar loaded at runtime. So enabling ML never bloats the base engine / wheel / app.
+- **End-to-end inference works**: Silero VAD loaded and ran — silence → speech-prob 0.0006, noise → 0.0023.
+- **Version tolerance**: `ort` rc.10 requests ORT **API version 22 (= ONNX Runtime 1.22)**; a **1.26** runtime served it fine (ORT's C API is backward-compatible). The runtime is found via `ORT_DYLIB_PATH`.
+
+Decisions taken (with the user, before building): **feature-gated + `load-dynamic`**, **Silero VAD** (MIT) as the first model, **spike first**.
+
+### What landed (engine)
+
+- **`ml` cargo feature, default OFF** (`crates/engine`): `ort` + `libloading` are optional, enabled only by `--features ml`. The default build — and therefore CI, the Python wheel, and the app — is completely unchanged (no ORT, no size hit). Confirmed: default build + 12 test groups green; `--features ml` builds + tests green; clippy clean both ways.
+- **`engine::ml`** (`#[cfg(feature = "ml")]`): `vad(audio, model_path)` mono-mixes + resamples to 16 kHz, runs Silero VAD window-by-window (512 samples) threading the recurrent `state`/`stateN`, and returns a `VadFrame { time_seconds, speech_prob }` per window. `vad_bundled(audio)` uses the located bundled model; `speech_segments(frames, threshold)` merges above-threshold windows into `SpeechSegment`s (pure, ORT-free, unit-tested).
+- **Bundled Silero VAD** (`models-bundled/silero-vad/`): `silero_vad.onnx` (2.3 MB, MIT, silero-vad 6.2.1) + its `LICENSE` + a `README` documenting the I/O contract. Located via `bundled_vad_path()` (env `SADDA_MODELS_BUNDLED` → exe-dir → dev workspace path, mirroring the refdist bundled-set locator).
+- **No-panic discipline**: `ort` *panics* in its lazy loader when the runtime is absent — unacceptable for a library. Added `ensure_ort_available()`, which probes the dylib (`ORT_DYLIB_PATH` or the platform default name) with `libloading` *before* touching `ort`, converting "no ONNX Runtime" into a clean `EngineError::Ml` (new variant). So `vad()` on a machine without ORT returns an error, never aborts.
+- **Shared resampler**: lifted `resample_to_hz` out of `clinical` into `engine::dsp` (`pub(crate)`) so GNE (10 kHz) and VAD (16 kHz) share one FFT-domain resampler.
+
+### Validation
+
+`ml` tests run **both** ways: without ORT (the e2e `vad` test skips cleanly — proving the no-panic probe) and with `ORT_DYLIB_PATH` set (real inference: 1 s of silence reads mean speech-prob < 0.3). Pure `speech_segments` + the bundled-model locator are tested unconditionally. Default suites untouched: engine 12 groups, app 48, python 137 — all green.
+
+### Deferred (next E11 sub-steps + E12)
+
+- **Python `sadda.ml` + GUI VAD tier** — the three-surface completion. Engine-first is justified by ML's optionality (the wheel/app stay ML-free by default); these ride the next E11 commits, gated behind the `ml` feature in the wheel build.
+- **Model registry** — the parallel-to-refdist registry with `hf://` passthrough + `weights_checksum` provenance (the `ProcessingRunKind::MlModel` plumbing already exists). Next E11 slice.
+- **On-demand models + embedding tiers (E12)** — wav2vec2 / Whisper downloaded on demand, written as `continuous_vector` dense tiers.
+- **Packaging the ORT sidecar** — how the app ships `libonnxruntime` per-platform and sets `ORT_DYLIB_PATH`; a release-engineering task for when 0.3.2 binaries are cut.
+
+### Sources / references
+
+- 2026-05-25 Phase 3 slicing entry (E11/E12 scope; the `ort`-spike-before-E11 prerequisite).
+- 2026-05-20 ML-model-registry entry (ONNX canonical; HF passthrough; embedding tiers; `ProcessingRun kind = ml_model`).
+- `ort` (ONNX Runtime for Rust): <https://github.com/pykeio/ort>
+- Silero VAD (MIT): <https://github.com/snakers4/silero-vad>
+
+---
+
 ## 2026-05-26 — GUI measure tracks + refdist overlays (D10)
 
 The first slice of cluster D and the payoff for clusters B and C: the GUI now *renders* analysis against the timeline and against reference distributions. Three coupled capabilities, on the user's call to ship all three refdist display forms (not just timeline bands).
