@@ -19,6 +19,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use arrow::array::{
+    Array, Float32Array, Float64Array, Int32Array, Int64Array, LargeStringArray, StringArray,
+};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{EngineError, Result};
@@ -175,6 +179,158 @@ pub struct RefDist {
     pub dir: PathBuf,
 }
 
+/// Distribution-shape summary of a 1-D measure (D10): enough to draw a
+/// band overlay or a numeric readout without re-reading the data file.
+/// For an [`MeasureKind::ObservedDistribution`] every field is empirical;
+/// for a [`MeasureKind::SummaryNormativeRange`] the percentiles are a
+/// **normal approximation** of the published mean/SD (see
+/// [`Summary::from_mean_sd`]) — so a normative band and an observed band
+/// render through the same fields, but the normative one is modelled, not
+/// measured.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Summary {
+    /// Number of underlying values (raw samples, or declared speakers
+    /// for a normative summary).
+    pub n: usize,
+    /// Arithmetic mean.
+    pub mean: f64,
+    /// Standard deviation (sample SD, `n-1`, for raw samples).
+    pub sd: f64,
+    /// Minimum (observed) or `mean - 2·SD` (normative plotting range).
+    pub min: f64,
+    /// 5th percentile.
+    pub p5: f64,
+    /// 25th percentile (lower quartile).
+    pub p25: f64,
+    /// 50th percentile (median).
+    pub median: f64,
+    /// 75th percentile (upper quartile).
+    pub p75: f64,
+    /// 95th percentile.
+    pub p95: f64,
+    /// Maximum (observed) or `mean + 2·SD` (normative plotting range).
+    pub max: f64,
+}
+
+impl Summary {
+    /// Empirical summary of raw samples. `None` if `samples` is empty.
+    /// Percentiles use linear interpolation between order statistics
+    /// (the NumPy / "type 7" convention).
+    pub fn from_samples(samples: &[f64]) -> Option<Summary> {
+        if samples.is_empty() {
+            return None;
+        }
+        let n = samples.len();
+        let mut sorted: Vec<f64> = samples.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mean = sorted.iter().sum::<f64>() / n as f64;
+        let sd = if n > 1 {
+            let var = sorted.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
+            var.sqrt()
+        } else {
+            0.0
+        };
+        Some(Summary {
+            n,
+            mean,
+            sd,
+            min: sorted[0],
+            p5: percentile_sorted(&sorted, 0.05),
+            p25: percentile_sorted(&sorted, 0.25),
+            median: percentile_sorted(&sorted, 0.50),
+            p75: percentile_sorted(&sorted, 0.75),
+            p95: percentile_sorted(&sorted, 0.95),
+            max: sorted[n - 1],
+        })
+    }
+
+    /// Builds a summary from a published mean and SD, modelling the
+    /// distribution as normal. Percentiles use the standard-normal
+    /// quantile multipliers (z(0.05)=±1.6449, z(0.25)=±0.6745); `min` /
+    /// `max` are set to ±2 SD as a plotting range, not a hard bound.
+    /// This is how a `summary_normative_range` distribution — which has
+    /// no raw samples — yields a band with the same shape as an observed
+    /// one.
+    pub fn from_mean_sd(mean: f64, sd: f64, n: usize) -> Summary {
+        Summary {
+            n,
+            mean,
+            sd,
+            min: mean - 2.0 * sd,
+            p5: mean - 1.6449 * sd,
+            p25: mean - 0.6745 * sd,
+            median: mean,
+            p75: mean + 0.6745 * sd,
+            p95: mean + 1.6449 * sd,
+            max: mean + 2.0 * sd,
+        }
+    }
+}
+
+/// Equal-width histogram of a 1-D measure (D10): `counts[i]` is the
+/// number of samples in `[edges[i], edges[i+1])` (the final bin is
+/// closed on the right). `edges.len() == counts.len() + 1`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Histogram {
+    /// Bin boundaries, ascending; `edges.len() == counts.len() + 1`.
+    pub edges: Vec<f64>,
+    /// Per-bin sample counts.
+    pub counts: Vec<u64>,
+}
+
+impl Histogram {
+    /// Bins `samples` into `bins` equal-width buckets spanning
+    /// `[min, max]`. `None` if `samples` is empty or `bins == 0`. When
+    /// every sample is identical, returns a single unit-width bin holding
+    /// them all (avoids a zero-width range).
+    pub fn from_samples(samples: &[f64], bins: usize) -> Option<Histogram> {
+        if samples.is_empty() || bins == 0 {
+            return None;
+        }
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for &x in samples {
+            lo = lo.min(x);
+            hi = hi.max(x);
+        }
+        if (hi - lo).abs() < f64::EPSILON {
+            // Degenerate: all equal. One bin centred on the value.
+            return Some(Histogram {
+                edges: vec![lo - 0.5, lo + 0.5],
+                counts: vec![samples.len() as u64],
+            });
+        }
+        let width = (hi - lo) / bins as f64;
+        let edges: Vec<f64> = (0..=bins).map(|i| lo + i as f64 * width).collect();
+        let mut counts = vec![0u64; bins];
+        for &x in samples {
+            // Clamp into the last bin so x == hi (which would map to
+            // index `bins`) lands in `bins - 1`.
+            let idx = (((x - lo) / width) as usize).min(bins - 1);
+            counts[idx] += 1;
+        }
+        Some(Histogram { edges, counts })
+    }
+}
+
+/// Linear-interpolated percentile of an already-sorted slice. `q` in
+/// `[0, 1]`. Matches NumPy's default ("type 7") quantile.
+fn percentile_sorted(sorted: &[f64], q: f64) -> f64 {
+    let n = sorted.len();
+    if n == 1 {
+        return sorted[0];
+    }
+    let pos = q * (n - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    if lo == hi {
+        sorted[lo]
+    } else {
+        let frac = pos - lo as f64;
+        sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+    }
+}
+
 impl RefDist {
     /// Absolute path to the manifest's declared data file, if any.
     pub fn data_path(&self) -> Option<PathBuf> {
@@ -184,6 +340,197 @@ impl RefDist {
             .as_ref()
             .map(|f| self.dir.join(f))
     }
+
+    /// Reads a numeric column from the data file as `f64`, keeping only
+    /// rows where every `(column, value)` in `filters` matches (string
+    /// columns, ASCII-case-insensitive). Integer and 32/64-bit float
+    /// columns are all widened to `f64`. The natural way to pull "F1 for
+    /// the /iy/ rows" or "f0 where sex = m".
+    pub fn column_f64(&self, name: &str, filters: &[(&str, &str)]) -> Result<Vec<f64>> {
+        let path = self
+            .data_path()
+            .ok_or_else(|| EngineError::RefDist("distribution has no data file".into()))?;
+        let file = fs::File::open(&path).map_err(|e| {
+            EngineError::RefDist(format!("cannot open {}: {e}", path.display()))
+        })?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+            .map_err(map_parquet_err)?
+            .build()
+            .map_err(map_parquet_err)?;
+
+        let mut out = Vec::new();
+        for batch in reader {
+            let batch = batch.map_err(map_arrow_err)?;
+            let schema = batch.schema();
+            let col_idx = schema
+                .index_of(name)
+                .map_err(|_| EngineError::RefDist(format!("no column {name:?} in {}", path.display())))?;
+            let values = batch.column(col_idx);
+            // Resolve each filter column once per batch, materialised to
+            // strings so Utf8 and LargeUtf8 (polars' default) are handled
+            // uniformly.
+            let filter_cols: Vec<(Vec<Option<String>>, &str)> = filters
+                .iter()
+                .map(|(fname, fval)| {
+                    let idx = schema.index_of(fname).map_err(|_| {
+                        EngineError::RefDist(format!("no filter column {fname:?}"))
+                    })?;
+                    let vals = string_column(batch.column(idx).as_ref()).ok_or_else(|| {
+                        EngineError::RefDist(format!("filter column {fname:?} is not a string"))
+                    })?;
+                    Ok((vals, *fval))
+                })
+                .collect::<Result<_>>()?;
+
+            for row in 0..batch.num_rows() {
+                let keep = filter_cols.iter().all(|(vals, want)| {
+                    vals.get(row)
+                        .and_then(|v| v.as_deref())
+                        .is_some_and(|s| s.eq_ignore_ascii_case(want))
+                });
+                if keep {
+                    out.push(numeric_at(values.as_ref(), row).ok_or_else(|| {
+                        EngineError::RefDist(format!("column {name:?} is not numeric"))
+                    })?);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Empirical/normative summary of a 1-D parameter (D10 band overlays
+    /// and readouts). For an observed distribution this is the empirical
+    /// [`Summary`] of the raw column; for a `summary_normative_range` it
+    /// is built from the `mean` / `sd` rows of the `stat` column via
+    /// [`Summary::from_mean_sd`] (a normal model). `filters` subsets by
+    /// subgroup (e.g. `sex = m`). Errors if there are no matching values.
+    pub fn summary(&self, parameter: &str, filters: &[(&str, &str)]) -> Result<Summary> {
+        match self.manifest.measure.kind {
+            MeasureKind::SummaryNormativeRange => {
+                let mut mean_filters = filters.to_vec();
+                mean_filters.push(("stat", "mean"));
+                let means = self.column_f64(parameter, &mean_filters)?;
+                if means.is_empty() {
+                    return Err(EngineError::RefDist(format!(
+                        "normative distribution {:?} has no `mean` row for {parameter:?}",
+                        self.manifest.id
+                    )));
+                }
+                let mean = means.iter().sum::<f64>() / means.len() as f64;
+
+                let mut sd_filters = filters.to_vec();
+                sd_filters.push(("stat", "sd"));
+                let sds = self.column_f64(parameter, &sd_filters)?;
+                let sd = if sds.is_empty() {
+                    0.0
+                } else {
+                    sds.iter().sum::<f64>() / sds.len() as f64
+                };
+                let n = self.manifest.population.n_speakers.unwrap_or(0) as usize;
+                Ok(Summary::from_mean_sd(mean, sd, n))
+            }
+            _ => {
+                let samples = self.column_f64(parameter, filters)?;
+                Summary::from_samples(&samples).ok_or_else(|| {
+                    EngineError::RefDist(format!(
+                        "no values for {parameter:?} in {:?}",
+                        self.manifest.id
+                    ))
+                })
+            }
+        }
+    }
+
+    /// Equal-width [`Histogram`] of a 1-D parameter's raw samples (D10
+    /// histogram panel). Only meaningful for distributions that ship raw
+    /// samples; errors on a `summary_normative_range` (which has none).
+    pub fn histogram(
+        &self,
+        parameter: &str,
+        bins: usize,
+        filters: &[(&str, &str)],
+    ) -> Result<Histogram> {
+        if self.manifest.measure.kind == MeasureKind::SummaryNormativeRange {
+            return Err(EngineError::RefDist(
+                "cannot histogram a summary_normative_range distribution (no raw samples)".into(),
+            ));
+        }
+        let samples = self.column_f64(parameter, filters)?;
+        Histogram::from_samples(&samples, bins).ok_or_else(|| {
+            EngineError::RefDist(format!(
+                "no samples for {parameter:?} in {:?}",
+                self.manifest.id
+            ))
+        })
+    }
+
+    /// Reads two numeric columns as aligned `(x, y)` pairs (D10 vowel
+    /// space: `x_param = "F1"`, `y_param = "F2"`). Both columns are read
+    /// over the same filtered rows, so the pairs stay row-aligned.
+    pub fn points2d(
+        &self,
+        x_param: &str,
+        y_param: &str,
+        filters: &[(&str, &str)],
+    ) -> Result<Vec<(f64, f64)>> {
+        let xs = self.column_f64(x_param, filters)?;
+        let ys = self.column_f64(y_param, filters)?;
+        if xs.len() != ys.len() {
+            return Err(EngineError::RefDist(format!(
+                "column length mismatch reading 2-D points ({} vs {})",
+                xs.len(),
+                ys.len()
+            )));
+        }
+        Ok(xs.into_iter().zip(ys).collect())
+    }
+}
+
+/// Reads the value at `row` of a numeric Arrow array as `f64`, widening
+/// from the integer/float types polars writes. `None` for non-numeric
+/// arrays or null cells.
+fn numeric_at(arr: &dyn Array, row: usize) -> Option<f64> {
+    if arr.is_null(row) {
+        return None;
+    }
+    if let Some(a) = arr.as_any().downcast_ref::<Float64Array>() {
+        Some(a.value(row))
+    } else if let Some(a) = arr.as_any().downcast_ref::<Float32Array>() {
+        Some(a.value(row) as f64)
+    } else if let Some(a) = arr.as_any().downcast_ref::<Int64Array>() {
+        Some(a.value(row) as f64)
+    } else {
+        arr.as_any()
+            .downcast_ref::<Int32Array>()
+            .map(|a| a.value(row) as f64)
+    }
+}
+
+/// Materialises a string Arrow column to `Vec<Option<String>>`, handling
+/// both `Utf8` (`StringArray`) and `LargeUtf8` (`LargeStringArray`, which
+/// is what polars writes). `None` if the array is not a string type.
+fn string_column(arr: &dyn Array) -> Option<Vec<Option<String>>> {
+    if let Some(a) = arr.as_any().downcast_ref::<StringArray>() {
+        Some(
+            (0..a.len())
+                .map(|i| (!a.is_null(i)).then(|| a.value(i).to_string()))
+                .collect(),
+        )
+    } else {
+        arr.as_any().downcast_ref::<LargeStringArray>().map(|a| {
+            (0..a.len())
+                .map(|i| (!a.is_null(i)).then(|| a.value(i).to_string()))
+                .collect()
+        })
+    }
+}
+
+fn map_parquet_err(e: parquet::errors::ParquetError) -> EngineError {
+    EngineError::RefDist(format!("parquet error: {e}"))
+}
+
+fn map_arrow_err(e: arrow::error::ArrowError) -> EngineError {
+    EngineError::RefDist(format!("arrow error: {e}"))
 }
 
 /// Parses a `refdist.toml` manifest from a TOML string.
@@ -719,5 +1066,221 @@ columns = ["speaker_id", "phone", "F1", "F2"]
         assert_eq!(index.entries[1].tier, 3);
         assert!(!index.entries[1].yanked);
         assert!(index.entries[1].parameters.is_empty());
+    }
+
+    // ----- D10: Summary / Histogram + data-file readers -----------------
+
+    #[test]
+    fn summary_from_samples_matches_numpy_type7() {
+        let s = Summary::from_samples(&[1.0, 2.0, 3.0, 4.0, 5.0]).unwrap();
+        assert_eq!(s.n, 5);
+        assert!((s.mean - 3.0).abs() < 1e-9);
+        assert!((s.median - 3.0).abs() < 1e-9);
+        assert!((s.min - 1.0).abs() < 1e-9);
+        assert!((s.max - 5.0).abs() < 1e-9);
+        assert!((s.p25 - 2.0).abs() < 1e-9);
+        assert!((s.p75 - 4.0).abs() < 1e-9);
+        // Sample SD (n-1) of 1..5 = sqrt(2.5).
+        assert!((s.sd - 2.5_f64.sqrt()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn summary_from_samples_empty_is_none() {
+        assert!(Summary::from_samples(&[]).is_none());
+    }
+
+    #[test]
+    fn summary_from_mean_sd_is_normal_band() {
+        let s = Summary::from_mean_sd(100.0, 10.0, 200);
+        assert_eq!(s.n, 200);
+        assert!((s.mean - 100.0).abs() < 1e-9);
+        assert!((s.median - 100.0).abs() < 1e-9);
+        // z(0.95) ≈ 1.6449 ⇒ p95 ≈ 116.449; band is symmetric.
+        assert!((s.p95 - 116.449).abs() < 1e-2);
+        assert!((s.p5 - 83.551).abs() < 1e-2);
+        assert!((s.p95 - s.mean) - (s.mean - s.p5) < 1e-9);
+    }
+
+    #[test]
+    fn histogram_buckets_and_edges() {
+        let h = Histogram::from_samples(&[0.0, 1.0, 2.0, 3.0, 4.0], 4).unwrap();
+        assert_eq!(h.edges.len(), 5);
+        assert_eq!(h.counts.len(), 4);
+        // All five samples accounted for; 4.0 (== max) folds into last bin.
+        assert_eq!(h.counts.iter().sum::<u64>(), 5);
+        assert_eq!(*h.counts.last().unwrap(), 2); // 3.0 and 4.0
+    }
+
+    #[test]
+    fn histogram_all_equal_is_single_bin() {
+        let h = Histogram::from_samples(&[5.0, 5.0, 5.0], 4).unwrap();
+        assert_eq!(h.counts, vec![3]);
+        assert_eq!(h.edges.len(), 2);
+    }
+
+    // Writes a real Parquet file with the given columns into `dir`, so the
+    // `RefDist` data-readers can be exercised against actual bytes (the
+    // older `write_dist` helper writes only a marker).
+    fn write_parquet(dir: &Path, columns: Vec<(&str, ParquetCol)>) {
+        use arrow::array::{ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use parquet::arrow::ArrowWriter;
+        use std::sync::Arc;
+
+        let fields: Vec<Field> = columns
+            .iter()
+            .map(|(name, col)| {
+                let dt = match col {
+                    ParquetCol::Int(_) => DataType::Int64,
+                    ParquetCol::F64(_) => DataType::Float64,
+                    ParquetCol::Str(_) => DataType::Utf8,
+                };
+                Field::new(*name, dt, false)
+            })
+            .collect();
+        let schema = Arc::new(Schema::new(fields));
+        let arrays: Vec<ArrayRef> = columns
+            .into_iter()
+            .map(|(_, col)| match col {
+                ParquetCol::Int(v) => Arc::new(Int64Array::from(v)) as ArrayRef,
+                ParquetCol::F64(v) => Arc::new(Float64Array::from(v)) as ArrayRef,
+                ParquetCol::Str(v) => Arc::new(StringArray::from(v)) as ArrayRef,
+            })
+            .collect();
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        let file = fs::File::create(dir.join("data.parquet")).unwrap();
+        let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+    }
+
+    enum ParquetCol {
+        Int(Vec<i64>),
+        F64(Vec<f64>),
+        Str(Vec<&'static str>),
+    }
+
+    fn observed_dist() -> RefDist {
+        let dir = temp_store().join("amE-vowels");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("refdist.toml"), manifest_toml("amE-vowels", "1.0.0")).unwrap();
+        write_parquet(
+            &dir,
+            vec![
+                ("speaker_id", ParquetCol::Int(vec![1, 1, 2, 2, 3, 3])),
+                (
+                    "phone",
+                    ParquetCol::Str(vec!["iy", "ae", "iy", "ae", "iy", "ae"]),
+                ),
+                (
+                    "F1",
+                    ParquetCol::F64(vec![300.0, 700.0, 310.0, 710.0, 290.0, 690.0]),
+                ),
+                (
+                    "F2",
+                    ParquetCol::F64(vec![2300.0, 1700.0, 2320.0, 1710.0, 2280.0, 1690.0]),
+                ),
+            ],
+        );
+        let manifest = load_manifest(&dir).unwrap();
+        RefDist { manifest, dir }
+    }
+
+    fn normative_dist() -> RefDist {
+        let dir = temp_store().join("f0-norms");
+        fs::create_dir_all(&dir).unwrap();
+        let toml = r#"
+id = "f0-norms"
+version = "0.1.0"
+title = "Test f0 norms"
+
+[citation]
+authors = ["Doe, J."]
+year = 2025
+
+[population]
+language = "eng"
+sex = ["m", "f"]
+n_speakers = 200
+
+[measure]
+kind = "summary_normative_range"
+parameters = ["f0"]
+units = "Hz"
+
+[privacy]
+shareability = "summary_only"
+
+[schema]
+data_file = "data.parquet"
+shape = "long"
+columns = ["sex", "stat", "f0"]
+"#;
+        fs::write(dir.join("refdist.toml"), toml).unwrap();
+        write_parquet(
+            &dir,
+            vec![
+                ("sex", ParquetCol::Str(vec!["m", "m", "f", "f"])),
+                ("stat", ParquetCol::Str(vec!["mean", "sd", "mean", "sd"])),
+                ("f0", ParquetCol::F64(vec![120.0, 18.0, 210.0, 22.0])),
+            ],
+        );
+        let manifest = load_manifest(&dir).unwrap();
+        RefDist { manifest, dir }
+    }
+
+    #[test]
+    fn column_f64_reads_and_filters() {
+        let rd = observed_dist();
+        let all = rd.column_f64("F1", &[]).unwrap();
+        assert_eq!(all.len(), 6);
+        let iy = rd.column_f64("F1", &[("phone", "iy")]).unwrap();
+        assert_eq!(iy, vec![300.0, 310.0, 290.0]);
+        // Filter match is ASCII-case-insensitive.
+        let iy_upper = rd.column_f64("F1", &[("phone", "IY")]).unwrap();
+        assert_eq!(iy_upper, vec![300.0, 310.0, 290.0]);
+    }
+
+    #[test]
+    fn column_f64_widens_integer_column() {
+        let rd = observed_dist();
+        let ids = rd.column_f64("speaker_id", &[]).unwrap();
+        assert_eq!(ids, vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn summary_observed_uses_raw_samples() {
+        let rd = observed_dist();
+        let s = rd.summary("F1", &[("phone", "iy")]).unwrap();
+        assert_eq!(s.n, 3);
+        assert!((s.mean - 300.0).abs() < 1e-9);
+        assert!((s.median - 300.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn summary_normative_builds_band_from_mean_sd() {
+        let rd = normative_dist();
+        // Subgroup-filtered: the male band.
+        let m = rd.summary("f0", &[("sex", "m")]).unwrap();
+        assert!((m.mean - 120.0).abs() < 1e-9);
+        assert!((m.sd - 18.0).abs() < 1e-9);
+        assert!((m.median - 120.0).abs() < 1e-9);
+        assert_eq!(m.n, 200);
+        // No filter pools the two means (120, 210) → 165.
+        let pooled = rd.summary("f0", &[]).unwrap();
+        assert!((pooled.mean - 165.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn histogram_rejects_summary_normative() {
+        let rd = normative_dist();
+        assert!(rd.histogram("f0", 10, &[]).is_err());
+    }
+
+    #[test]
+    fn points2d_pairs_aligned_columns() {
+        let rd = observed_dist();
+        let ae = rd.points2d("F1", "F2", &[("phone", "ae")]).unwrap();
+        assert_eq!(ae, vec![(700.0, 1700.0), (710.0, 1710.0), (690.0, 1690.0)]);
     }
 }

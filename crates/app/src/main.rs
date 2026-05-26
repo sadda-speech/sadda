@@ -14,9 +14,18 @@ mod state;
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
-use egui_plot::{Line, Plot, PlotPoints};
+use egui_plot::{
+    Bar, BarChart, Line, LineStyle, Plot, PlotPoint, PlotPoints, Points, Polygon, Text, VLine,
+};
 use pyo3::prelude::*;
 use sadda_engine::{LiveConfig, LiveResults, LiveSession, Project, StoppedSession, TierType};
+// D10 measure tracks: the engine already emits these per-frame
+// time series; the GUI computes + caches + renders them as lanes.
+use sadda_engine::dsp::{FormantFrame, FormantsConfig, IntensityFrame, formants, intensity};
+use sadda_engine::pitch::{PitchConfig, PitchFrame, PitchMethod, pitch};
+// D10 refdist overlays: resolve a distribution from the store and turn
+// it into a band the lane draws behind its contour.
+use sadda_engine::{Histogram, MeasureKind, RefDist, RefdistStore, Summary};
 
 use crate::playback::Playback;
 use crate::sadda_app::{
@@ -24,9 +33,9 @@ use crate::sadda_app::{
     with_snapshot_active,
 };
 use crate::state::{
-    ColormapKind, EnvelopeCache, PersistedState, SpectrogramConfig, ThemePref, TimelineState,
-    build_envelope_for_range, colormap_bake, format_reference_lane_caption, power_to_db_normalized,
-    truncate_label,
+    ColormapKind, EnvelopeCache, MeasureTrackConfig, PersistedState, RefdistOverlay,
+    SpectrogramConfig, ThemePref, TimelineState, build_envelope_for_range, colormap_bake,
+    format_reference_lane_caption, nearest_frame_index, power_to_db_normalized, truncate_label,
 };
 
 /// Maximum characters drawn inside an interval rectangle or above a
@@ -42,6 +51,9 @@ const TIER_LANE_HEIGHT: f32 = 28.0;
 /// Sized to fit a 16-char tier name; comfortably wider than the
 /// widest expected Hz tickmark ("22050" at a 44.1 kHz sample rate).
 const SIGNAL_LEFT_GUTTER: f32 = 120.0;
+/// D10: default height (px) of each stacked measure-track lane. The
+/// panels are resizable, so this is just the initial split.
+const MEASURE_LANE_HEIGHT: f32 = 96.0;
 
 const APP_TITLE: &str = "sadda";
 /// Cap on spectrogram texture width. egui's typical max texture size
@@ -131,6 +143,16 @@ struct SaddaApp {
     /// Cached spectrogram texture for the selected bundle + current
     /// `SpectrogramConfig`. Rebuilt only when either changes.
     active_spectrogram: Option<SpectrogramCache>,
+    /// D10: cached measure-track analysis (f0 / formants / intensity)
+    /// for the selected bundle + current `MeasureTrackConfig`.
+    /// Recomputed only when the bundle or the config changes.
+    active_tracks: Option<MeasureTrackCache>,
+    /// D10: resolved reference-distribution overlay bands per lane.
+    /// Refreshed when the View-menu selection changes.
+    overlays: OverlayCache,
+    /// D10: resolved data for the right-side Reference panel (vowel-space
+    /// scatter + histogram). Refreshed when its selection changes.
+    reference: ReferenceView,
     /// Currently-selected annotation in the tier strip. In-memory
     /// only — clears on bundle change. Reached by C5 (cursor sync)
     /// and D6/D7 (editing) when those slices land.
@@ -508,6 +530,77 @@ struct SpectrogramCache {
     nyquist_hz: f32,
 }
 
+/// D10: cached measure-track analysis for the selected bundle under
+/// the current [`MeasureTrackConfig`]. Mirrors [`SpectrogramCache`]:
+/// recomputed only when the bundle or the config changes (see
+/// `rebuild_tracks_if_stale`). Holds the raw per-frame engine output;
+/// the lane panes read straight from these vectors each frame.
+struct MeasureTrackCache {
+    bundle_id: i64,
+    config: MeasureTrackConfig,
+    /// f0 estimates over the whole bundle. Every frame is retained
+    /// (the tracker emits a frequency for all frames); frames below
+    /// the config's voicing threshold are filtered at draw time so an
+    /// unvoiced stretch leaves a gap rather than a spurious contour.
+    f0: Vec<PitchFrame>,
+    /// Per-frame formant estimates (ascending F1..Fn).
+    formants: Vec<FormantFrame>,
+    /// Per-frame intensity (dB-FS).
+    intensity: Vec<IntensityFrame>,
+}
+
+/// D10: a resolved reference-distribution band, ready to draw on a lane.
+/// The `kind` drives the visual encoding so a normative band and a
+/// target zone never look alike (the 2026-05-18 governance rule that the
+/// GUI must not conflate "what people do" with "what to aim for").
+struct OverlayBand {
+    /// Distribution summary the band geometry comes from.
+    summary: Summary,
+    /// Observed vs normative vs target — selects the encoding.
+    kind: MeasureKind,
+    /// Short label (the subgroup-qualified distribution title) drawn in
+    /// the lane corner.
+    label: String,
+}
+
+/// D10: per-lane cache of the resolved overlay band. Each entry holds the
+/// selection that produced it plus the band (`None` if the distribution
+/// couldn't be resolved / summarised), so the store read only happens
+/// when the selection changes — not every frame.
+#[derive(Default)]
+struct OverlayCache {
+    f0: Option<(RefdistOverlay, Option<OverlayBand>)>,
+    intensity: Option<(RefdistOverlay, Option<OverlayBand>)>,
+}
+
+/// D10: resolved data for the right-side Reference panel — the vowel-space
+/// cloud and the 1-D histogram + summary for the active parameter. Cached
+/// against the (distribution, phone, param) selection so the parquet read
+/// happens on a selection change, not every frame (matters during
+/// continuous-repaint playback).
+#[derive(Default)]
+struct ReferenceView {
+    /// Selection that produced this view: (distribution, phone, param).
+    key: Option<(RefdistOverlay, Option<String>, Option<String>)>,
+    /// Subgroup-qualified distribution title.
+    title: String,
+    /// Distribution kind (drives the histogram/scatter framing).
+    kind: Option<MeasureKind>,
+    /// The distribution's declared parameters (vowel space uses [0], [1]).
+    params: Vec<String>,
+    /// Declared phones, offered as a vowel-space filter.
+    phones: Vec<String>,
+    /// Vowel-space cloud: `[params[0], params[1]]` pairs (empty for a
+    /// <2-parameter or summary-only distribution).
+    cloud: Vec<[f64; 2]>,
+    /// Histogram of the active parameter (observed/target only).
+    histogram: Option<Histogram>,
+    /// Summary of the active parameter (percentile markers).
+    summary: Option<Summary>,
+    /// The parameter `histogram` / `summary` describe.
+    active_param: Option<String>,
+}
+
 impl SaddaApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let persisted: PersistedState = cc
@@ -521,6 +614,9 @@ impl SaddaApp {
             selected_bundle_id: None,
             active_envelope: None,
             active_spectrogram: None,
+            active_tracks: None,
+            overlays: OverlayCache::default(),
+            reference: ReferenceView::default(),
             selected_annotation: None,
             timeline: TimelineState::default(),
             playback: None,
@@ -1514,6 +1610,76 @@ impl SaddaApp {
         }
     }
 
+    /// D10: recompute the measure tracks if the cache is stale for the
+    /// selected bundle + current [`MeasureTrackConfig`]. Pure CPU work
+    /// (no GPU upload, unlike the spectrogram), so it takes no `ctx`.
+    /// Skips the analysis entirely when every lane is hidden.
+    fn rebuild_tracks_if_stale(&mut self) {
+        let Some(env) = &self.active_envelope else {
+            return;
+        };
+        let bundle_id = env.bundle_id;
+        let cfg = self.persisted.tracks;
+        if let Some(tc) = &self.active_tracks {
+            if tc.bundle_id == bundle_id && tc.config == cfg {
+                return;
+            }
+        }
+        if !cfg.any_visible() {
+            // Nothing to draw; don't spend the FFT/LPC budget. Leave
+            // any prior cache in place so re-enabling a lane that was
+            // just toggled off doesn't pay to recompute.
+            return;
+        }
+        self.active_tracks = Some(compute_measure_tracks(env, cfg));
+    }
+
+    /// D10: refresh the per-lane overlay bands if the View-menu selection
+    /// changed. Reads the refdist store (a filesystem + parquet hit), so
+    /// it only runs on a selection change, not every frame.
+    fn rebuild_overlays_if_stale(&mut self) {
+        Self::sync_overlay(&self.persisted.f0_overlay, "f0", &mut self.overlays.f0);
+        Self::sync_overlay(
+            &self.persisted.intensity_overlay,
+            "intensity",
+            &mut self.overlays.intensity,
+        );
+    }
+
+    fn sync_overlay(
+        selection: &Option<RefdistOverlay>,
+        parameter: &str,
+        slot: &mut Option<(RefdistOverlay, Option<OverlayBand>)>,
+    ) {
+        match selection {
+            None => *slot = None,
+            Some(sel) => {
+                if slot.as_ref().map(|(key, _)| key) == Some(sel) {
+                    return; // already resolved for this selection
+                }
+                *slot = Some((sel.clone(), resolve_overlay_band(sel, parameter)));
+            }
+        }
+    }
+
+    /// D10: refresh the Reference-panel data if its (distribution, phone,
+    /// param) selection changed.
+    fn rebuild_reference_if_stale(&mut self) {
+        let Some(sel) = self.persisted.reference_dist.clone() else {
+            if self.reference.key.is_some() {
+                self.reference = ReferenceView::default();
+            }
+            return;
+        };
+        let phone = self.persisted.reference_phone.clone();
+        let param = self.persisted.reference_param.clone();
+        let key = (sel.clone(), phone.clone(), param.clone());
+        if self.reference.key.as_ref() == Some(&key) {
+            return;
+        }
+        self.reference = build_reference_view(&sel, phone, param);
+    }
+
     fn set_error(&mut self, msg: String) {
         self.error = Some(msg);
     }
@@ -1594,6 +1760,437 @@ fn build_spectrogram_texture(
     })
 }
 
+/// D10: run the engine's per-frame analyses for the visible lanes and
+/// pack them into a [`MeasureTrackCache`]. Hidden lanes are skipped so
+/// toggling a lane off reclaims its analysis cost. Pitch needs an
+/// owned [`Audio`]; formants/intensity take the sample slice directly.
+fn compute_measure_tracks(env: &EnvelopeCache, cfg: MeasureTrackConfig) -> MeasureTrackCache {
+    let sr = env.sample_rate;
+
+    let f0 = if cfg.f0_visible {
+        // pitch() wants an owned Audio. Recompute is rare (bundle /
+        // config change only), so the one-off sample clone is fine.
+        let audio = sadda_engine::Audio {
+            samples: env.mono_samples.clone(),
+            sample_rate: sr,
+            channels: 1,
+        };
+        let pcfg = PitchConfig {
+            min_freq_hz: cfg.f0_min_hz,
+            max_freq_hz: cfg.f0_max_hz,
+            voicing_threshold: cfg.f0_voicing_threshold,
+            ..PitchConfig::default()
+        };
+        pitch(&audio, &pcfg, PitchMethod::WindowedAutocorrelation)
+    } else {
+        Vec::new()
+    };
+
+    let formants = if cfg.formants_visible {
+        let fcfg = FormantsConfig {
+            n_formants: cfg.formant_count,
+            ..FormantsConfig::default()
+        };
+        formants(&env.mono_samples, sr, &fcfg)
+    } else {
+        Vec::new()
+    };
+
+    let intensity_frames = if cfg.intensity_visible {
+        // 30 ms / 10 ms — the standard Praat-like intensity analysis
+        // window; long enough to span a pitch period at the low end.
+        intensity(&env.mono_samples, sr, 0.030, 0.010)
+    } else {
+        Vec::new()
+    };
+
+    MeasureTrackCache {
+        bundle_id: env.bundle_id,
+        config: cfg,
+        f0,
+        formants,
+        intensity: intensity_frames,
+    }
+}
+
+/// D10: resolve an overlay selection against the refdist store and
+/// summarise it into a drawable [`OverlayBand`]. Returns `None` (rather
+/// than erroring) if the store is unavailable, the distribution isn't
+/// installed, or it has no values for the parameter — the lane then just
+/// draws without a band.
+fn resolve_overlay_band(sel: &RefdistOverlay, parameter: &str) -> Option<OverlayBand> {
+    let store = RefdistStore::user_default().ok()?;
+    let rd = store.get(&sel.id, &sel.version)?;
+    let filters: Vec<(&str, &str)> = match &sel.sex {
+        Some(s) => vec![("sex", s.as_str())],
+        None => Vec::new(),
+    };
+    let summary = rd.summary(parameter, &filters).ok()?;
+    Some(OverlayBand {
+        summary,
+        kind: rd.manifest.measure.kind,
+        label: overlay_label(&rd, sel),
+    })
+}
+
+/// Subgroup-qualified label for an overlay band ("f0 norms (m)").
+fn overlay_label(rd: &RefDist, sel: &RefdistOverlay) -> String {
+    let base = if rd.manifest.title.is_empty() {
+        rd.manifest.id.clone()
+    } else {
+        rd.manifest.title.clone()
+    };
+    match &sel.sex {
+        Some(s) => format!("{base} ({s})"),
+        None => base,
+    }
+}
+
+/// D10: resolve the Reference-panel selection into a [`ReferenceView`] —
+/// the vowel-space cloud (first two parameters) plus the histogram +
+/// summary for the active parameter. Best-effort: any read failure
+/// leaves the corresponding field empty rather than erroring.
+fn build_reference_view(
+    sel: &RefdistOverlay,
+    phone: Option<String>,
+    param: Option<String>,
+) -> ReferenceView {
+    let mut view = ReferenceView {
+        key: Some((sel.clone(), phone.clone(), param.clone())),
+        ..ReferenceView::default()
+    };
+    let Ok(store) = RefdistStore::user_default() else {
+        return view;
+    };
+    let Some(rd) = store.get(&sel.id, &sel.version) else {
+        return view;
+    };
+    view.title = overlay_label(&rd, sel);
+    view.kind = Some(rd.manifest.measure.kind);
+    let params = rd.manifest.measure.parameters.clone();
+    view.phones = rd.manifest.measure.phones.clone();
+
+    let mut filters: Vec<(&str, &str)> = Vec::new();
+    if let Some(s) = sel.sex.as_deref() {
+        filters.push(("sex", s));
+    }
+    if let Some(p) = phone.as_deref() {
+        filters.push(("phone", p));
+    }
+
+    // Vowel-space cloud from the first two parameters.
+    if params.len() >= 2 {
+        if let Ok(pts) = rd.points2d(&params[0], &params[1], &filters) {
+            view.cloud = pts.into_iter().map(|(x, y)| [x, y]).collect();
+        }
+    }
+
+    // Histogram + summary of the active parameter (default: first param).
+    let active = param.or_else(|| params.first().cloned());
+    if let Some(p) = active {
+        if let Ok(s) = rd.summary(&p, &filters) {
+            view.summary = Some(s);
+        }
+        if rd.manifest.measure.kind != MeasureKind::SummaryNormativeRange {
+            if let Ok(h) = rd.histogram(&p, 24, &filters) {
+                view.histogram = Some(h);
+            }
+        }
+        view.active_param = Some(p);
+    }
+    view.params = params;
+    view
+}
+
+/// D10: the measured `(F1, F2)` at the cursor, from the formant track —
+/// the point plotted against the reference vowel cloud. `None` if there's
+/// no formant frame or it has fewer than two formants.
+fn formant_point_at_cursor(frames: &[FormantFrame], cursor: f64) -> Option<(f64, f64)> {
+    let times: Vec<f64> = frames.iter().map(|f| f.time_seconds).collect();
+    let i = nearest_frame_index(&times, cursor)?;
+    let f = &frames[i];
+    if f.frequencies.len() >= 2 {
+        Some((
+            f.frequencies[0].value() as f64,
+            f.frequencies[1].value() as f64,
+        ))
+    } else {
+        None
+    }
+}
+
+/// D10: the median of the voiced f0 estimates — the bundle's "your value"
+/// f0 marker against an f0 reference histogram. `None` if nothing is
+/// voiced above `threshold`.
+fn median_voiced_f0(frames: &[PitchFrame], threshold: f32) -> Option<f64> {
+    let mut vals: Vec<f64> = frames
+        .iter()
+        .filter(|f| f.voicing >= threshold)
+        .map(|f| f.frequency_hz.value() as f64)
+        .collect();
+    if vals.is_empty() {
+        return None;
+    }
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(vals[vals.len() / 2])
+}
+
+/// D10: draws the Reference panel's 1-D histogram — bars from the engine
+/// [`Histogram`], dashed grey p5 / p95 percentile lines + a solid median
+/// line from `summary`, and (if present) a red "you" line at the measured
+/// value so the user sees where their measurement falls in the reference.
+fn draw_reference_histogram(
+    ui: &mut egui::Ui,
+    hist: &Histogram,
+    summary: Option<&Summary>,
+    measured: Option<f64>,
+) {
+    let bars: Vec<Bar> = hist
+        .counts
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            let lo = hist.edges[i];
+            let hi = hist.edges[i + 1];
+            let center = 0.5 * (lo + hi);
+            let width = (hi - lo) * 0.92;
+            Bar::new(center, c as f64)
+                .width(width)
+                .fill(egui::Color32::from_rgba_unmultiplied(120, 140, 200, 160))
+        })
+        .collect();
+
+    Plot::new("ref_histogram")
+        .height(180.0)
+        .y_axis_label("count")
+        .show(ui, |plot_ui| {
+            plot_ui.bar_chart(BarChart::new("reference", bars));
+            if let Some(s) = summary {
+                let pct = egui::Color32::from_gray(140);
+                for x in [s.p5, s.p95] {
+                    plot_ui.vline(VLine::new("", x).color(pct).style(LineStyle::dashed_loose()));
+                }
+                plot_ui.vline(
+                    VLine::new("median", s.median)
+                        .color(egui::Color32::from_gray(180))
+                        .width(1.5),
+                );
+            }
+            if let Some(x) = measured {
+                plot_ui.vline(
+                    VLine::new("you", x)
+                        .color(egui::Color32::from_rgb(230, 70, 70))
+                        .width(2.0),
+                );
+            }
+        });
+
+    // Legend / readout line beneath the plot.
+    if let Some(x) = measured {
+        let pctile = summary.map(|s| describe_position(x, s)).unwrap_or_default();
+        ui.label(
+            egui::RichText::new(format!("your value: {x:.1}{pctile}"))
+                .color(egui::Color32::from_rgb(210, 90, 90))
+                .small(),
+        );
+    }
+}
+
+/// D10: a short "(below p5)" / "(near median)" / "(above p95)" tag locating
+/// a measured value within a reference summary, for the histogram readout.
+fn describe_position(x: f64, s: &Summary) -> String {
+    let where_ = if x < s.p5 {
+        "below p5"
+    } else if x < s.p25 {
+        "p5–p25"
+    } else if x <= s.p75 {
+        "interquartile"
+    } else if x <= s.p95 {
+        "p75–p95"
+    } else {
+        "above p95"
+    };
+    format!("  ({where_})")
+}
+
+/// D10: draws a reference-distribution band across the lane's full x
+/// width. The encoding is keyed on [`MeasureKind`] so the three kinds are
+/// never visually confused: an **observed** distribution reads as a cool
+/// neutral percentile band, a **normative** range as a green clinical
+/// band, and a **target zone** as a distinct amber goal region with a
+/// dashed border and a "TARGET" tag. Each draws an outer p5–p95 fill, an
+/// inner p25–p75 fill, and a centre line at the median/mean. `y_top` is
+/// the lane's y-axis maximum, used only to place the corner label.
+fn draw_refdist_band(
+    plot_ui: &mut egui_plot::PlotUi<'_>,
+    band: &OverlayBand,
+    x0: f64,
+    x1: f64,
+    y_top: f64,
+) {
+    let s = &band.summary;
+    let (base, tag) = match band.kind {
+        MeasureKind::ObservedDistribution => (egui::Color32::from_rgb(90, 140, 210), "observed"),
+        MeasureKind::SummaryNormativeRange => (egui::Color32::from_rgb(70, 165, 95), "norm"),
+        MeasureKind::TargetZone => (egui::Color32::from_rgb(230, 160, 40), "TARGET"),
+    };
+    let alpha = |a: u8| egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), a);
+
+    let rect = |y_lo: f64, y_hi: f64| {
+        PlotPoints::from(vec![[x0, y_lo], [x1, y_lo], [x1, y_hi], [x0, y_hi]])
+    };
+
+    // Outer p5–p95, then inner p25–p75 (drawn over it, more opaque).
+    plot_ui.polygon(
+        Polygon::new("", rect(s.p5, s.p95))
+            .fill_color(alpha(28))
+            .stroke(egui::Stroke::NONE),
+    );
+    let inner = Polygon::new("", rect(s.p25, s.p75)).fill_color(alpha(60));
+    // A target zone gets a bold dashed border so it reads as prescriptive,
+    // not descriptive; observed/normative bands stay borderless.
+    let inner = if band.kind == MeasureKind::TargetZone {
+        inner
+            .stroke(egui::Stroke::new(1.5, base))
+            .style(LineStyle::dashed_loose())
+    } else {
+        inner.stroke(egui::Stroke::NONE)
+    };
+    plot_ui.polygon(inner);
+
+    // Centre line (median for observed, mean for normative — both land in
+    // `Summary::median`).
+    plot_ui.line(
+        Line::new("", PlotPoints::from(vec![[x0, s.median], [x1, s.median]]))
+            .color(base)
+            .width(1.5),
+    );
+
+    // Corner tag so the kind + source is legible without a legend.
+    let label_x = x0 + 0.01 * (x1 - x0);
+    plot_ui.text(
+        Text::new(
+            "",
+            PlotPoint::new(label_x, y_top),
+            format!("{tag} · {}", band.label),
+        )
+        .color(base)
+        .anchor(egui::Align2::LEFT_TOP),
+    );
+}
+
+/// D10: populates an overlay-picker submenu for `parameter`. Lists every
+/// installed distribution whose measure parameters include `parameter`,
+/// one radio entry per subgroup (`sex`) when the distribution declares
+/// them, plus a "None" option. Writes the choice into `slot`.
+fn refdist_overlay_submenu(
+    ui: &mut egui::Ui,
+    parameter: Option<&str>,
+    slot: &mut Option<RefdistOverlay>,
+) {
+    if ui.radio(slot.is_none(), "None").clicked() {
+        *slot = None;
+        ui.close();
+    }
+    let dists = RefdistStore::user_default()
+        .map(|s| s.list())
+        .unwrap_or_default();
+    let matching: Vec<&RefDist> = dists
+        .iter()
+        .filter(|rd| match parameter {
+            Some(p) => rd
+                .manifest
+                .measure
+                .parameters
+                .iter()
+                .any(|x| x.eq_ignore_ascii_case(p)),
+            None => true,
+        })
+        .collect();
+    if matching.is_empty() {
+        ui.separator();
+        ui.label(
+            egui::RichText::new("(no matching distributions installed —\nuse \"Install bundled reference data\")")
+                .weak(),
+        );
+        return;
+    }
+    ui.separator();
+    for rd in matching {
+        let id = rd.manifest.id.clone();
+        let version = rd.manifest.version.clone();
+        let sexes = &rd.manifest.population.sex;
+        if sexes.is_empty() {
+            let sel = RefdistOverlay {
+                id,
+                version,
+                sex: None,
+            };
+            if ui.radio(slot.as_ref() == Some(&sel), &rd.manifest.title).clicked() {
+                *slot = Some(sel);
+                ui.close();
+            }
+        } else {
+            for sx in sexes {
+                let sel = RefdistOverlay {
+                    id: id.clone(),
+                    version: version.clone(),
+                    sex: Some(sx.clone()),
+                };
+                let label = format!("{} ({sx})", rd.manifest.title);
+                if ui.radio(slot.as_ref() == Some(&sel), label).clicked() {
+                    *slot = Some(sel);
+                    ui.close();
+                }
+            }
+        }
+    }
+}
+
+/// D10: installs the bundled tier-1 reference distributions into the user
+/// store (the first-run seeding the C8 entry left to cluster D). Copies
+/// every distribution directory under the located `refdist-bundled/`;
+/// idempotent (re-running overwrites in place). Returns how many were
+/// installed.
+fn seed_bundled_refdists() -> std::result::Result<usize, String> {
+    let store = RefdistStore::user_default().map_err(|e| e.to_string())?;
+    let dir = locate_bundled_refdist_dir()
+        .ok_or_else(|| "bundled reference-distribution directory not found".to_string())?;
+    let mut n = 0;
+    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        if path.join("refdist.toml").is_file() {
+            store.install_from_dir(&path).map_err(|e| e.to_string())?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// Locates the `refdist-bundled/` directory: an explicit
+/// `SADDA_REFDIST_BUNDLED` override, then next to the executable (the
+/// shipped layout), then the workspace copy relative to this crate (dev).
+fn locate_bundled_refdist_dir() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("SADDA_REFDIST_BUNDLED") {
+        let p = PathBuf::from(p);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(cand) = exe.parent().map(|d| d.join("refdist-bundled")) {
+            if cand.is_dir() {
+                return Some(cand);
+            }
+        }
+    }
+    let dev = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../refdist-bundled");
+    if dev.is_dir() {
+        return Some(dev);
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Shared C5 plot helpers: cursor line + wheel-driven zoom / scroll
 // ---------------------------------------------------------------------------
@@ -1608,6 +2205,73 @@ fn draw_cursor_line(plot_ui: &mut egui_plot::PlotUi<'_>, cursor: f64, y_min: f64
             .color(egui::Color32::from_rgb(230, 70, 70))
             .width(1.0),
     );
+}
+
+/// D10: per-formant dot colour (F1, F2, F3, …). Cycles through a small
+/// warm-leaning palette; wraps for formant slots beyond the palette.
+fn formant_color(slot: usize) -> egui::Color32 {
+    const PALETTE: [egui::Color32; 5] = [
+        egui::Color32::from_rgb(220, 60, 60),   // F1 red
+        egui::Color32::from_rgb(230, 140, 40),  // F2 orange
+        egui::Color32::from_rgb(200, 80, 170),  // F3 magenta
+        egui::Color32::from_rgb(120, 90, 200),  // F4 violet
+        egui::Color32::from_rgb(90, 160, 90),   // F5 green
+    ];
+    PALETTE[slot % PALETTE.len()]
+}
+
+/// D10: shared scaffolding for a measure-track lane. Owns the plot
+/// bounds (visible window in x, the lane's own range in y — so each
+/// lane x-aligns with the waveform/spectrogram and the cursor draws a
+/// single straight line through them all), draws the synced cursor,
+/// and routes click-to-seek + wheel zoom/scroll back into `timeline`.
+/// The lane-specific contour is drawn by `draw`. The x-axis is hidden
+/// (`show_axes([false, true])`) to keep stacked lanes compact; the
+/// waveform and spectrogram already carry the time ruler.
+fn measure_lane(
+    ui: &mut egui::Ui,
+    plot_id: &str,
+    timeline: &mut TimelineState,
+    y_range: (f64, f64),
+    y_axis_label: &str,
+    draw: impl FnOnce(&mut egui_plot::PlotUi<'_>),
+) {
+    let view_start = timeline.view_start;
+    let view_end = timeline.view_end;
+    let cursor = timeline.cursor;
+    let (y_min, y_max) = y_range;
+    let mut clicked_time: Option<f64> = None;
+
+    let plot_response = Plot::new(plot_id)
+        .show_axes([false, true])
+        .y_axis_label(y_axis_label)
+        .y_axis_min_width(SIGNAL_LEFT_GUTTER)
+        .allow_drag(false)
+        .allow_zoom(false)
+        .allow_scroll(false)
+        .show(ui, |plot_ui| {
+            // Own the bounds outright (matches the waveform pane): the
+            // explicit set disables auto-fit so there's no edge margin
+            // and the x-window matches the other lanes exactly.
+            plot_ui.set_plot_bounds_x(view_start..=view_end);
+            plot_ui.set_plot_bounds_y(y_min..=y_max);
+            draw(plot_ui);
+            draw_cursor_line(plot_ui, cursor, y_min, y_max);
+
+            let resp = plot_ui.response();
+            if resp.clicked() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    let tx = plot_ui.plot_from_screen(pos);
+                    clicked_time = Some(tx.x);
+                }
+            }
+        })
+        .response;
+
+    if let Some(t) = clicked_time {
+        timeline.set_cursor(t);
+    }
+    handle_zoom_and_scroll(&plot_response, timeline);
 }
 
 /// Wheel-driven zoom + shift-wheel scroll. Reads raw scroll deltas
@@ -2262,6 +2926,18 @@ impl eframe::App for SaddaApp {
                     .default_size(200.0)
                     .min_size(120.0)
                     .show_inside(ui, |ui| self.bundle_sidebar(ui));
+                // D10: right-side Reference panel. Refresh its cached data
+                // before showing it, so a changed selection lands next frame.
+                if self.persisted.reference_panel_open {
+                    self.rebuild_reference_if_stale();
+                    egui::Panel::right("reference_panel")
+                        .resizable(true)
+                        .default_size(320.0)
+                        .min_size(220.0)
+                        .show_inside(ui, |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| self.reference_panel(ui))
+                        });
+                }
                 egui::CentralPanel::default().show_inside(ui, |ui| self.bundle_content_pane(ui));
             }
         }
@@ -2451,6 +3127,36 @@ impl SaddaApp {
             ui.radio_value(&mut self.persisted.theme, ThemePref::Light, "Light");
             ui.radio_value(&mut self.persisted.theme, ThemePref::Dark, "Dark");
             ui.separator();
+            // D10: measure-track lane visibility. Each toggle persists
+            // across launches; enabling a lane triggers the analysis
+            // on the next frame via `rebuild_tracks_if_stale`.
+            ui.label("Measure Tracks");
+            ui.checkbox(&mut self.persisted.tracks.f0_visible, "f0");
+            ui.checkbox(&mut self.persisted.tracks.formants_visible, "Formants");
+            ui.checkbox(&mut self.persisted.tracks.intensity_visible, "Intensity");
+            // D10: reference-distribution overlay pickers, one per
+            // band-capable lane. Each lists installed distributions whose
+            // parameter matches the lane, narrowed by subgroup.
+            ui.menu_button("f0 reference overlay", |ui| {
+                refdist_overlay_submenu(ui, Some("f0"), &mut self.persisted.f0_overlay);
+            });
+            ui.menu_button("Intensity reference overlay", |ui| {
+                refdist_overlay_submenu(ui, Some("intensity"), &mut self.persisted.intensity_overlay);
+            });
+            if ui.button("Install bundled reference data").clicked() {
+                ui.close();
+                match seed_bundled_refdists() {
+                    Ok(n) => self.set_info(format!(
+                        "Installed {n} bundled reference distribution(s) into the store."
+                    )),
+                    Err(e) => {
+                        self.set_error(format!("Could not install bundled reference data: {e}"))
+                    }
+                }
+            }
+            ui.separator();
+            // D10: right-side Reference panel (vowel space + histogram).
+            ui.checkbox(&mut self.persisted.reference_panel_open, "Show Reference Panel");
             // E8: script-panel toggle. Persists across launches.
             ui.checkbox(&mut self.persisted.script_panel_open, "Show Script Panel");
         });
@@ -2592,6 +3298,45 @@ impl SaddaApp {
             // Frameless, like the waveform panel — see note there.
             .frame(egui::Frame::NONE)
             .show_inside(ui, |ui| self.tier_strip_pane(ui));
+
+        // D10 measure-track lanes, stacked between the spectrogram and
+        // the tier strip. Each is a frameless bottom panel so it shares
+        // the SIGNAL_LEFT_GUTTER / view-window with the other lanes and
+        // the playback cursor draws one straight line through them all.
+        // Registered bottom-up — intensity sits just above the tier
+        // strip, then formants, then f0 just under the spectrogram —
+        // because egui stacks the first-registered bottom panel
+        // outermost. Only shown when a bundle is loaded and the lane is
+        // enabled in View → Measure Tracks.
+        self.rebuild_tracks_if_stale();
+        self.rebuild_overlays_if_stale();
+        if self.active_envelope.is_some() {
+            let tracks = self.persisted.tracks;
+            if tracks.intensity_visible {
+                egui::Panel::bottom("intensity_lane")
+                    .resizable(true)
+                    .default_size(MEASURE_LANE_HEIGHT)
+                    .min_size(48.0)
+                    .frame(egui::Frame::NONE)
+                    .show_inside(ui, |ui| self.intensity_lane_pane(ui));
+            }
+            if tracks.formants_visible {
+                egui::Panel::bottom("formant_lane")
+                    .resizable(true)
+                    .default_size(MEASURE_LANE_HEIGHT)
+                    .min_size(48.0)
+                    .frame(egui::Frame::NONE)
+                    .show_inside(ui, |ui| self.formant_lane_pane(ui));
+            }
+            if tracks.f0_visible {
+                egui::Panel::bottom("f0_lane")
+                    .resizable(true)
+                    .default_size(MEASURE_LANE_HEIGHT)
+                    .min_size(48.0)
+                    .frame(egui::Frame::NONE)
+                    .show_inside(ui, |ui| self.f0_lane_pane(ui));
+            }
+        }
 
         // Centre: spectrogram fills the remainder, drawn directly on
         // the panel `ui`. With the waveform/tier panels now frameless,
@@ -2834,6 +3579,130 @@ impl SaddaApp {
             // warnings on the response objects.
             let _ = (win, hop, dr, combo);
         });
+    }
+
+    /// D10: f0 measure-track lane. Draws voiced pitch estimates as a
+    /// dot contour (Praat draws f0 as dots, not a connected line, so
+    /// unvoiced gaps read as gaps). Frames below the voicing threshold
+    /// are dropped at draw time.
+    fn f0_lane_pane(&mut self, ui: &mut egui::Ui) {
+        let cfg = self.persisted.tracks;
+        let Some(tc) = self.active_tracks.as_ref() else {
+            ui.centered_and_justified(|ui| {
+                ui.label(egui::RichText::new("(computing f0…)").weak());
+            });
+            return;
+        };
+        let frames = &tc.f0;
+        let threshold = cfg.f0_voicing_threshold;
+        let band = self.overlays.f0.as_ref().and_then(|(_, b)| b.as_ref());
+        let x0 = self.timeline.view_start;
+        let x1 = self.timeline.view_end;
+        let y_top = cfg.f0_max_hz as f64;
+        measure_lane(
+            ui,
+            "f0_lane_plot",
+            &mut self.timeline,
+            (cfg.f0_min_hz as f64, cfg.f0_max_hz as f64),
+            "f0 (Hz)",
+            |plot_ui| {
+                // Band first, behind the contour.
+                if let Some(band) = band {
+                    draw_refdist_band(plot_ui, band, x0, x1, y_top);
+                }
+                let pts: Vec<[f64; 2]> = frames
+                    .iter()
+                    .filter(|f| f.voicing >= threshold)
+                    .map(|f| [f.time_seconds, f.frequency_hz.value() as f64])
+                    .collect();
+                if !pts.is_empty() {
+                    plot_ui.points(
+                        Points::new("f0", PlotPoints::from(pts))
+                            .radius(1.6)
+                            .color(egui::Color32::from_rgb(40, 120, 230)),
+                    );
+                }
+            },
+        );
+    }
+
+    /// D10: formant measure-track lane. One dot series per formant
+    /// slot (F1..Fn), each its own colour, so vowel formant trajectories
+    /// are separable by eye.
+    fn formant_lane_pane(&mut self, ui: &mut egui::Ui) {
+        let cfg = self.persisted.tracks;
+        let Some(tc) = self.active_tracks.as_ref() else {
+            ui.centered_and_justified(|ui| {
+                ui.label(egui::RichText::new("(computing formants…)").weak());
+            });
+            return;
+        };
+        let frames = &tc.formants;
+        let n = cfg.formant_count;
+        measure_lane(
+            ui,
+            "formant_lane_plot",
+            &mut self.timeline,
+            (0.0, cfg.formant_max_hz as f64),
+            "formants (Hz)",
+            |plot_ui| {
+                for slot in 0..n {
+                    let pts: Vec<[f64; 2]> = frames
+                        .iter()
+                        .filter_map(|f| {
+                            f.frequencies
+                                .get(slot)
+                                .map(|hz| [f.time_seconds, hz.value() as f64])
+                        })
+                        .collect();
+                    if !pts.is_empty() {
+                        plot_ui.points(
+                            Points::new(format!("F{}", slot + 1), PlotPoints::from(pts))
+                                .radius(1.5)
+                                .color(formant_color(slot)),
+                        );
+                    }
+                }
+            },
+        );
+    }
+
+    /// D10: intensity measure-track lane. A connected dB-FS contour
+    /// (intensity is continuous, so unlike f0 it reads best as a line).
+    fn intensity_lane_pane(&mut self, ui: &mut egui::Ui) {
+        let cfg = self.persisted.tracks;
+        let Some(tc) = self.active_tracks.as_ref() else {
+            ui.centered_and_justified(|ui| {
+                ui.label(egui::RichText::new("(computing intensity…)").weak());
+            });
+            return;
+        };
+        let frames = &tc.intensity;
+        let band = self.overlays.intensity.as_ref().and_then(|(_, b)| b.as_ref());
+        let x0 = self.timeline.view_start;
+        let x1 = self.timeline.view_end;
+        measure_lane(
+            ui,
+            "intensity_lane_plot",
+            &mut self.timeline,
+            (cfg.intensity_floor_db as f64, 0.0),
+            "intensity (dB)",
+            |plot_ui| {
+                if let Some(band) = band {
+                    draw_refdist_band(plot_ui, band, x0, x1, 0.0);
+                }
+                let pts: Vec<[f64; 2]> = frames
+                    .iter()
+                    .map(|f| [f.time_seconds, f.db_fs.value() as f64])
+                    .collect();
+                if pts.len() >= 2 {
+                    plot_ui.line(
+                        Line::new("intensity", PlotPoints::from(pts))
+                            .color(egui::Color32::from_rgb(225, 170, 40)),
+                    );
+                }
+            },
+        );
     }
 
     fn tier_strip_pane(&mut self, ui: &mut egui::Ui) {
@@ -3220,6 +4089,167 @@ impl SaddaApp {
     /// E8 script panel: top = code editor, bottom = output. Run via
     /// the button OR Ctrl/Cmd+Enter (handled at the app level so
     /// the shortcut works whether or not the editor has focus).
+    /// D10: right-side Reference panel — a vowel-space scatter (the
+    /// reference cloud + the measured vowel at the cursor) and a 1-D
+    /// histogram of a chosen parameter with percentile + measured-value
+    /// markers. Both read from the cached [`ReferenceView`], refreshed in
+    /// `rebuild_reference_if_stale`.
+    fn reference_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Reference").strong());
+        });
+        ui.label(
+            egui::RichText::new("Compare your measurements against a reference distribution.")
+                .weak(),
+        );
+        ui.separator();
+
+        // Distribution picker (all installed distributions).
+        let picker_label = self
+            .persisted
+            .reference_dist
+            .as_ref()
+            .map(|_| self.reference.title.clone())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "Select distribution…".to_string());
+        ui.menu_button(picker_label, |ui| {
+            refdist_overlay_submenu(ui, None, &mut self.persisted.reference_dist);
+        });
+
+        if self.persisted.reference_dist.is_none() {
+            ui.label(
+                egui::RichText::new(
+                    "Pick a distribution above. If none are listed, run \
+                     View → Install bundled reference data.",
+                )
+                .weak(),
+            );
+            return;
+        }
+
+        // Snapshot the cached view + the current measurements into owned
+        // locals, so the picker/selectors below can freely mutate
+        // `self.persisted` without aliasing the borrows.
+        let params = self.reference.params.clone();
+        let phones = self.reference.phones.clone();
+        let cloud = self.reference.cloud.clone();
+        let histogram = self.reference.histogram.clone();
+        let summary = self.reference.summary;
+        let active_param = self.reference.active_param.clone();
+        let kind = self.reference.kind;
+        let cursor = self.timeline.cursor;
+        let threshold = self.persisted.tracks.f0_voicing_threshold;
+        let measured_vowel = self
+            .active_tracks
+            .as_ref()
+            .and_then(|tc| formant_point_at_cursor(&tc.formants, cursor));
+        let median_f0 = self
+            .active_tracks
+            .as_ref()
+            .and_then(|tc| median_voiced_f0(&tc.f0, threshold));
+
+        // Vowel-space scatter (first two parameters), phonetic orientation.
+        if params.len() >= 2 && !cloud.is_empty() {
+            ui.separator();
+            if !phones.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.label("Phone:");
+                    let cur = self
+                        .persisted
+                        .reference_phone
+                        .clone()
+                        .unwrap_or_else(|| "all".to_string());
+                    egui::ComboBox::from_id_salt("ref_phone")
+                        .selected_text(cur)
+                        .show_ui(ui, |ui| {
+                            if ui
+                                .selectable_label(self.persisted.reference_phone.is_none(), "all")
+                                .clicked()
+                            {
+                                self.persisted.reference_phone = None;
+                            }
+                            for ph in &phones {
+                                let on = self.persisted.reference_phone.as_deref() == Some(ph);
+                                if ui.selectable_label(on, ph).clicked() {
+                                    self.persisted.reference_phone = Some(ph.clone());
+                                }
+                            }
+                        });
+                });
+            }
+            // Convention: F2 on x (high → left), F1 on y (high → down).
+            let x_name = params[1].clone();
+            let y_name = params[0].clone();
+            ui.label(format!("Vowel space — x: {x_name}, y: {y_name}"));
+            Plot::new("vowel_space")
+                .invert_x(true)
+                .invert_y(true)
+                .x_axis_label(x_name)
+                .y_axis_label(y_name)
+                .height(220.0)
+                .show(ui, |plot_ui| {
+                    let pts: Vec<[f64; 2]> = cloud.iter().map(|p| [p[1], p[0]]).collect();
+                    plot_ui.points(
+                        Points::new("reference", PlotPoints::from(pts))
+                            .radius(2.5)
+                            .color(egui::Color32::from_rgba_unmultiplied(120, 140, 200, 160)),
+                    );
+                    if let Some((f1, f2)) = measured_vowel {
+                        plot_ui.points(
+                            Points::new("you", PlotPoints::from(vec![[f2, f1]]))
+                                .radius(6.0)
+                                .shape(egui_plot::MarkerShape::Diamond)
+                                .color(egui::Color32::from_rgb(230, 70, 70)),
+                        );
+                    }
+                });
+            if measured_vowel.is_none() {
+                ui.label(
+                    egui::RichText::new("enable the Formants track to plot your vowel")
+                        .weak()
+                        .small(),
+                );
+            }
+        }
+
+        // Histogram of the active parameter.
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Histogram:");
+            for p in &params {
+                let on = active_param.as_deref() == Some(p);
+                if ui.selectable_label(on, p).clicked() {
+                    self.persisted.reference_param = Some(p.clone());
+                }
+            }
+        });
+
+        let measured_scalar: Option<f64> = match active_param.as_deref() {
+            Some(p) if p.eq_ignore_ascii_case("f0") => median_f0,
+            Some("F1") => measured_vowel.map(|(f1, _)| f1),
+            Some("F2") => measured_vowel.map(|(_, f2)| f2),
+            _ => None,
+        };
+
+        if let Some(h) = &histogram {
+            draw_reference_histogram(ui, h, summary.as_ref(), measured_scalar);
+        } else if kind == Some(MeasureKind::SummaryNormativeRange) {
+            ui.label(
+                egui::RichText::new(
+                    "summary-only distribution — no per-sample histogram; \
+                     use the band overlay on the f0 lane.",
+                )
+                .weak(),
+            );
+            if let Some(s) = summary {
+                ui.label(format!(
+                    "mean {:.1}  ·  sd {:.1}  ·  p5–p95 {:.1}–{:.1}",
+                    s.mean, s.sd, s.p5, s.p95
+                ));
+            }
+        }
+    }
+
     fn script_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Script").strong());

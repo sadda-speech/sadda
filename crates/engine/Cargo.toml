@@ -15,7 +15,11 @@ cpal = "0.17"
 directories = "5"
 hound = "3.5"
 ndarray = "0.16"
-parquet = { version = "58", default-features = false, features = ["arrow", "snap"] }
+# `zstd` is needed alongside `snap`: polars' `write_parquet` (used by the
+# refdist data files + the C9 scaffolder) defaults to zstd, so the D10
+# refdist readers must decode it. `snap` stays for the B3 dense-tier
+# sidecars the engine writes itself.
+parquet = { version = "58", default-features = false, features = ["arrow", "snap", "zstd"] }
 quick-xml = "0.40"
 realfft = "3"
 rtrb = "0.3"

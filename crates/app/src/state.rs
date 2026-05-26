@@ -37,6 +37,31 @@ pub struct PersistedState {
     /// Last-used spectrogram window / hop / colormap / dB-range.
     #[serde(default)]
     pub spectrogram: SpectrogramConfig,
+    /// D10: last-used measure-track lane visibility + analysis params.
+    #[serde(default)]
+    pub tracks: MeasureTrackConfig,
+    /// D10: reference distribution overlaid on the f0 lane, if any.
+    #[serde(default)]
+    pub f0_overlay: Option<RefdistOverlay>,
+    /// D10: reference distribution overlaid on the intensity lane, if any.
+    #[serde(default)]
+    pub intensity_overlay: Option<RefdistOverlay>,
+    /// D10: whether the right-side Reference panel (vowel-space scatter +
+    /// 1-D histogram) is shown.
+    #[serde(default)]
+    pub reference_panel_open: bool,
+    /// D10: distribution shown in the Reference panel (`sex` narrows the
+    /// subgroup). The vowel-space scatter uses its first two parameters;
+    /// the histogram uses [`PersistedState::reference_param`].
+    #[serde(default)]
+    pub reference_dist: Option<RefdistOverlay>,
+    /// D10: phone filter for the Reference panel's vowel-space scatter.
+    #[serde(default)]
+    pub reference_phone: Option<String>,
+    /// D10: which parameter the Reference panel's histogram bins. Defaults
+    /// to the distribution's first parameter when unset.
+    #[serde(default)]
+    pub reference_param: Option<String>,
     /// E8: whether the embedded-CPython script panel is currently
     /// shown at the bottom of the app.
     #[serde(default)]
@@ -72,6 +97,51 @@ impl PersistedState {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn measure_track_default_shows_only_f0() {
+        let cfg = MeasureTrackConfig::default();
+        assert!(cfg.f0_visible);
+        assert!(!cfg.formants_visible);
+        assert!(!cfg.intensity_visible);
+        assert!(cfg.any_visible());
+    }
+
+    #[test]
+    fn measure_track_any_visible_false_when_all_off() {
+        let cfg = MeasureTrackConfig {
+            f0_visible: false,
+            formants_visible: false,
+            intensity_visible: false,
+            ..MeasureTrackConfig::default()
+        };
+        assert!(!cfg.any_visible());
+    }
+
+    #[test]
+    fn measure_track_any_visible_true_when_one_on() {
+        let cfg = MeasureTrackConfig {
+            f0_visible: false,
+            formants_visible: true,
+            intensity_visible: false,
+            ..MeasureTrackConfig::default()
+        };
+        assert!(cfg.any_visible());
+    }
+
+    #[test]
+    fn nearest_frame_index_picks_closest() {
+        let times = [0.0, 0.1, 0.2, 0.3];
+        assert_eq!(nearest_frame_index(&times, 0.0), Some(0));
+        assert_eq!(nearest_frame_index(&times, 0.17), Some(2));
+        assert_eq!(nearest_frame_index(&times, 0.24), Some(2));
+        assert_eq!(nearest_frame_index(&times, 99.0), Some(3));
+    }
+
+    #[test]
+    fn nearest_frame_index_empty_is_none() {
+        assert_eq!(nearest_frame_index(&[], 0.5), None);
+    }
 
     #[test]
     fn record_open_inserts_at_front() {
@@ -282,6 +352,97 @@ impl Default for SpectrogramConfig {
             hop_ms: 5.0,
             colormap: ColormapKind::Viridis,
             dynamic_range_db: 70.0,
+        }
+    }
+}
+
+/// D10: configuration for the stacked measure-track lanes (f0,
+/// formants, intensity) drawn below the spectrogram. Lives in
+/// [`PersistedState`] so the user's lane visibility + analysis
+/// parameters survive a relaunch. Changing any field invalidates the
+/// app's track cache (see `MeasureTrackCache`), so this derives
+/// `PartialEq` to make staleness a cheap equality check — exactly the
+/// pattern [`SpectrogramConfig`] uses.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MeasureTrackConfig {
+    /// Whether the f0 lane is shown.
+    pub f0_visible: bool,
+    /// Whether the formant lane is shown.
+    pub formants_visible: bool,
+    /// Whether the intensity lane is shown.
+    pub intensity_visible: bool,
+    /// f0 search floor (Hz). Doubles as the f0 lane's y-axis minimum.
+    pub f0_min_hz: f32,
+    /// f0 search ceiling (Hz). Doubles as the f0 lane's y-axis maximum.
+    pub f0_max_hz: f32,
+    /// Drop f0 estimates whose voicing strength is below this; unvoiced
+    /// frames leave a gap rather than a spurious pitch point.
+    pub f0_voicing_threshold: f32,
+    /// Number of formants to track (and plot, ascending: F1..Fn).
+    pub formant_count: usize,
+    /// Formant lane y-axis maximum (Hz). Formants above this aren't
+    /// plotted; the lane scales to a fixed range so vowels are
+    /// comparable across bundles.
+    pub formant_max_hz: f32,
+    /// Intensity lane y-axis floor (dB-FS). The ceiling is fixed at 0.
+    pub intensity_floor_db: f32,
+}
+
+impl MeasureTrackConfig {
+    /// True when at least one lane is enabled — used to skip the
+    /// analysis recompute entirely when every lane is hidden.
+    pub fn any_visible(&self) -> bool {
+        self.f0_visible || self.formants_visible || self.intensity_visible
+    }
+}
+
+/// D10: index of the frame whose `time` is closest to `cursor`, or `None`
+/// for an empty slice. Used to read the measured vowel (F1/F2) at the
+/// playback cursor for the Reference panel's vowel-space scatter. Frame
+/// times are assumed ascending but the scan is order-agnostic.
+pub fn nearest_frame_index(times: &[f64], cursor: f64) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (i, &t) in times.iter().enumerate() {
+        let d = (t - cursor).abs();
+        if best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((i, d));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// D10: a reference distribution selected to overlay on a measure-track
+/// lane, plus the subgroup it's narrowed to. Identifies the distribution
+/// by `id` + `version` (resolved against the store at draw time) so the
+/// choice persists across launches and survives a store update. `sex` is
+/// the optional subgroup filter (a distribution with both sexes pooled
+/// reads as a bimodal band, so the picker usually narrows it).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RefdistOverlay {
+    /// Distribution id (e.g. `"placeholder-f0-norms"`).
+    pub id: String,
+    /// Pinned version.
+    pub version: String,
+    /// Subgroup filter on the `sex` column, if narrowed.
+    #[serde(default)]
+    pub sex: Option<String>,
+}
+
+impl Default for MeasureTrackConfig {
+    fn default() -> Self {
+        Self {
+            // f0 is the single most-requested track across user groups
+            // (the 2026-05-16 survey's pattern A); on by default. The
+            // others stay opt-in to keep the first view uncluttered.
+            f0_visible: true,
+            formants_visible: false,
+            intensity_visible: false,
+            f0_min_hz: 75.0,
+            f0_max_hz: 500.0,
+            f0_voicing_threshold: 0.45,
+            formant_count: 5,
+            formant_max_hz: 5500.0,
+            intensity_floor_db: -80.0,
         }
     }
 }

@@ -26,6 +26,12 @@ Typical usage::
     rd.id, rd.version, rd.kind, rd.parameters, rd.units
     df = rd.data()                 # → polars.DataFrame (reads data.parquet)
 
+    # D10 band / histogram / vowel-space helpers (computed in the engine,
+    # so a script and the GUI overlays see identical numbers):
+    s = rd.summary("F1", filter={"phone": "iy"})   # → Summary(mean, sd, p5…p95)
+    h = rd.histogram("F1", bins=20)                # → Histogram(edges, counts)
+    xs, ys = rd.points2d("F1", "F2", filter={"phone": "iy"})
+
     # pin a version into the project for reproducibility
     proj.pin_refdist(rd.id, rd.version)
     proj.refdist_pins()            # → {id: version}
@@ -41,7 +47,9 @@ from sadda import _native
 from sadda._stability import provisional
 
 __all__ = [
+    "Histogram",
     "RefDist",
+    "Summary",
     "get",
     "install",
     "list_all",
@@ -51,6 +59,10 @@ __all__ = [
 ]
 
 RefDist = _native.refdist.RefDist
+# D10: return types of RefDist.summary / .histogram, re-exported so they
+# can be type-referenced and introspected from user code.
+Summary = _native.refdist.Summary
+Histogram = _native.refdist.Histogram
 
 
 def _data(self: Any):

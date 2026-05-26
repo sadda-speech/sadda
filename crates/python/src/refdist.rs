@@ -4,15 +4,27 @@
 //! manifest. The `sadda/refdist/__init__.py` re-exports these under the
 //! user-facing `sadda.refdist.*` path and adds a Polars `.data()` helper.
 
+use std::collections::HashMap;
+
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use sadda_engine::{
-    Measure, MeasureKind, Population, Privacy, QuerySpec, RefDist, RefdistManifest, RefdistStore,
+    Histogram, Measure, MeasureKind, Population, Privacy, QuerySpec, RefDist, RefdistManifest,
+    RefdistStore, Summary,
 };
 use sadda_engine::{RefdistCitation, RefdistSchema};
 
 use crate::engine_err_to_py;
+
+/// Converts a Python `filter={"col": "value"}` mapping into the
+/// `(column, value)` pairs the engine readers take. Order is irrelevant
+/// (filters are AND-combined), so the HashMap's arbitrary order is fine.
+fn filter_pairs(filter: Option<HashMap<String, String>>) -> Vec<(String, String)> {
+    filter
+        .map(|m| m.into_iter().collect())
+        .unwrap_or_default()
+}
 
 /// One resolved reference distribution (its parsed manifest + on-disk
 /// location).
@@ -136,6 +148,77 @@ impl PyRefDist {
             .map(|p| p.to_string_lossy().into_owned())
     }
 
+    /// Reads a numeric data-file column as a list of floats, keeping only
+    /// rows where every `filter` entry matches (string columns,
+    /// case-insensitive). E.g. `column("F1", filter={"phone": "iy"})`.
+    /// (D10, provisional.)
+    #[pyo3(signature = (name, *, filter=None))]
+    fn column(&self, name: &str, filter: Option<HashMap<String, String>>) -> PyResult<Vec<f64>> {
+        let owned = filter_pairs(filter);
+        let refs: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        self.inner.column_f64(name, &refs).map_err(engine_err_to_py)
+    }
+
+    /// Distribution summary (mean / SD / percentiles) of a 1-D parameter.
+    /// Empirical for an observed distribution; a normal model of the
+    /// published mean/SD for a `summary_normative_range`. `filter` subsets
+    /// by subgroup (e.g. `filter={"sex": "m"}`). (D10, provisional.)
+    #[pyo3(signature = (parameter, *, filter=None))]
+    fn summary(
+        &self,
+        parameter: &str,
+        filter: Option<HashMap<String, String>>,
+    ) -> PyResult<PySummary> {
+        let owned = filter_pairs(filter);
+        let refs: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        Ok(PySummary {
+            inner: self
+                .inner
+                .summary(parameter, &refs)
+                .map_err(engine_err_to_py)?,
+        })
+    }
+
+    /// Equal-width histogram of a parameter's raw samples. Errors on a
+    /// `summary_normative_range` (no raw samples). (D10, provisional.)
+    #[pyo3(signature = (parameter, *, bins=20, filter=None))]
+    fn histogram(
+        &self,
+        parameter: &str,
+        bins: usize,
+        filter: Option<HashMap<String, String>>,
+    ) -> PyResult<PyHistogram> {
+        let owned = filter_pairs(filter);
+        let refs: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        Ok(PyHistogram {
+            inner: self
+                .inner
+                .histogram(parameter, bins, &refs)
+                .map_err(engine_err_to_py)?,
+        })
+    }
+
+    /// Reads two numeric columns as aligned `(xs, ys)` lists — e.g.
+    /// `points2d("F1", "F2", filter={"phone": "iy"})` for a vowel-space
+    /// scatter. (D10, provisional.)
+    #[pyo3(signature = (x_param, y_param, *, filter=None))]
+    fn points2d(
+        &self,
+        x_param: &str,
+        y_param: &str,
+        filter: Option<HashMap<String, String>>,
+    ) -> PyResult<(Vec<f64>, Vec<f64>)> {
+        let owned = filter_pairs(filter);
+        let refs: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let pts = self
+            .inner
+            .points2d(x_param, y_param, &refs)
+            .map_err(engine_err_to_py)?;
+        let xs = pts.iter().map(|p| p.0).collect();
+        let ys = pts.iter().map(|p| p.1).collect();
+        Ok((xs, ys))
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "RefDist(id={:?}, version={:?}, kind={:?})",
@@ -143,6 +226,99 @@ impl PyRefDist {
             self.inner.manifest.version,
             kind_str(self.inner.manifest.measure.kind)
         )
+    }
+}
+
+/// Distribution summary of a 1-D measure (D10): mean, SD, and
+/// percentiles. Returned by [`PyRefDist::summary`].
+#[pyclass(name = "Summary")]
+pub(crate) struct PySummary {
+    inner: Summary,
+}
+
+#[pymethods]
+impl PySummary {
+    /// Number of underlying values (raw samples, or declared speakers).
+    #[getter]
+    fn n(&self) -> usize {
+        self.inner.n
+    }
+    /// Arithmetic mean.
+    #[getter]
+    fn mean(&self) -> f64 {
+        self.inner.mean
+    }
+    /// Standard deviation.
+    #[getter]
+    fn sd(&self) -> f64 {
+        self.inner.sd
+    }
+    /// Minimum (observed) / `mean − 2·SD` (normative range).
+    #[getter]
+    fn min(&self) -> f64 {
+        self.inner.min
+    }
+    /// 5th percentile.
+    #[getter]
+    fn p5(&self) -> f64 {
+        self.inner.p5
+    }
+    /// 25th percentile.
+    #[getter]
+    fn p25(&self) -> f64 {
+        self.inner.p25
+    }
+    /// Median.
+    #[getter]
+    fn median(&self) -> f64 {
+        self.inner.median
+    }
+    /// 75th percentile.
+    #[getter]
+    fn p75(&self) -> f64 {
+        self.inner.p75
+    }
+    /// 95th percentile.
+    #[getter]
+    fn p95(&self) -> f64 {
+        self.inner.p95
+    }
+    /// Maximum (observed) / `mean + 2·SD` (normative range).
+    #[getter]
+    fn max(&self) -> f64 {
+        self.inner.max
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Summary(n={}, mean={:.4}, sd={:.4}, median={:.4})",
+            self.inner.n, self.inner.mean, self.inner.sd, self.inner.median
+        )
+    }
+}
+
+/// Equal-width histogram of a 1-D measure (D10). Returned by
+/// [`PyRefDist::histogram`]; `len(edges) == len(counts) + 1`.
+#[pyclass(name = "Histogram")]
+pub(crate) struct PyHistogram {
+    inner: Histogram,
+}
+
+#[pymethods]
+impl PyHistogram {
+    /// Bin boundaries, ascending.
+    #[getter]
+    fn edges(&self) -> Vec<f64> {
+        self.inner.edges.clone()
+    }
+    /// Per-bin sample counts.
+    #[getter]
+    fn counts(&self) -> Vec<u64> {
+        self.inner.counts.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("Histogram(bins={})", self.inner.counts.len())
     }
 }
 
