@@ -2093,6 +2093,24 @@ fn cpps(audio: &PyAudio, pitch_floor_hz: f32, pitch_ceiling_hz: f32) -> PyResult
         .map_err(engine_err_to_py)
 }
 
+/// H1–H2 (dB): level of the first harmonic minus the second, a glottal-source
+/// / open-quotient correlate and an ABI component. Uncorrected (no formant
+/// correction). Raises `ValueError` if no voiced f0 is found or the signal is
+/// too short. Intended for sustained vowels.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (audio, *, pitch_floor_hz=75.0, pitch_ceiling_hz=600.0))]
+fn h1_h2(audio: &PyAudio, pitch_floor_hz: f32, pitch_ceiling_hz: f32) -> PyResult<f32> {
+    let cfg = sadda_engine::H1H2Config {
+        pitch_floor_hz,
+        pitch_ceiling_hz,
+        ..Default::default()
+    };
+    sadda_engine::h1_h2(&audio.inner, &cfg)
+        .map(|d| d.value())
+        .map_err(engine_err_to_py)
+}
+
 /// Acoustic Voice Quality Index v03.01 from its six components. Clean-room
 /// from the publications; **not yet confirmed against the reference Praat
 /// script** (exposed as PROVISIONAL). Units: CPPS / HNR / shimmer-dB /
@@ -2134,6 +2152,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(perturbation, m)?)?;
     m.add_function(wrap_pyfunction!(hnr, m)?)?;
     m.add_function(wrap_pyfunction!(cpps, m)?)?;
+    m.add_function(wrap_pyfunction!(h1_h2, m)?)?;
     m.add_function(wrap_pyfunction!(avqi, m)?)?;
     m.add_function(wrap_pyfunction!(new_project, m)?)?;
     m.add_function(wrap_pyfunction!(open_project, m)?)?;

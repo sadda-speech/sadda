@@ -31,6 +31,7 @@ __all__ = [
     "f0",
     "formants",
     "gaussian",
+    "h1_h2",
     "hamming",
     "hann",
     "hnr",
@@ -1034,6 +1035,14 @@ def formants(audio: Audio, *, frame_size_seconds: builtins.float = 0.02500000037
 def gaussian(n: builtins.int, sigma: builtins.float) -> numpy.typing.NDArray[numpy.float32]:
     r"""
     Gaussian window of length `n` with standard deviation `sigma` (in samples).
+    """
+
+def h1_h2(audio: Audio, *, pitch_floor_hz: builtins.float = 75.0, pitch_ceiling_hz: builtins.float = 600.0) -> builtins.float:
+    r"""
+    H1–H2 (dB): level of the first harmonic minus the second, a glottal-source
+    / open-quotient correlate and an ABI component. Uncorrected (no formant
+    correction). Raises `ValueError` if no voiced f0 is found or the signal is
+    too short. Intended for sustained vowels.
     """
 
 def hamming(n: builtins.int) -> numpy.typing.NDArray[numpy.float32]:

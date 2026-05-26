@@ -19,6 +19,7 @@ __all__ = [
     "PerturbationReport",
     "avqi",
     "cpps",
+    "h1_h2",
     "hnr",
     "perturbation",
 ]
@@ -27,6 +28,7 @@ perturbation = stable_clinical(_native.perturbation)
 PerturbationReport = stable_clinical(_native.PerturbationReport)
 hnr = stable_clinical(_native.hnr)
 cpps = stable_clinical(_native.cpps)
+h1_h2 = stable_clinical(_native.h1_h2)
 
 # AVQI is PROVISIONAL, not stable_clinical: the v03.01 formula is
 # clean-room from the publications but not yet confirmed against the

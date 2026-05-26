@@ -6,6 +6,34 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-25 — ABI component: H1–H2 (first of the breathiness measures)
+
+The Acoustic Breathiness Index (ABI), like AVQI, is a weighted composite — but of measures we mostly don't have yet (GNE, H1–H2, PSD, Hₙₒ‑6000, HNR‑D). Rather than land ABI as a black box, we're building each component as a **first-class, independently-useful measure**, then assembling the composite once all are validated. Starting with the most tractable and broadly-useful: **H1–H2**.
+
+### What it is
+
+H1–H2 is the level of the first harmonic (at f0) minus the second (at 2·f0), in dB — a classic **glottal-source / open-quotient correlate**. A breathy voice (a wider open quotient, a more sinusoidal glottal flow) has relatively more energy at f0, so H1–H2 rises; a pressed voice lowers it. It is the uncorrected variant here — **no formant correction** (the Hanson / Iseli–Alwan correction is a later refinement; flagged in the docstring).
+
+### What landed
+
+`engine::clinical::h1_h2(audio, &H1H2Config) -> Result<Decibels>` — per Hann-windowed frame (4096, 50 % hop), real-FFT magnitude spectrum, locate the peak within ±15 % of f0 (H1) and of 2·f0 (H2), average `20·log10(A1/A2)` over voiced frames. f0 comes from the shared `median_voiced_f0` helper (refactored out of `estimate_f0`, now used by both perturbation and this). `EngineError::Unreliable` if no voiced f0 / signal shorter than one frame — no silent fallback.
+
+### Validation
+
+The harmonic-tone fixtures use **1/h harmonic amplitudes**, so H1/H2 = 1/(½) = 2 → H1−H2 = 20·log10(2) ≈ **6.02 dB** as an exact analytic target. Engine test asserts within ±1.5 dB of 6.02 on `hnr_high_120hz`; the Python test brackets 4.5–7.5 dB. (No Praat golden needed here — the synthesis defines the truth value. A natural-vowel Praat cross-check rides with the future real-voice corpus.)
+
+### Three surfaces
+
+`engine::clinical::h1_h2` + `sadda.clinical.h1_h2` (tiered **`stable_clinical`** — it's a standard, well-defined measure, unlike provisional AVQI), engine + Python tests. GUI exposure rides with the cluster-D clinical-readout pane.
+
+### Sources / references
+
+- Titze (2000), *Principles of Voice Production* — source spectral tilt / open quotient ↔ H1–H2.
+- Hanson (1997), *JASA* 101(1) — H1–H2 (and H1–A1, H1–A3) as breathiness correlates; the formant-corrected variant.
+- Barsties von Latoszek et al. (2017) — ABI and its component set (the assembly target).
+
+---
+
 ## 2026-05-25 — AVQI (B6, part 1): clean-room v03.01 formula, PROVISIONAL pending author confirmation
 
 The Acoustic Voice Quality Index — a single 0–10 dysphonia score from a weighted combination of CPPS, HNR, shimmer-local (%), shimmer-local-dB, LTAS slope, and LTAS tilt. All six component measures now exist (B4/B5 + LTAS), so this slice adds the composite.
