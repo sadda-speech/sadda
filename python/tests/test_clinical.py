@@ -77,6 +77,14 @@ def test_h1_h2_unreliable_raises(tmp_path) -> None:
         sadda.clinical.h1_h2(audio)
 
 
+def test_perturbation_reports_psd() -> None:
+    clean = sadda.clinical.perturbation(sadda.load_wav(str(FIXTURES / "clean_120hz.wav")))
+    jittered = sadda.clinical.perturbation(sadda.load_wav(str(FIXTURES / "jitter_150hz.wav")))
+    # Period standard deviation (PSD): small, positive, larger with jitter.
+    assert jittered.period_std_s > clean.period_std_s >= 0.0
+    assert jittered.period_std_s < 0.001
+
+
 def test_gne_orders_clean_above_noisy_and_is_provisional() -> None:
     import warnings
 

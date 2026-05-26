@@ -2023,6 +2023,11 @@ impl PyPerturbationReport {
     fn shimmer_apq5(&self) -> f32 {
         self.inner.shimmer_apq5.value()
     }
+    /// Period standard deviation (PSD) — seconds. An ABI component.
+    #[getter]
+    fn period_std_s(&self) -> f64 {
+        self.inner.period_std_s.value()
+    }
 
     fn __repr__(&self) -> String {
         format!(

@@ -17,7 +17,7 @@
 use crate::Audio;
 use crate::error::{EngineError, Result};
 use crate::pitch::{self, PitchConfig};
-use crate::units::{Decibels, Ratio};
+use crate::units::{Decibels, Ratio, Seconds};
 
 /// Minimum periods required (the 5-point measures ppq5 / apq5 need a
 /// 5-period window, so a handful more than that to be meaningful).
@@ -62,6 +62,9 @@ pub struct PerturbationReport {
     pub shimmer_apq3: Ratio,
     /// 5-point amplitude perturbation quotient.
     pub shimmer_apq5: Ratio,
+    /// Period standard deviation (PSD), in seconds — sample SD of the
+    /// period sequence (Praat's PointProcess period SD). An ABI component.
+    pub period_std_s: Seconds,
 }
 
 /// Computes jitter + shimmer for a sustained phonation. Multi-channel
@@ -100,7 +103,18 @@ pub fn perturbation(audio: &Audio, config: &PerturbationConfig) -> Result<Pertur
         shimmer_local_db: Decibels::new(shimmer_db(&amps) as f32),
         shimmer_apq3: Ratio::new((ppq(&amps, 3) / mean_a) as f32),
         shimmer_apq5: Ratio::new((ppq(&amps, 5) / mean_a) as f32),
+        period_std_s: Seconds::new(sample_std(&periods, mean_p)),
     })
+}
+
+/// Sample standard deviation (n−1 denominator, matching Praat) of a
+/// sequence about a precomputed mean. Returns 0 for fewer than 2 values.
+fn sample_std(xs: &[f64], mean: f64) -> f64 {
+    if xs.len() < 2 {
+        return 0.0;
+    }
+    let ss: f64 = xs.iter().map(|&x| (x - mean) * (x - mean)).sum();
+    (ss / (xs.len() - 1) as f64).sqrt()
 }
 
 /// Median voiced f0 over the signal (a sustained phonation has a stable

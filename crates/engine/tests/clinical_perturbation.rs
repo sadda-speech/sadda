@@ -258,6 +258,26 @@ fn gne_orders_clean_above_noisy_fixture() {
 }
 
 #[test]
+fn psd_tracks_period_jitter() {
+    // Period standard deviation (PSD): the jittered signal has a wider
+    // spread of periods than the clean one, so a larger PSD. Both are
+    // small and positive.
+    let clean = measure("clean_120hz").period_std_s.value() as f64;
+    let jittered = measure("jitter_150hz").period_std_s.value() as f64;
+    assert!(
+        clean >= 0.0 && jittered > 0.0,
+        "psd clean {clean}, jit {jittered}"
+    );
+    assert!(
+        jittered > clean,
+        "jittered PSD {jittered} should exceed clean {clean}"
+    );
+    // Sanity: a ~150 Hz signal at 3% period jitter has PSD on the order of
+    // tens of microseconds, well under a full period (~6.7 ms).
+    assert!(jittered < 0.001, "psd {jittered} implausibly large");
+}
+
+#[test]
 fn clean_signal_is_near_zero() {
     let r = measure("clean_120hz");
     assert!(
