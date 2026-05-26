@@ -452,6 +452,11 @@ class PerturbationReport:
         r"""
         Shimmer (apq5) — fraction.
         """
+    @property
+    def period_std_s(self) -> builtins.float:
+        r"""
+        Period standard deviation (PSD) — seconds. An ABI component.
+        """
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
