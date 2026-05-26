@@ -40,7 +40,7 @@ from typing import Any, Optional
 from sadda import _native
 from sadda._stability import provisional
 
-__all__ = ["RefDist", "get", "list_all", "query", "store_root"]
+__all__ = ["RefDist", "get", "install", "list_all", "query", "store_root"]
 
 RefDist = _native.refdist.RefDist
 
@@ -99,6 +99,14 @@ def query(
 def get(id: str, version: str, *, root: Optional[str] = None) -> Optional[RefDist]:  # noqa: A002
     """The distribution with this ``id`` and ``version``, or ``None``."""
     return _native.refdist.get(id, version, root=root)
+
+
+@provisional
+def install(src_dir: str, *, root: Optional[str] = None) -> RefDist:
+    """Install a distribution directory (a ``refdist.toml`` + its data
+    file) into the store by copying it in — how the bundled starter set
+    seeds the user cache. Returns the installed distribution."""
+    return _native.refdist.install(src_dir, root=root)
 
 
 @provisional

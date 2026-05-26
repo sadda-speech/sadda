@@ -1,0 +1,32 @@
+id = "placeholder-amE-vowels"
+version = "0.1.0"
+title = "PLACEHOLDER American English vowel formants (synthetic)"
+license = "CC0-1.0"
+
+[citation]
+authors = ["sadda placeholder generator"]
+year = 2026
+
+[population]
+language = "eng"
+variety = "AmE"
+sex = ["m", "f"]
+age_band = ["adult"]
+n_speakers = 16
+
+[measure]
+kind = "observed_distribution"
+parameters = ["F1", "F2"]
+units = "Hz"
+phones = ["iy", "ae", "uw", "ah"]
+context = "isolated"
+measurement_method = "synthetic placeholder — NOT a real measurement"
+
+[privacy]
+shareability = "raw_samples"
+min_n_per_subgroup = 5
+
+[schema]
+data_file = "data.parquet"
+shape = "long"
+columns = ["speaker_id", "sex", "phone", "F1", "F2"]
