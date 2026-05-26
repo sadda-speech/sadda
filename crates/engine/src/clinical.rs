@@ -106,9 +106,15 @@ pub fn perturbation(audio: &Audio, config: &PerturbationConfig) -> Result<Pertur
 /// Median voiced f0 over the signal (a sustained phonation has a stable
 /// f0; the median is robust to a few unvoiced/edge frames).
 fn estimate_f0(audio: &Audio, config: &PerturbationConfig) -> Option<f32> {
+    median_voiced_f0(audio, config.pitch_floor_hz, config.pitch_ceiling_hz)
+}
+
+/// Median f0 (Hz) over voiced frames within `[floor, ceiling]`, or
+/// `None` if no frame is voiced.
+fn median_voiced_f0(audio: &Audio, floor_hz: f32, ceiling_hz: f32) -> Option<f32> {
     let cfg = PitchConfig {
-        min_freq_hz: config.pitch_floor_hz,
-        max_freq_hz: config.pitch_ceiling_hz,
+        min_freq_hz: floor_hz,
+        max_freq_hz: ceiling_hz,
         ..Default::default()
     };
     let mut voiced: Vec<f32> = pitch::autocorrelation(audio, &cfg)
@@ -536,6 +542,88 @@ pub fn avqi(
         - 0.032 * slope
         + 0.077 * tilt;
     (2.571 * inner).clamp(0.0, 10.0)
+}
+
+/// Configuration for [`h1_h2`].
+#[derive(Debug, Clone)]
+pub struct H1H2Config {
+    /// Lowest f0 to consider, in Hz.
+    pub pitch_floor_hz: f32,
+    /// Highest f0 to consider, in Hz.
+    pub pitch_ceiling_hz: f32,
+    /// FFT / analysis-window length (power of two).
+    pub frame_size: usize,
+}
+
+impl Default for H1H2Config {
+    fn default() -> Self {
+        Self {
+            pitch_floor_hz: 75.0,
+            pitch_ceiling_hz: 600.0,
+            frame_size: 4096,
+        }
+    }
+}
+
+/// H1–H2: the level of the first harmonic (at f0) minus the second
+/// (at 2·f0), in dB — a glottal-source / open-quotient correlate and an
+/// ABI component. Per frame, the magnitude-spectrum peak near f0 and
+/// near 2·f0 are located and `20·log10(A1/A2)` is averaged over frames.
+/// **Uncorrected** (no formant correction). [`EngineError::Unreliable`]
+/// if no voiced f0 is found or the signal is shorter than one frame.
+pub fn h1_h2(audio: &Audio, config: &H1H2Config) -> Result<Decibels> {
+    use realfft::RealFftPlanner;
+    use rustfft::num_complex::Complex;
+
+    let sr = audio.sample_rate as f32;
+    let x: Vec<f32> = audio.mono_samples().collect();
+    let n = config.frame_size;
+    if x.len() < n {
+        return Err(EngineError::unreliable(
+            "h1_h2",
+            "signal shorter than one analysis frame",
+        ));
+    }
+    let f0 = median_voiced_f0(audio, config.pitch_floor_hz, config.pitch_ceiling_hz)
+        .ok_or_else(|| EngineError::unreliable("h1_h2", "no voiced f0 detected"))?;
+
+    let window = crate::dsp::windowing::hann(n);
+    let mut planner = RealFftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(n);
+    let mut input = fft.make_input_vec();
+    let mut spec = fft.make_output_vec();
+
+    // Peak magnitude within ±15% of a target harmonic frequency.
+    let peak = |spec: &[Complex<f32>], f: f32| -> f32 {
+        let k0 = ((f * 0.85) * n as f32 / sr).floor() as usize;
+        let k1 = (((f * 1.15) * n as f32 / sr).ceil() as usize).min(spec.len() - 1);
+        spec[k0..=k1.max(k0)]
+            .iter()
+            .fold(0.0_f32, |m, c| m.max(c.norm()))
+    };
+
+    let mut sum = 0.0_f64;
+    let mut count = 0usize;
+    let hop = n / 2;
+    let mut s = 0;
+    while s + n <= x.len() {
+        for (i, slot) in input.iter_mut().enumerate() {
+            *slot = x[s + i] * window[i];
+        }
+        fft.process(&mut input, &mut spec)
+            .expect("fft sized via make_*_vec");
+        let a1 = peak(&spec, f0);
+        let a2 = peak(&spec, 2.0 * f0);
+        if a1 > 0.0 && a2 > 0.0 {
+            sum += 20.0 * (a1 as f64 / a2 as f64).log10();
+            count += 1;
+        }
+        s += hop;
+    }
+    if count == 0 {
+        return Err(EngineError::unreliable("h1_h2", "no analyzable frames"));
+    }
+    Ok(Decibels::new((sum / count as f64) as f32))
 }
 
 #[cfg(test)]

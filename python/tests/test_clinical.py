@@ -59,6 +59,24 @@ def test_cpps_on_sustained_tones() -> None:
     assert 15.0 < cpps_high < 27.0
 
 
+def test_h1_h2_on_harmonic_tone() -> None:
+    audio = sadda.load_wav(str(FIXTURES / "hnr_high_120hz.wav"))
+    # 1/h harmonic amplitudes → H1−H2 = 20·log10(2) ≈ 6 dB.
+    assert 4.5 < sadda.clinical.h1_h2(audio) < 7.5
+
+
+def test_h1_h2_unreliable_raises(tmp_path) -> None:
+    silent = tmp_path / "silent.wav"
+    with wave.open(str(silent), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16_000)
+        w.writeframes(struct.pack("<" + "h" * 16_000, *([0] * 16_000)))
+    audio = sadda.load_wav(str(silent))
+    with pytest.raises(ValueError):
+        sadda.clinical.h1_h2(audio)
+
+
 def test_avqi_formula_orders_and_is_provisional() -> None:
     import warnings
 
@@ -80,3 +98,4 @@ def test_clinical_surface_is_stable_clinical() -> None:
     assert get_stability(sadda.clinical.perturbation) == "stable-clinical"
     assert get_stability(sadda.clinical.hnr) == "stable-clinical"
     assert get_stability(sadda.clinical.cpps) == "stable-clinical"
+    assert get_stability(sadda.clinical.h1_h2) == "stable-clinical"

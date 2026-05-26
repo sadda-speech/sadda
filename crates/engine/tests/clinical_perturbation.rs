@@ -174,6 +174,16 @@ fn matches_praat_on_ltas_slope() {
 }
 
 #[test]
+fn h1_h2_on_one_over_h_harmonic_tone() {
+    use sadda_engine::{H1H2Config, h1_h2};
+    // The harmonic-tone fixtures use 1/h harmonic amplitudes, so
+    // H1/H2 = 1/(1/2) = 2 → H1−H2 = 20·log10(2) ≈ 6.02 dB (analytic).
+    let audio = Audio::from_wav_path(fixtures_dir().join("hnr_high_120hz.wav")).unwrap();
+    let got = h1_h2(&audio, &H1H2Config::default()).unwrap().value() as f64;
+    assert!((got - 6.02).abs() < 1.5, "h1_h2 {got}, expected ~6 dB");
+}
+
+#[test]
 fn clean_signal_is_near_zero() {
     let r = measure("clean_120hz");
     assert!(
