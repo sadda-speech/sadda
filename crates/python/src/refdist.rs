@@ -21,9 +21,7 @@ use crate::engine_err_to_py;
 /// `(column, value)` pairs the engine readers take. Order is irrelevant
 /// (filters are AND-combined), so the HashMap's arbitrary order is fine.
 fn filter_pairs(filter: Option<HashMap<String, String>>) -> Vec<(String, String)> {
-    filter
-        .map(|m| m.into_iter().collect())
-        .unwrap_or_default()
+    filter.map(|m| m.into_iter().collect()).unwrap_or_default()
 }
 
 /// One resolved reference distribution (its parsed manifest + on-disk
@@ -155,7 +153,10 @@ impl PyRefDist {
     #[pyo3(signature = (name, *, filter=None))]
     fn column(&self, name: &str, filter: Option<HashMap<String, String>>) -> PyResult<Vec<f64>> {
         let owned = filter_pairs(filter);
-        let refs: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let refs: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         self.inner.column_f64(name, &refs).map_err(engine_err_to_py)
     }
 
@@ -170,7 +171,10 @@ impl PyRefDist {
         filter: Option<HashMap<String, String>>,
     ) -> PyResult<PySummary> {
         let owned = filter_pairs(filter);
-        let refs: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let refs: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         Ok(PySummary {
             inner: self
                 .inner
@@ -189,7 +193,10 @@ impl PyRefDist {
         filter: Option<HashMap<String, String>>,
     ) -> PyResult<PyHistogram> {
         let owned = filter_pairs(filter);
-        let refs: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let refs: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         Ok(PyHistogram {
             inner: self
                 .inner
@@ -209,7 +216,10 @@ impl PyRefDist {
         filter: Option<HashMap<String, String>>,
     ) -> PyResult<(Vec<f64>, Vec<f64>)> {
         let owned = filter_pairs(filter);
-        let refs: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let refs: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
         let pts = self
             .inner
             .points2d(x_param, y_param, &refs)

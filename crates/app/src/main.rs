@@ -1968,7 +1968,11 @@ fn draw_reference_histogram(
             if let Some(s) = summary {
                 let pct = egui::Color32::from_gray(140);
                 for x in [s.p5, s.p95] {
-                    plot_ui.vline(VLine::new("", x).color(pct).style(LineStyle::dashed_loose()));
+                    plot_ui.vline(
+                        VLine::new("", x)
+                            .color(pct)
+                            .style(LineStyle::dashed_loose()),
+                    );
                 }
                 plot_ui.vline(
                     VLine::new("median", s.median)
@@ -2110,8 +2114,10 @@ fn refdist_overlay_submenu(
     if matching.is_empty() {
         ui.separator();
         ui.label(
-            egui::RichText::new("(no matching distributions installed —\nuse \"Install bundled reference data\")")
-                .weak(),
+            egui::RichText::new(
+                "(no matching distributions installed —\nuse \"Install bundled reference data\")",
+            )
+            .weak(),
         );
         return;
     }
@@ -2126,7 +2132,10 @@ fn refdist_overlay_submenu(
                 version,
                 sex: None,
             };
-            if ui.radio(slot.as_ref() == Some(&sel), &rd.manifest.title).clicked() {
+            if ui
+                .radio(slot.as_ref() == Some(&sel), &rd.manifest.title)
+                .clicked()
+            {
                 *slot = Some(sel);
                 ui.close();
             }
@@ -2211,11 +2220,11 @@ fn draw_cursor_line(plot_ui: &mut egui_plot::PlotUi<'_>, cursor: f64, y_min: f64
 /// warm-leaning palette; wraps for formant slots beyond the palette.
 fn formant_color(slot: usize) -> egui::Color32 {
     const PALETTE: [egui::Color32; 5] = [
-        egui::Color32::from_rgb(220, 60, 60),   // F1 red
-        egui::Color32::from_rgb(230, 140, 40),  // F2 orange
-        egui::Color32::from_rgb(200, 80, 170),  // F3 magenta
-        egui::Color32::from_rgb(120, 90, 200),  // F4 violet
-        egui::Color32::from_rgb(90, 160, 90),   // F5 green
+        egui::Color32::from_rgb(220, 60, 60),  // F1 red
+        egui::Color32::from_rgb(230, 140, 40), // F2 orange
+        egui::Color32::from_rgb(200, 80, 170), // F3 magenta
+        egui::Color32::from_rgb(120, 90, 200), // F4 violet
+        egui::Color32::from_rgb(90, 160, 90),  // F5 green
     ];
     PALETTE[slot % PALETTE.len()]
 }
@@ -3141,7 +3150,11 @@ impl SaddaApp {
                 refdist_overlay_submenu(ui, Some("f0"), &mut self.persisted.f0_overlay);
             });
             ui.menu_button("Intensity reference overlay", |ui| {
-                refdist_overlay_submenu(ui, Some("intensity"), &mut self.persisted.intensity_overlay);
+                refdist_overlay_submenu(
+                    ui,
+                    Some("intensity"),
+                    &mut self.persisted.intensity_overlay,
+                );
             });
             if ui.button("Install bundled reference data").clicked() {
                 ui.close();
@@ -3156,7 +3169,10 @@ impl SaddaApp {
             }
             ui.separator();
             // D10: right-side Reference panel (vowel space + histogram).
-            ui.checkbox(&mut self.persisted.reference_panel_open, "Show Reference Panel");
+            ui.checkbox(
+                &mut self.persisted.reference_panel_open,
+                "Show Reference Panel",
+            );
             // E8: script-panel toggle. Persists across launches.
             ui.checkbox(&mut self.persisted.script_panel_open, "Show Script Panel");
         });
@@ -3678,7 +3694,11 @@ impl SaddaApp {
             return;
         };
         let frames = &tc.intensity;
-        let band = self.overlays.intensity.as_ref().and_then(|(_, b)| b.as_ref());
+        let band = self
+            .overlays
+            .intensity
+            .as_ref()
+            .and_then(|(_, b)| b.as_ref());
         let x0 = self.timeline.view_start;
         let x1 = self.timeline.view_end;
         measure_lane(
