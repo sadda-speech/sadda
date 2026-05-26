@@ -11,6 +11,8 @@ rust-version.workspace = true
 [dependencies]
 arrow = { version = "58", default-features = false }
 cpal = "0.17"
+# C7 reference-distribution cache: per-OS data dir (~/.local/share/sadda).
+directories = "5"
 hound = "3.5"
 ndarray = "0.16"
 parquet = { version = "58", default-features = false, features = ["arrow", "snap"] }
@@ -25,6 +27,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+# C7 reference-distribution manifest parsing (refdist.toml) + project.toml
+# refdist pins.
+toml = "0.8"
 uuid = { version = "1", features = ["v4"] }
 
 # F10 single-writer-lock PID liveness check (kill(pid, 0)) on UNIX.

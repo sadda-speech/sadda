@@ -12,6 +12,7 @@ pub mod error;
 pub mod io;
 pub mod live;
 pub mod pitch;
+pub mod refdist;
 pub mod storage;
 pub mod units;
 
@@ -33,6 +34,10 @@ pub use live::{
     MeterFrame, StoppedSession,
 };
 pub use pitch::{PitchConfig, PitchFrame, autocorrelation};
+pub use refdist::{
+    Citation as RefdistCitation, Measure, MeasureKind, Population, Privacy, QuerySpec, RefDist,
+    RefdistManifest, RefdistStore, Schema as RefdistSchema,
+};
 pub use units::{Decibels, Hertz, Ratio, Seconds};
 
 /// Returns the engine crate's semver string, taken from `Cargo.toml` at build

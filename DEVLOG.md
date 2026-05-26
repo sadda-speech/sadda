@@ -6,6 +6,31 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-25 — Reference distributions: format + resolver + query + pinning (C7)
+
+First slice of cluster C and the start of the **0.3.1** sub-release. C7 is the **consumption** side of the reference-distribution system (the 2026-05-18 governance entry's eight deliverables): parse a `refdist.toml` manifest, resolve distributions from a user-level cache, query them by population/measure facets, and let a project pin the versions it used. Deliberately independent of any *hosted* registry — HTTP fetch + the public registry repo + CI + bundled starter set are C8.
+
+### What landed
+
+- **`engine::refdist`** — `RefdistManifest` (+ `Citation` / `Population` / `Measure` / `Privacy` / `Schema` serde structs, all `#[serde(default)]` so partial manifests parse) mirroring the governance entry's `refdist.toml` schema. `MeasureKind` enum (`observed_distribution` | `summary_normative_range` | `target_zone`) keeps "what people sound like" distinct from "what to aim for". `parse_manifest` / `load_manifest`.
+- **`RefdistStore`** — rooted at an explicit dir or the per-OS default via the `directories` crate (`~/.local/share/sadda/refdist/` on Linux). `list()` scans subdirectories, skipping any without a valid manifest; `query(&QuerySpec)` does faceted, case-insensitive matching (parameter / language / variety / sex / age_band / phone / kind); `get(id, version)`. `RefDist { manifest, dir }` with `data_path()`.
+- **Project pinning** — `Project::pin_refdist` / `refdist_pins` / `remove_refdist_pin` record `[refdist]` `id = version` entries in the existing `project.toml` (parsed/rewritten via the new `toml` dep, preserving the other keys), so the choice travels with the project and reopens reproducibly.
+
+### Three surfaces
+
+`sadda.refdist.{query, get, list_all, store_root}` (all `@provisional`) + a `RefDist` class with manifest getters and a **Polars `.data()`** helper (reads `data.parquet`, mirroring B3's dense-tier path pattern — the engine exposes only the path). `Project.{pin_refdist, refdist_pins, remove_refdist_pin}`. New deps: `toml`, `directories`. Tests: 5 engine unit (manifest parse incl. defaults + invalid, store list/get, query facets) + 1 corpus integration (pin round-trip through `project.toml`) + 5 Python (list/get, facets, `.data()` Polars load, provisional tier, project pins).
+
+### Deferred to C8 / D10
+
+Remote fetch + the public `refdist-registry` repo + CI validation (schema / license / `min_n_per_subgroup`) + the GitHub-Pages index + the bundled tier-1 starter set (Hillenbrand 1995, Peterson-Barney 1952) all ride with **C8**; in-app publishing is **C9**; overlay rendering of `measure.kind` variants is **D10**. C7 standing up the format + local store means C8's fixtures and the GUI both have a concrete contract to build against.
+
+### Sources / references
+
+- 2026-05-18 "Reference distribution governance" DEVLOG entry (three-tier registry, `refdist.toml` schema, the `measure.kind` distinction).
+- 2026-05-25 Phase 3 slicing entry (C7 scope; C independent of B, can proceed in parallel).
+
+---
+
 ## 2026-05-25 — ABI assembled: Hfno-6000, HNR-D, and the composite (B6 complete)
 
 The last three pieces of the **Acoustic Breathiness Index** (Barsties von Latoszek et al. 2017): the two remaining component measures, plus the composite. With H1–H2, GNE, and PSD already done (and CPPS, jitter, shimmer, shimmer-dB from B4/B5), all **nine** ABI components now exist.

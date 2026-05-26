@@ -18,6 +18,7 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pyme
 
 mod live;
 mod recipe;
+mod refdist;
 
 pub(crate) fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
     match e {
@@ -33,6 +34,9 @@ pub(crate) fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
         }
         sadda_engine::EngineError::Corpus(msg) => {
             PyRuntimeError::new_err(format!("corpus error: {msg}"))
+        }
+        sadda_engine::EngineError::RefDist(msg) => {
+            PyValueError::new_err(format!("reference-distribution error: {msg}"))
         }
         sadda_engine::EngineError::SchemaTooNew {
             db_version,
@@ -1137,6 +1141,31 @@ impl PyProject {
     /// mutations on this connection.
     fn set_audit_user(&self, user: &str) -> PyResult<()> {
         self.inner.set_audit_user(user).map_err(engine_err_to_py)
+    }
+
+    /// Pins a reference distribution `id` to a specific `version` in
+    /// `project.toml`, so the project reopens against the same data for
+    /// reproducibility (C7). Overwrites any existing pin for that id.
+    fn pin_refdist(&self, id: &str, version: &str) -> PyResult<()> {
+        self.inner
+            .pin_refdist(id, version)
+            .map_err(engine_err_to_py)
+    }
+
+    /// The reference distributions this project has pinned, as a
+    /// `{id: version}` dict.
+    fn refdist_pins(&self) -> PyResult<std::collections::HashMap<String, String>> {
+        Ok(self
+            .inner
+            .refdist_pins()
+            .map_err(engine_err_to_py)?
+            .into_iter()
+            .collect())
+    }
+
+    /// Removes a reference-distribution pin; returns whether one existed.
+    fn remove_refdist_pin(&self, id: &str) -> PyResult<bool> {
+        self.inner.remove_refdist_pin(id).map_err(engine_err_to_py)
     }
 
     /// Inserts a Tier row. `type` is one of `interval`, `point`, `reference`,
@@ -2307,6 +2336,18 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     recipe_mod.add_function(wrap_pyfunction!(recipe::script_path, &recipe_mod)?)?;
     recipe_mod.add_class::<recipe::PyRecipe>()?;
     m.add_submodule(&recipe_mod)?;
+
+    // Reference distributions: sadda.refdist.* surface (C7, consumption
+    // side). Registered as `sadda._native.refdist`; the Python
+    // `sadda/refdist/__init__.py` re-exports the symbols and adds a Polars
+    // `.data()` helper on RefDist.
+    let refdist_mod = PyModule::new(m.py(), "refdist")?;
+    refdist_mod.add_function(wrap_pyfunction!(refdist::query, &refdist_mod)?)?;
+    refdist_mod.add_function(wrap_pyfunction!(refdist::get, &refdist_mod)?)?;
+    refdist_mod.add_function(wrap_pyfunction!(refdist::list_all, &refdist_mod)?)?;
+    refdist_mod.add_function(wrap_pyfunction!(refdist::store_root, &refdist_mod)?)?;
+    refdist_mod.add_class::<refdist::PyRefDist>()?;
+    m.add_submodule(&refdist_mod)?;
     Ok(())
 }
 
