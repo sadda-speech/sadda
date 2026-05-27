@@ -11,7 +11,7 @@
 //! [`vad`] / [`vad_bundled`]. Richer surfaces (Python `sadda.ml`, a GUI
 //! VAD tier) and the on-demand model registry are later E11/E12 slices.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use ort::value::Tensor;
 
@@ -155,14 +155,6 @@ pub fn vad(audio: &Audio, model_path: &Path) -> Result<Vec<VadFrame>> {
     Ok(frames)
 }
 
-/// [`vad`] against the bundled Silero VAD model, located via
-/// [`bundled_vad_path`]. Errors if the bundled model can't be found.
-pub fn vad_bundled(audio: &Audio) -> Result<Vec<VadFrame>> {
-    let path = bundled_vad_path()
-        .ok_or_else(|| EngineError::Ml("bundled Silero VAD model not found".into()))?;
-    vad(audio, &path)
-}
-
 /// Merges consecutive [`VadFrame`]s whose probability is `>= threshold`
 /// into [`SpeechSegment`]s. Each window spans [`VAD_WINDOW`] samples, so a
 /// segment runs from the first qualifying window's start to the last's
@@ -194,28 +186,6 @@ pub fn speech_segments(frames: &[VadFrame], threshold: f32) -> Vec<SpeechSegment
         });
     }
     segments
-}
-
-/// Locates the bundled `silero-vad/silero_vad.onnx`: an explicit
-/// `SADDA_MODELS_BUNDLED` override, then next to the executable (shipped
-/// layout), then the workspace copy relative to this crate (dev).
-/// Mirrors the refdist bundled-set locator.
-pub fn bundled_vad_path() -> Option<PathBuf> {
-    let rel = Path::new("silero-vad").join("silero_vad.onnx");
-    let candidates = [
-        std::env::var_os("SADDA_MODELS_BUNDLED").map(PathBuf::from),
-        std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|d| d.join("models-bundled"))),
-        Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../models-bundled")),
-    ];
-    for base in candidates.into_iter().flatten() {
-        let p = base.join(&rel);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -253,53 +223,5 @@ mod tests {
             speech_prob: 0.1,
         }];
         assert!(speech_segments(&frames, 0.5).is_empty());
-    }
-
-    #[test]
-    fn bundled_vad_model_is_locatable() {
-        // The dev path resolves from CARGO_MANIFEST_DIR; the model is
-        // committed under models-bundled/.
-        assert!(
-            bundled_vad_path().is_some(),
-            "bundled Silero VAD model should be found via the dev path"
-        );
-    }
-
-    // End-to-end inference test. Requires a runtime ONNX Runtime
-    // (`ORT_DYLIB_PATH`); a no-op with a printed note when ORT isn't
-    // available (so CI, which builds without ORT, stays green). Run
-    // locally with `ORT_DYLIB_PATH=…/libonnxruntime.so cargo test
-    // -p sadda-engine --features ml`.
-    #[test]
-    fn vad_runs_on_synthetic_audio() {
-        let path = match bundled_vad_path() {
-            Some(p) => p,
-            None => return,
-        };
-        // 1 s of 16 kHz silence.
-        let audio = Audio {
-            samples: vec![0.0f32; 16_000],
-            sample_rate: 16_000,
-            channels: 1,
-        };
-        match vad(&audio, &path) {
-            Ok(frames) => {
-                assert!(!frames.is_empty(), "expected VAD windows");
-                for f in &frames {
-                    assert!(
-                        (0.0..=1.0).contains(&f.speech_prob),
-                        "prob out of range: {}",
-                        f.speech_prob
-                    );
-                }
-                // Silence should be overwhelmingly non-speech.
-                let mean = frames.iter().map(|f| f.speech_prob).sum::<f32>() / frames.len() as f32;
-                assert!(mean < 0.3, "silence read as speech (mean prob {mean})");
-            }
-            Err(EngineError::Ml(msg)) => {
-                eprintln!("vad_runs_on_synthetic_audio skipped (ORT unavailable): {msg}");
-            }
-            Err(e) => panic!("unexpected error: {e}"),
-        }
     }
 }
