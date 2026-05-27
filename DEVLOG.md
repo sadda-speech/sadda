@@ -51,6 +51,25 @@ Both are roadmap intake only. The immediate path is unchanged: finish **E11** (M
 
 ---
 
+## 2026-05-27 — E12b-2a: embedding tiers — `Project::extract_embeddings` + provenance
+
+Wires the harness into the corpus: inference results become first-class, queryable dense tiers — the "embedding tiers" half of E12.
+
+### What landed (engine + Python)
+
+- **`Project::extract_embeddings(bundle_id, &Model, tier_name) -> tier_id`** (cfg `ml`): loads the bundle's audio, runs `Model::embeddings`, creates a `continuous_vector` tier, writes the `(frames × dims)` matrix as a B3 Parquet sidecar (frame rate = actual `frames / duration`), and **records an `ml_model` `ProcessingRun`** (processor = the model id, `weights_checksum` populated, `model_version` in `parameters`) — so the tier's lineage is queryable via the A1 provenance timeline.
+- **Python `Project.extract_embeddings(bundle_id, model_id, tier_name)`** — takes a model *id string* (`sadda/…` / `local://…` / `hf://…`), resolved via `load_model` internally. Taking the id rather than a `Model` object keeps it inside the `gen_stub`-typed methods (a `PyModel` param would need `PyStubType`); the stub gains the method (committed). The result is then a normal `proj.query(tier_id)` → Polars DataFrame.
+
+### Validation
+
+A gated engine integration test (`tests/ml_embeddings.rs`): create a project + bundle, run `extract_embeddings` with the waveform fixture, assert the tier is `continuous_vector`, reads back as `frames × 8`, **and** an `ml_model` ProcessingRun naming the model was recorded — ORT-gated skip. A Python test mirrors it (`proj.extract_embeddings(local://fixture)` → non-empty `query`). Gates green on 1.95: fmt, clippy default + `--features download`, `cargo test --workspace` (22 groups), stub regenerated (the one new `Project` method), pytest 148 pass + 5 ORT-skip.
+
+### E12b-2b next
+
+The real-model gated validation (the "both"): wav2vec2-base (waveform) + whisper-tiny encoder (log-mel) via `hf://`, behind `SADDA_NET_TESTS`.
+
+---
+
 ## 2026-05-27 — E12b-1: the embedding harness (representation-driven), validated with synthetic fixtures
 
 The general embedding harness (maintainer chose "general harness, validate with one consumer of each input kind"). A new model runs as an embedding extractor with **no code change** — the manifest declares its input representation, and the harness does the preprocessing.

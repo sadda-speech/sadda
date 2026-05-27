@@ -1676,6 +1676,43 @@ impl Project {
         crate::storage::dense::read_continuous_vector(&self.root.join(&ds.relative_path))
     }
 
+    /// E12: runs `model` as an embedding extractor over `bundle_id`'s audio
+    /// and stores the `(frames × dims)` result as a new `continuous_vector`
+    /// tier named `tier_name`. Records an `ml_model` [`ProcessingRun`]
+    /// (processor = the model's id, with its weights checksum) so the tier's
+    /// provenance is queryable. Returns the new tier id; the tier's frame
+    /// rate is the actual `frames / duration`.
+    #[cfg(feature = "ml")]
+    pub fn extract_embeddings(
+        &self,
+        bundle_id: i64,
+        model: &crate::models::Model,
+        tier_name: &str,
+    ) -> Result<i64> {
+        let audio = self.load_audio(bundle_id)?;
+        let emb = model.embeddings(&audio)?;
+        let dur = audio.duration_seconds();
+        let sr_out = if dur > 0.0 {
+            emb.nrows() as f64 / dur
+        } else {
+            0.0
+        };
+        let tier_id = self.add_tier(&TierSpec::new(
+            bundle_id,
+            tier_name,
+            TierType::ContinuousVector,
+        ))?;
+        let signal_id = self.write_continuous_vector(tier_id, emb.view(), sr_out)?;
+
+        let mut run = ProcessingRunSpec::new(bundle_id, ProcessingRunKind::MlModel, model.id());
+        run.parameters = Some(serde_json::json!({ "model_version": model.version() }).to_string());
+        run.output_tier_ids = vec![tier_id];
+        run.output_signal_ids = vec![signal_id];
+        run.weights_checksum = model.weights_checksum().map(str::to_string);
+        self.record_processing_run(&run)?;
+        Ok(tier_id)
+    }
+
     /// Writes a `categorical_sampled` Parquet sidecar.
     pub fn write_categorical_sampled(
         &self,

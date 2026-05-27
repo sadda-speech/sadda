@@ -113,6 +113,24 @@ def test_model_embeddings_from_fixture(tmp_path) -> None:
     assert emb.shape[0] > 0
 
 
+def test_extract_embeddings_writes_tier(tmp_path) -> None:
+    from pathlib import Path
+
+    fixture = (
+        Path(__file__).resolve().parents[2]
+        / "crates/engine/tests/ml_fixtures/waveform-embed"
+    )
+    proj = sadda.new_project(str(tmp_path / "proj"), "emb")
+    wav = tmp_path / "rec.wav"
+    _silence_wav(wav)
+    bundle_id = proj.add_bundle("b", str(wav))
+    tier_id = _ort_or_skip(
+        lambda: proj.extract_embeddings(bundle_id, f"local://{fixture}", "ssl_emb")
+    )
+    df = proj.query(tier_id)
+    assert df.height > 0  # one row per embedding frame
+
+
 def test_model_vad_matches_free_vad(tmp_path) -> None:
     wav = tmp_path / "silence.wav"
     _silence_wav(wav)
