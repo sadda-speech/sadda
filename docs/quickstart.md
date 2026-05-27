@@ -46,10 +46,19 @@ the WAV into `signals/original/` and inserts a `bundle` row:
 bundle_id = proj.add_bundle("speaker_01_take_1", Path("rec01.wav"))
 ```
 
-You can also register with extras:
+You can also attach a JSON `extra` payload, and link the bundle to a
+`Speaker` or `Session` (created via `proj.add_speaker(...)` /
+`proj.add_session(...)`) by passing their ids:
 
 ```python
-bundle_id = proj.add_bundle("speaker_01_take_1", Path("rec01.wav"))
+speaker_id = proj.add_speaker("S01")
+
+bundle_id = proj.add_bundle(
+    "speaker_01_take_2",
+    Path("rec02.wav"),
+    speaker_id=speaker_id,
+    extra='{"elicitation": "rainbow_passage", "take": 2}',
+)
 ```
 
 ## Run pitch and formants
