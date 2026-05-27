@@ -34,9 +34,28 @@ from sadda import _native
 from sadda._stability import provisional
 
 __all__ = [
+    "Model",
+    "load_model",
     "speech_segments",
     "vad",
 ]
+
+# Return type of load_model; re-exported for type-reference + introspection.
+Model = _native.ml.Model
+
+
+@provisional
+def load_model(id):  # noqa: A002
+    """Resolve a model by id, returning a :class:`Model`.
+
+    ``id`` is one of: ``"sadda/<name>[@version]"`` (curated registry,
+    falling back to the bundled set), ``"local://<path>"`` (a model
+    directory with a ``model.toml``, or a bare model file), or
+    ``"hf://<repo>"`` (HuggingFace passthrough — arrives in a later
+    release). The returned model exposes ``.vad(audio)`` plus ``.id`` /
+    ``.version`` / ``.kind`` / ``.weights_checksum`` metadata.
+    """
+    return _native.ml.load_model(id)
 
 
 @provisional

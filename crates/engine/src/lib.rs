@@ -15,6 +15,10 @@ pub mod live;
 /// is loaded at runtime (`load-dynamic`), not linked at build time.
 #[cfg(feature = "ml")]
 pub mod ml;
+/// E11 model registry (consume side) — resolve + run ONNX models by id.
+/// Behind the `ml` feature.
+#[cfg(feature = "ml")]
+pub mod models;
 pub mod pitch;
 pub mod refdist;
 pub mod storage;
@@ -38,7 +42,9 @@ pub use live::{
     MeterFrame, StoppedSession,
 };
 #[cfg(feature = "ml")]
-pub use ml::{SpeechSegment, VadFrame, speech_segments, vad, vad_bundled};
+pub use ml::{SpeechSegment, VadFrame, speech_segments, vad};
+#[cfg(feature = "ml")]
+pub use models::{Model, ModelManifest, ModelStore, load_model, vad_bundled};
 pub use pitch::{PitchConfig, PitchFrame, autocorrelation};
 pub use refdist::{
     Citation as RefdistCitation, Histogram, Measure, MeasureKind, Population, Privacy, QuerySpec,

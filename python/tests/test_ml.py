@@ -67,3 +67,38 @@ def test_speech_segments_on_silence(tmp_path) -> None:
     assert isinstance(segs, list)
     # No speech in silence.
     assert segs == []
+
+
+def test_load_model_resolves_bundled_vad() -> None:
+    # No ONNX Runtime needed — just resolution + manifest metadata.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = sadda.ml.load_model("sadda/silero-vad")
+    assert m.id == "sadda/silero-vad"
+    assert m.kind == "vad"
+    assert m.weights_checksum.startswith("sha256:")
+
+
+def test_load_model_hf_is_deferred() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(Exception):
+            sadda.ml.load_model("hf://facebook/wav2vec2-base-960h")
+
+
+def test_load_model_is_provisional() -> None:
+    from sadda._stability import get_stability
+
+    assert get_stability(sadda.ml.load_model) == "provisional"
+
+
+def test_model_vad_matches_free_vad(tmp_path) -> None:
+    wav = tmp_path / "silence.wav"
+    _silence_wav(wav)
+    audio = sadda.load_wav(str(wav))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = sadda.ml.load_model("sadda/silero-vad")
+        times, probs = _ort_or_skip(lambda: m.vad(audio))
+    assert len(times) == len(probs) > 0
+    assert float(np.mean(probs)) < 0.3

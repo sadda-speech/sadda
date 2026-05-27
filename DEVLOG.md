@@ -51,6 +51,28 @@ Both are roadmap intake only. The immediate path is unchanged: finish **E11** (M
 
 ---
 
+## 2026-05-27 — Model registry: consume side + load_model/Model (E11, part 3a)
+
+Implements the design entry's part 3a (the C7 analogue): the model-registry **consumption** side, offline-first, no network.
+
+### What landed
+
+- **`engine::models`** (new, parallel to `refdist`, behind `ml`): `ModelManifest` (serde over the `model.toml` blocks `[model]`/`[input]`/`[output]`/`[compute]`/`[citation]`); `ModelStore` (user cache at `~/.local/share/sadda/models/`, nested `<id>/<version>/`, `install_from_dir`/`get`/`get_latest`/`resolve`); `Model { manifest, dir }` with `file_path`, `id`/`version`/`kind`/`weights_checksum`, and `.vad(audio)` (delegates to the part-1 `ml::vad`, enforcing the declared kind).
+- **`load_model(id)`** resolver: `sadda/<name>[@version]` (user store → bundled-set fallback), `local://<path>` (a model dir, or a bare file with a synthesized minimal manifest), `hf://…` → a clear "arrives in E12" error.
+- **Bundled VAD re-homed** under `models-bundled/silero-vad/model.toml` (kind=vad, sha256 checksum, MIT). `vad_bundled()` moved into `models` and now does `load_model`-of-the-bundled-entry; the part-1 `bundled_vad_path` is gone. `ml` keeps just the inference primitives (`vad(audio, path)`, `speech_segments`). Behaviour identical, re-verified.
+- **Python**: `sadda.ml.load_model(id) -> Model` (PROVISIONAL) with `.vad(audio)` + `.id`/`.version`/`.kind`/`.weights_checksum`/`.title`/`.license`; the part-2a `sadda.ml.vad(audio)` convenience unchanged.
+- **Provenance**: `Model` exposes `id`/`version`/`weights_checksum` for a project-aware caller to record `ProcessingRun{kind=ml_model, …}`; the recording wiring (where bundle context exists) rides a later step.
+
+### Validation
+
+Engine: 10 `models` units (manifest parse, `Model` accessors, store install/get round-trip, `load_model` for local-dir / bare-file / `hf://`-error / curated-bundled-fallback, kind-check, + an ORT-gated `vad_bundled` e2e that skips cleanly without ORT). Python: 7 `test_ml` (load_model resolves bundled VAD + metadata, `hf://` deferred, provisional tier, `Model.vad` matches the free `vad`), skipping the inference ones without ORT. Full CI gate sequence green locally on 1.95 (fmt, clippy `--workspace --all-targets -D warnings`, build, `cargo test --workspace`, stub unchanged, pytest 4 pass + 3 skip without ORT).
+
+### Next
+
+E11 part 3b — the `model-registry/` repo scaffold (tiers, `validate.py`, `build_index.py`, index), the C8 analogue. Then E12 (network: `hf://` + HTTP download + wav2vec2/Whisper → embedding tiers). Architecture-consolidation reassessment (parallel vs shared with refdist) remains parked until both registries are concrete.
+
+---
+
 ## 2026-05-27 — Roadmap intake: speech-AI-engineer feature directions
 
 Ideation session on what would make Sadda *attractive to speech-AI/ML engineers* — beyond the basics, the "take notice" tier, weighted (at the user's direction) toward features that help engineers make **principled and ethical decisions rather than running a parameter grid and picking the best number.** Logged-not-designed (like the AI-agent-surface + walkthrough-demos intake); ~Phase 4+/v1.x; each needs its own design session. Six directions, all endorsed by the user (the last two are the user's additions).

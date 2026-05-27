@@ -53,3 +53,76 @@ pub(crate) fn speech_segments(
         .map(|s| (s.start_seconds, s.end_seconds))
         .collect())
 }
+
+/// A model resolved from the registry by [`load_model`].
+#[pyclass(name = "Model")]
+pub(crate) struct PyModel {
+    inner: sadda_engine::Model,
+}
+
+#[pymethods]
+impl PyModel {
+    /// Resolvable id (e.g. `"sadda/silero-vad"`).
+    #[getter]
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+    /// Version.
+    #[getter]
+    fn version(&self) -> &str {
+        self.inner.version()
+    }
+    /// Model kind (`vad`, `embedding`, …).
+    #[getter]
+    fn kind(&self) -> &str {
+        self.inner.kind()
+    }
+    /// Human-readable title.
+    #[getter]
+    fn title(&self) -> &str {
+        &self.inner.manifest.title
+    }
+    /// SPDX license id, if declared.
+    #[getter]
+    fn license(&self) -> Option<String> {
+        self.inner.manifest.license.clone()
+    }
+    /// Weights checksum (`sha256:…`), if declared.
+    #[getter]
+    fn weights_checksum(&self) -> Option<String> {
+        self.inner.weights_checksum().map(str::to_string)
+    }
+
+    /// Runs this model as a VAD over `audio` → `(times, speech_probs)`.
+    /// Errors unless it's a `vad` model and ONNX Runtime is available.
+    #[allow(clippy::type_complexity)]
+    fn vad<'py>(
+        &self,
+        py: Python<'py>,
+        audio: &PyAudio,
+    ) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f32>>)> {
+        let frames = self.inner.vad(&audio.inner).map_err(engine_err_to_py)?;
+        let times: Vec<f64> = frames.iter().map(|f| f.time_seconds).collect();
+        let probs: Vec<f32> = frames.iter().map(|f| f.speech_prob).collect();
+        Ok((times.into_pyarray(py), probs.into_pyarray(py)))
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Model(id={:?}, version={:?}, kind={:?})",
+            self.inner.id(),
+            self.inner.version(),
+            self.inner.kind()
+        )
+    }
+}
+
+/// Resolves a model by id: `sadda/<name>[@version]` (curated / bundled),
+/// `local://<path>` (a model dir or bare file), or `hf://<repo>` (arrives
+/// in E12). Returns a [`PyModel`].
+#[pyfunction]
+pub(crate) fn load_model(id: &str) -> PyResult<PyModel> {
+    Ok(PyModel {
+        inner: sadda_engine::load_model(id).map_err(engine_err_to_py)?,
+    })
+}

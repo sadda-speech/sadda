@@ -2360,6 +2360,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let ml_mod = PyModule::new(m.py(), "ml")?;
     ml_mod.add_function(wrap_pyfunction!(ml::vad, &ml_mod)?)?;
     ml_mod.add_function(wrap_pyfunction!(ml::speech_segments, &ml_mod)?)?;
+    ml_mod.add_function(wrap_pyfunction!(ml::load_model, &ml_mod)?)?;
+    ml_mod.add_class::<ml::PyModel>()?;
     m.add_submodule(&ml_mod)?;
     Ok(())
 }
