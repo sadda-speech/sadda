@@ -123,6 +123,59 @@ pub fn mfcc(
     out
 }
 
+/// Log-mel spectrogram — the pre-DCT stage of [`mfcc`]: per frame, the
+/// natural-log Slaney mel-filterbank energies. Returns `(n_frames,
+/// n_mels)` (frames-first). `n_fft` is the analysis window in **samples**,
+/// `hop_length` the advance in **samples** (the conventions ONNX speech
+/// models declare). Feeds the E12 embedding harness's `log_mel` input
+/// representation. Empty (`0 × n_mels`) if shorter than one window.
+pub fn log_mel(
+    samples: &[f32],
+    sample_rate: u32,
+    n_fft: usize,
+    hop_length: usize,
+    n_mels: usize,
+    f_min: f32,
+    f_max: f32,
+) -> Array2<f32> {
+    assert!(sample_rate > 0 && n_fft > 0 && hop_length > 0 && n_mels > 0 && f_max > f_min);
+    if samples.len() < n_fft {
+        return Array2::zeros((0, n_mels));
+    }
+    let n_freq_bins = n_fft / 2 + 1;
+    let n_frames = (samples.len() - n_fft) / hop_length + 1;
+    let window = hann(n_fft);
+    let mel_fb = slaney_mel_filterbank(n_mels, n_freq_bins, sample_rate as f32, f_min, f_max);
+
+    let mut planner = RealFftPlanner::<f32>::new();
+    let plan = planner.plan_fft_forward(n_fft);
+    let mut fft_in = plan.make_input_vec();
+    let mut fft_out = plan.make_output_vec();
+
+    let mut out = Array2::<f32>::zeros((n_frames, n_mels));
+    let mut power = vec![0.0_f32; n_freq_bins];
+    for f in 0..n_frames {
+        let start = f * hop_length;
+        let frame = &samples[start..start + n_fft];
+        for (dst, (&s, &w)) in fft_in.iter_mut().zip(frame.iter().zip(window.iter())) {
+            *dst = s * w;
+        }
+        plan.process(&mut fft_in, &mut fft_out)
+            .expect("realfft buffers sized via make_*_vec");
+        for (i, c) in fft_out.iter().enumerate() {
+            power[i] = c.re * c.re + c.im * c.im;
+        }
+        for m in 0..n_mels {
+            let mut e = 0.0_f32;
+            for (b, &p) in power.iter().enumerate() {
+                e += p * mel_fb[m * n_freq_bins + b];
+            }
+            out[[f, m]] = (e + 1e-10).ln();
+        }
+    }
+    out
+}
+
 /// Hz → mel using Slaney's piecewise linear-then-log convention (1998).
 /// Linear up to 1 kHz, log above.
 fn hz_to_mel_slaney(f: f32) -> f32 {

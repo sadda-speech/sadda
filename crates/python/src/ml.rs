@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use numpy::{IntoPyArray, PyArray1};
+use numpy::{IntoPyArray, PyArray1, PyArray2};
 use pyo3::prelude::*;
 
 use crate::PyAudio;
@@ -105,6 +105,22 @@ impl PyModel {
         let times: Vec<f64> = frames.iter().map(|f| f.time_seconds).collect();
         let probs: Vec<f32> = frames.iter().map(|f| f.speech_prob).collect();
         Ok((times.into_pyarray(py), probs.into_pyarray(py)))
+    }
+
+    /// Runs this model as an embedding extractor over `audio`, returning a
+    /// `(frames, dims)` float64 NumPy array. The input is shaped per the
+    /// model's declared representation (`waveform` / `log_mel`). Errors
+    /// unless ONNX Runtime is available.
+    fn embeddings<'py>(
+        &self,
+        py: Python<'py>,
+        audio: &PyAudio,
+    ) -> PyResult<Bound<'py, PyArray2<f64>>> {
+        let arr = self
+            .inner
+            .embeddings(&audio.inner)
+            .map_err(engine_err_to_py)?;
+        Ok(arr.into_pyarray(py))
     }
 
     fn __repr__(&self) -> String {

@@ -1,0 +1,19 @@
+id = "fixture/waveform-embed"
+version = "0.0.0"
+title = "Synthetic waveform-input embedding model (test fixture)"
+license = "CC0-1.0"
+
+[model]
+kind = "embedding"
+format = "onnx"
+file = "model.onnx"
+
+[input]
+modality = "audio"
+representation = "waveform"
+sample_rate_hz = 16000
+channels = 1
+
+[output]
+tier_kind = "continuous_vector"
+channels = 8
