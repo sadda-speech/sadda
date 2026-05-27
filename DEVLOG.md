@@ -51,6 +51,26 @@ Both are roadmap intake only. The immediate path is unchanged: finish **E11** (M
 
 ---
 
+## 2026-05-26 — ML inference: GUI VAD lane (E11, part 2b)
+
+Completes the three-surface coverage for the VAD model (engine → Python → GUI). The app's `sadda-engine` dependency now enables `ml`, and VAD joins the D10 measure-track lanes.
+
+### What landed
+
+- **VAD measure-track lane** — a stacked lane (reusing the D10 `measure_lane` scaffolding) showing the per-window speech probability (0–1) as a contour, a dashed threshold line, and green shading over windows above the threshold. View → Measure Tracks → "VAD (speech)" toggles it; `vad_threshold` persists in `MeasureTrackConfig`.
+- **Computed + cached** alongside the other tracks: `compute_measure_tracks` now builds the owned `Audio` once and reuses it for both pitch and `vad_bundled`. The result lands in `MeasureTrackCache { vad, vad_error }`.
+- **Graceful degradation** — VAD needs ONNX Runtime at runtime, so it can fail where f0/formants/intensity can't. A failure (e.g. ORT absent) is caught into `vad_error` and rendered as a hint in the lane ("VAD unavailable — …"); the app never crashes, and starting it never requires ORT.
+
+### Validation
+
+Full CI gate sequence again green locally on 1.95.0 (fmt, clippy `--workspace --all-targets -D warnings`, build, `cargo test --workspace`, app tests 48). The lane rendering itself isn't unit-tested (consistent with the other panes); the config logic is, and the VAD data path is covered by the engine + Python tests. **Visual QA in a running window is still pending** (same standing caveat as D10).
+
+### E11 status + what's left
+
+E11's first model is now fully surfaced (engine + Python + GUI). Remaining in cluster E: the **on-demand model registry** (parallel to refdist + `hf://` + `weights_checksum`) — which, like refdist governance, deserves its own design pass — and **E12** (wav2vec2/Whisper → embedding tiers). Stopping here pending that design input.
+
+---
+
 ## 2026-05-26 — ML inference: Python `sadda.ml` surface + ml-on-by-default (E11, part 2a)
 
 Builds on part 1's engine `ml` foundation. Decision (with the user): **`ml` on by default in the shipped wheel + app** — under `load-dynamic` it costs ~150 KB of bindings, ONNX Runtime stays an optional runtime sidecar, and the surface errors cleanly (never crashes) when ORT is absent.
