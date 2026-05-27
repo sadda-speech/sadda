@@ -17,6 +17,7 @@ use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
 mod live;
+mod ml;
 mod recipe;
 mod refdist;
 
@@ -67,8 +68,8 @@ pub(crate) fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
 /// `sadda.load_wav(path)`.
 #[gen_stub_pyclass]
 #[pyclass(name = "Audio")]
-struct PyAudio {
-    inner: sadda_engine::Audio,
+pub(crate) struct PyAudio {
+    pub(crate) inner: sadda_engine::Audio,
 }
 
 #[gen_stub_pymethods]
@@ -2353,6 +2354,13 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     refdist_mod.add_class::<refdist::PySummary>()?;
     refdist_mod.add_class::<refdist::PyHistogram>()?;
     m.add_submodule(&refdist_mod)?;
+
+    // E11 ML inference: sadda.ml.* (registered as `sadda._native.ml`;
+    // the Python `sadda/ml/__init__.py` re-exports with stability tiers).
+    let ml_mod = PyModule::new(m.py(), "ml")?;
+    ml_mod.add_function(wrap_pyfunction!(ml::vad, &ml_mod)?)?;
+    ml_mod.add_function(wrap_pyfunction!(ml::speech_segments, &ml_mod)?)?;
+    m.add_submodule(&ml_mod)?;
     Ok(())
 }
 
