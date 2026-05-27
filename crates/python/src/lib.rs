@@ -1170,6 +1170,17 @@ impl PyProject {
         self.inner.remove_refdist_pin(id).map_err(engine_err_to_py)
     }
 
+    /// E12: resolve `model_id` (`sadda/…` / `local://…` / `hf://…`), run it
+    /// as an embedding extractor over `bundle_id`'s audio, and store the
+    /// result as a new `continuous_vector` tier `tier_name`, recording an
+    /// `ml_model` processing run. Returns the new tier id. (Provisional.)
+    fn extract_embeddings(&self, bundle_id: i64, model_id: &str, tier_name: &str) -> PyResult<i64> {
+        let model = sadda_engine::load_model(model_id).map_err(engine_err_to_py)?;
+        self.inner
+            .extract_embeddings(bundle_id, &model, tier_name)
+            .map_err(engine_err_to_py)
+    }
+
     /// Inserts a Tier row. `type` is one of `interval`, `point`, `reference`,
     /// `continuous_numeric`, `continuous_vector`, `categorical_sampled`.
     /// Returns the new tier's id.

@@ -689,6 +689,13 @@ class Project:
         r"""
         Removes a reference-distribution pin; returns whether one existed.
         """
+    def extract_embeddings(self, bundle_id: builtins.int, model_id: builtins.str, tier_name: builtins.str) -> builtins.int:
+        r"""
+        E12: resolve `model_id` (`sadda/…` / `local://…` / `hf://…`), run it
+        as an embedding extractor over `bundle_id`'s audio, and store the
+        result as a new `continuous_vector` tier `tier_name`, recording an
+        `ml_model` processing run. Returns the new tier id. (Provisional.)
+        """
     def add_tier(self, bundle_id: builtins.int, name: builtins.str, r#type: builtins.str, *, parent_id: typing.Optional[builtins.int] = None, cardinality: typing.Optional[builtins.str] = None, schema: typing.Optional[builtins.str] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
         r"""
         Inserts a Tier row. `type` is one of `interval`, `point`, `reference`,
