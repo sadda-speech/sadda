@@ -112,6 +112,11 @@ pub struct ModelInput {
     /// `log_mel`: hop length in samples (e.g. 160).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hop_length: Option<usize>,
+    /// `log_mel`: pad/truncate the spectrogram to exactly this many frames
+    /// before inference, for encoders with a fixed input length (e.g.
+    /// Whisper's 3000). Absent ⇒ variable length (the model accepts any T).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_frames: Option<usize>,
 }
 
 /// `[output]` block — ties inference results to a tier kind.
@@ -283,14 +288,19 @@ impl Model {
                 if t == 0 {
                     return Err(model_err("audio shorter than one log-mel window"));
                 }
-                // [n_mels, T], row-major.
-                let mut flat = Vec::with_capacity(n_mels * t);
+                // Pad (with the log-mel floor of silence) / truncate to a
+                // fixed frame count for fixed-length encoders (Whisper);
+                // otherwise keep the natural length. `[n_mels, frames]`,
+                // row-major.
+                let frames = self.manifest.input.fixed_frames.unwrap_or(t);
+                let pad = (1e-10_f32).ln();
+                let mut flat = Vec::with_capacity(n_mels * frames);
                 for m in 0..n_mels {
-                    for fr in 0..t {
-                        flat.push(lm[[fr, m]]);
+                    for fr in 0..frames {
+                        flat.push(if fr < t { lm[[fr, m]] } else { pad });
                     }
                 }
-                Tensor::from_array(([1usize, n_mels, t], flat)).map_err(ort_err)?
+                Tensor::from_array(([1usize, n_mels, frames], flat)).map_err(ort_err)?
             }
             other => {
                 return Err(model_err(format!(
@@ -846,6 +856,67 @@ tier_kind = "interval"
         }
     }
 
+    #[cfg(feature = "download")]
+    fn net_test_ready(name: &str) -> bool {
+        if std::env::var("SADDA_NET_TESTS").is_err() {
+            eprintln!("{name} skipped (set SADDA_NET_TESTS=1)");
+            return false;
+        }
+        true
+    }
+
+    // Real waveform model — wav2vec2-base-960h via hf:// (~378 MB). The
+    // harness handles it as-is (waveform input, tensor names read from the
+    // session). Note: the `-960h` variant is the CTC ASR fine-tune, so its
+    // output is per-frame logits over the character vocab (~32 dims), not
+    // 768-d SSL hidden states (a pretrained `wav2vec2-base` would give
+    // those). Either way this validates the harness end-to-end on a real,
+    // large waveform model, so we assert the frames × dims shape generally.
+    #[cfg(feature = "download")]
+    #[test]
+    fn wav2vec2_base_waveform_real() {
+        if !net_test_ready("wav2vec2_base_waveform_real") {
+            return;
+        }
+        let m = load_model("hf://Xenova/wav2vec2-base-960h/onnx/model.onnx").unwrap();
+        match m.embeddings(&one_second_noise()) {
+            Ok(emb) => {
+                assert!(emb.ncols() > 0, "per-frame feature dims");
+                assert!(emb.nrows() > 0, "frames");
+            }
+            Err(EngineError::Ml(msg)) => eprintln!("skipped (ORT unavailable): {msg}"),
+            Err(e) => panic!("unexpected: {e}"),
+        }
+    }
+
+    // Real fixed-length log-mel encoder — whisper-tiny.en encoder via hf://
+    // (~33 MB). Exercises the `log_mel` + `fixed_frames=3000` path: the
+    // bare hf:// model is re-declared as a log-mel encoder in-memory.
+    // NOTE: `dsp::log_mel` is Slaney/natural-log, not Whisper's exact
+    // HTK/log10/normalized mel — so this validates the harness *mechanics*
+    // (fixed-length shaping → run → [frames, 384]), not embedding fidelity.
+    #[cfg(feature = "download")]
+    #[test]
+    fn whisper_tiny_encoder_logmel_real() {
+        if !net_test_ready("whisper_tiny_encoder_logmel_real") {
+            return;
+        }
+        let mut m = load_model("hf://Xenova/whisper-tiny.en/onnx/encoder_model.onnx").unwrap();
+        m.manifest.input.representation = Some("log_mel".into());
+        m.manifest.input.n_mels = Some(80);
+        m.manifest.input.n_fft = Some(400);
+        m.manifest.input.hop_length = Some(160);
+        m.manifest.input.fixed_frames = Some(3000);
+        match m.embeddings(&one_second_noise()) {
+            Ok(emb) => {
+                assert_eq!(emb.ncols(), 384, "whisper-tiny d_model");
+                assert!(emb.nrows() > 0);
+            }
+            Err(EngineError::Ml(msg)) => eprintln!("skipped (ORT unavailable): {msg}"),
+            Err(e) => panic!("unexpected: {e}"),
+        }
+    }
+
     #[test]
     fn parses_registry_index() {
         let json = r#"{
@@ -954,6 +1025,26 @@ tier_kind = "interval"
             Err(EngineError::Ml(msg)) => eprintln!("skipped (ORT unavailable): {msg}"),
             Err(e) => panic!("unexpected: {e}"),
         }
+    }
+
+    #[test]
+    fn embeddings_fixed_frames_pads_and_truncates() {
+        // The log-mel fixture's Conv1d(k=1) accepts any T, so the frame
+        // count of its output equals the (padded/truncated) input length.
+        let mut m = fixture_model("logmel-embed");
+        m.manifest.input.fixed_frames = Some(200); // pad up (1 s → ~98 frames)
+        match m.embeddings(&one_second_noise()) {
+            Ok(emb) => assert_eq!(emb.nrows(), 200),
+            Err(EngineError::Ml(msg)) => {
+                eprintln!("skipped (ORT unavailable): {msg}");
+                return;
+            }
+            Err(e) => panic!("unexpected: {e}"),
+        }
+        // ORT is available (the call above succeeded) → truncate down.
+        let mut m2 = fixture_model("logmel-embed");
+        m2.manifest.input.fixed_frames = Some(20);
+        assert_eq!(m2.embeddings(&one_second_noise()).unwrap().nrows(), 20);
     }
 
     // End-to-end inference through the bundled model. Requires a runtime
