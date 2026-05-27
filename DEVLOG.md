@@ -51,6 +51,31 @@ Both are roadmap intake only. The immediate path is unchanged: finish **E11** (M
 
 ---
 
+## 2026-05-27 — E12b-2b: fixed-length mel + real-model validation (E12 / cluster E complete)
+
+The "both" the maintainer asked for: a fixed-length-mel harness feature, plus the embedding harness validated against two *real* models (one per representation). This closes E12, cluster E, and Phase 3's ML line.
+
+### What landed
+
+- **`input.fixed_frames`** (manifest): pad (with the log-mel floor of silence) / truncate the log-mel spectrogram to exactly N frames before inference — the contract fixed-length encoders like Whisper (3000 frames) need. Absent ⇒ variable length. CI-runnable test (ORT-gated, no network): the log-mel fixture padded to 200 and truncated to 20 frames yields exactly that many embedding rows.
+
+### Real-model validation (gated behind `SADDA_NET_TESTS`, never in CI)
+
+Both downloaded via `hf://` and run through the harness with **no code change** — proving the "manifest-declares, harness-handles" design on real models:
+
+- **wav2vec2-base-960h** (waveform, ~378 MB) → harness runs it end-to-end, producing a `frames × dims` matrix. (Note: `-960h` is the CTC ASR fine-tune, so its output is char-vocab logits, not 768-d SSL hidden states — a pretrained `wav2vec2-base` would give those; the test asserts the shape generally.)
+- **whisper-tiny.en encoder** (log-mel, ~33 MB) → with `representation = log_mel` + `fixed_frames = 3000`, the harness shapes the mel and runs the encoder to `[1500, 384]`. Caveat documented: `dsp::log_mel` is Slaney/natural-log, not Whisper's exact HTK/log10/normalized mel, so this validates the harness *mechanics* (fixed-length shaping → run → output), not embedding fidelity — model-exact mel preprocessing is a future per-model concern.
+
+### Validation
+
+fmt, clippy default + `--features download`, `cargo test --workspace` (22 groups; the `fixed_frames` test runs + ORT-skips), all green on 1.95. The two real-model tests pass locally with `SADDA_NET_TESTS=1` + ORT.
+
+### Cluster E / Phase-3 status
+
+**E12 done → cluster E (ML inference) complete → Phase 3 (clusters A–E) content-complete.** The 0.3 line — clinical substrate + clinical algorithms + reference distributions + GUI overlays + ML inference — is now all landed. Deferred follow-ups remain (a `download`-enabled wheel/extra; a GUI embedding-heatmap lane; curated url-fetch with checksum verify; the parallel-vs-shared registry-architecture reassessment; model-exact mel preprocessing), but the phase's headline scope is met.
+
+---
+
 ## 2026-05-27 — E12b-2a: embedding tiers — `Project::extract_embeddings` + provenance
 
 Wires the harness into the corpus: inference results become first-class, queryable dense tiers — the "embedding tiers" half of E12.
