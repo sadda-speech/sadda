@@ -51,6 +51,81 @@ Both are roadmap intake only. The immediate path is unchanged: finish **E11** (M
 
 ---
 
+## 2026-05-27 — Roadmap intake: speech-AI-engineer feature directions
+
+Ideation session on what would make Sadda *attractive to speech-AI/ML engineers* — beyond the basics, the "take notice" tier, weighted (at the user's direction) toward features that help engineers make **principled and ethical decisions rather than running a parameter grid and picking the best number.** Logged-not-designed (like the AI-agent-surface + walkthrough-demos intake); ~Phase 4+/v1.x; each needs its own design session. Six directions, all endorsed by the user (the last two are the user's additions).
+
+**Unifying thesis.** Not "another training framework" — Sadda is **the measurement / evaluation / interpretation layer for speech ML, phonetically literate** (it knows what F1/F2/VOT/jitter/SNR *mean*, has a corpus model + reference distributions + ML-native time-aligned signals + provenance). The pitch: *the acoustic conscience of a speech-ML pipeline* — making data and model behaviour legible at the phonetic level so decisions are defensible. How speech-AI engineers work today (collect → filter → fine-tune an HF model → eval WER/EER/MOS → eyeball errors → iterate; tools = `datasets`/`transformers`, `torchaudio`/`librosa`, `jiwer`, W&B, notebooks) leaves chronic gaps: data is acoustically opaque, eval collapses to one number, error analysis is manual, bias/representation auditing is rare, reproducibility/documentation are afterthoughts.
+
+### 1. Acoustic dataset intelligence — "know your data"
+Corpus acoustic profiling (f0 / formant-space / SNR / bandwidth / clipping / speaking-rate / duration distributions); **coverage & representation auditing against reference distributions** (which phones/contexts are thin; which speaker demographics under-represented vs. a target population — the ethical core: surface gaps *before* training); train/test **leakage & near-duplicate detection** via speaker+acoustic embeddings; label/alignment QA; **auto-datasheets** (prior art: *Datasheets for Datasets*, Gebru et al.) populated from measured facts.
+
+### 2. Corpus comparison *(user addition)*
+A/B two or more corpora or subsets on the same acoustic/representation axes — train vs. test, domain A vs. B, pre/post-filtering, candidate datasets — with statistical comparison (effect sizes, not eyeballing). The bridge between #1 and #3. Use: **domain-shift detection**, distribution drift, and **principled dataset selection/curation** (choose for coverage/representation, not convenience; detect when the eval set doesn't match deployment). Reuses the #1 profiling machinery + #3 statistics.
+
+### 3. Principled evaluation — the antidote to grid-and-pick
+**Disaggregated slice-based evaluation** (WER/EER/MOS by acoustic + demographic buckets: SNR band, rate, accent, f0 range, sex/age) with confidence intervals; **statistical honesty** — significance tests, effect sizes, multiple-comparison correction, **power analysis** ("is the test set even big enough for that WER gap?"); calibration/uncertainty checks; **auto Model Cards** (Mitchell et al.) from the disaggregated results + provenance. Structurally discourages cherry-picking.
+
+### 4. Model legibility — ML-native interpretability, phonetically grounded
+Model internals as first-class **time-aligned signals** (CTC posteriors, attention/alignment, layer-wise SSL embeddings) viewable alongside formants/f0; **acoustic error analysis** (correlate ASR/TTS errors with measurable acoustic factors → failure *modes*); **SSL-layer probing against acoustic ground truth** ("which wav2vec2/HuBERT layer encodes F1 / voicing / speaker?"; prior art: SUPERB, Pasad et al. layer-wise analyses) — research-grade, and only doable well by a tool that *has* the acoustic ground truth; **controlled perturbation/robustness** (principled noise/reverb/pitch/formant manipulations via Sadda DSP → counterfactuals, not random augmentation).
+
+### 5. Automated labeling: ToBI / IPA / phonetic-feature spans *(user addition)*
+Auto-annotation that attacks the annotation bottleneck and compounds with Sadda's prosody/formant strength + the ML registry: **ToBI** (pitch accents / boundary tones / break indices; prior art: Rosenberg's AuToBI — genuinely hard, imperfect), **IPA / phone segmentation** (more mature: MFA, Charsiu, Allosaurus), **phonetic-feature spans** (distinctive features over time, derived from phone labels + a feature system). The principled posture is **human-in-the-loop**: the model *proposes* labels as tiers carrying **confidence + provenance** (which model/version), the expert *disposes* — never silently trusting model output. Bridges the annotation model (B1/B2) ↔ ML registry (E11/E12) ↔ measure tracks.
+
+### 6. Reproducibility & accountability — Sadda already has the bones
+Provenance + citations on every measurement (A1), recipe record/replay (F1), **licensing/consent tracking** on training data (the refdist license discipline generalizes), and speaker **anonymization / re-identification-risk** analysis (k-anonymity thinking from refdist). Auditable, legally-aware pipelines.
+
+### Flagships + cross-connections
+
+The three most differentiating *and* most on-thesis (principled/ethical, and uniquely Sadda): **representation/coverage auditing vs. reference distributions (#1)**, **disaggregated + statistically-honest evaluation (#3)**, and **SSL-layer probing against acoustic ground truth (#4)**. These compose with already-logged roadmap items: the **AI-agent surface** would *drive* all of these (an agent running a principled eval + emitting a model card); **report/figure generation** *outputs* them; **reference distributions** are the *yardstick* for representation; the **model registry (E11/E12)** powers the labeling models; **provenance (A1)** makes every result auditable.
+
+### Open questions for the eventual design sessions
+
+Statistics engine: built-in (a focused stats layer) vs. lean on Polars→`statsmodels`/R? Where do auto-cards live (docs-embedded, exportable HTML/PDF — shares the report/figure IR)? Which audience surface drives this — the Python API / AI-agent surface primarily, with the GUI for inspection? Labeling: confidence + correction-workflow UX; which models ship curated. Representation auditing needs the *real* reference distributions (still pending license clearance) to be more than a demo.
+
+### Status
+
+Roadmap intake only. Immediate path unchanged: finish **E11** (model registry → E12). Revisit each with its own design session when scheduled; the flagships are the place to start.
+
+---
+
+## 2026-05-27 — Model registry: implementation shape for E11 (design session)
+
+The 2026-05-20 "ML model registry" entry is the *governance* design (the model analogue of the 2026-05-18 refdist-governance entry). This session concretizes it into an **implementation shape for E11**, the way C7/C8/C9 turned refdist governance into code. The manifest format, three ID schemes (`sadda/…`, `hf://…`, `local://…`), ONNX-canonical curated tier, storage layout (`~/.local/share/sadda/models/`), and `ProcessingRun{kind=ml_model, weights_checksum}` provenance are all settled there and not re-litigated.
+
+### Decisions this session
+
+1. **Architecture: parallel for now, consolidation DEFERRED for reassessment.** Build a standalone `engine::models` module mirroring refdist's shape rather than generalizing C7/C8 into a shared generic core. Rationale: it's the *reversible* choice — extracting shared utilities (cache-dir, install-from-dir copy, index parsing) later is easy; un-merging a premature abstraction over two schemas that may diverge (models carry weights/compute/output-tier; refdist carries population/measure) is not. **Reassessment checkpoint**: after E12, when both registries are concrete and the real duplication/divergence is observable rather than guessed — decide then whether to extract a shared core or shared utilities. (Logged at the user's request to revisit.)
+2. **Offline-first split (E11) / network (E12)** — mirrors C7 (consume) → C8 (registry repo + bundled set) → C9, with no network in E11.
+3. **`load_model(id) -> Model` object** with task methods (`.vad()` now; `.transcribe()` / `.embeddings()` in E12), plus `sadda.ml.vad(audio)` kept as a convenience over the bundled model. Resolve-once-then-call suits repeated use and agent use.
+
+### Concrete shape
+
+- **`engine::models`** (new, parallel to `refdist`):
+  - `ModelManifest` — serde over the 2026-05-20 `model.toml` (`id` / `version` / `title` / `upstream_source` / `license`, `[model]` kind+format+file/url+checksum, `[input]`, `[output].tier_kind`, `[compute]`, `[citation]`).
+  - `ModelStore` rooted at `~/.local/share/sadda/models/` — `list` / `get` / `install_from_dir` (mirrors `RefdistStore`).
+  - `load_model(id) -> Model` resolver: `sadda/…` (curated cache) and `local:///…` land in E11; `hf://…` returns a clear "arrives in E12" error (not silent).
+  - `Model { manifest, dir }` — `.vad(audio)` (delegates to the part-1 `ml::vad` with this model's ONNX path), `.kind` / `.output_tier` / compute info, and `.id` / `.version` / `.weights_checksum` for provenance. `.transcribe()` / `.embeddings()` arrive in E12.
+- **Bundled VAD re-homed under a manifest** — `models-bundled/silero-vad/model.toml` alongside the existing `silero_vad.onnx` + `LICENSE`. `vad_bundled()` becomes `load_model` of the bundled entry; the bundled set is the registry's tier-1 proof, exactly paralleling `refdist-bundled/`.
+- **Provenance hook** — `Model` exposes the fields a project-aware caller needs to record `ProcessingRun{kind=ml_model, processor_id=id, processor_version=version, weights_checksum}` (the table + fields exist since B1/A1). The *recording* is wired where bundle context exists (the GUI VAD path / a project-aware entry point), not in the bare `vad(audio)` function.
+- **Python**: `sadda.ml.load_model(id) -> Model` (PROVISIONAL); `Model.vad(audio)`; existing `sadda.ml.vad` convenience unchanged.
+
+### Sub-slices (mirroring the C7→C8 staging)
+
+- **E11 part 3a** — `engine::models` + `load_model`/`Model` + bundled-VAD-via-manifest + Python surface (the C7 analogue: format + store + resolve + consume).
+- **E11 part 3b** — `model-registry/` repo scaffold (tiers, README/SCHEMA, `validate.py`, `build_index.py`, index JSON), parallel to `refdist-registry/` (the C8 analogue).
+
+### Deferred (per 2026-05-20, unchanged)
+
+`hf://` passthrough + HTTP weight download + wav2vec2/Whisper starter set + embedding tiers (E12); HF auth UX; curated-tier smoke-test CI; cache eviction (manual GC at v1); the architecture-consolidation reassessment above.
+
+### Sources / references
+
+- 2026-05-20 ML-model-registry entry (the governance this concretizes).
+- 2026-05-25 C7/C8/C9 entries (the refdist mechanism this parallels, and the staging it mirrors).
+
+---
+
 ## 2026-05-26 — ML inference: GUI VAD lane (E11, part 2b)
 
 Completes the three-surface coverage for the VAD model (engine → Python → GUI). The app's `sadda-engine` dependency now enables `ml`, and VAD joins the D10 measure-track lanes.
