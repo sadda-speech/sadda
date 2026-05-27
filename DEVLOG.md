@@ -51,6 +51,26 @@ Both are roadmap intake only. The immediate path is unchanged: finish **E11** (M
 
 ---
 
+## 2026-05-27 — Roadmap intake: community script registry
+
+A user-raised feature, logged-not-designed (like the AI-agent-surface / walkthrough-demos / AI-engineer-directions intakes); ~Phase 4+/v1.x; needs its own design session.
+
+**Thesis.** Sadda is scriptable (the E8 embedded-CPython panel + E9 `sadda.app` command registration + the Python API). A **script registry** lets users publish the scripts they write back to the community — the central home the Praat-script ecosystem never had (scripts scattered across forums + personal sites). It is the project's **third registry**, reusing the established pattern: a separate repo, PR-based submission, manifest + artifact, CI validation, a Pages index, in-app discovery.
+
+**Submission pathway (the user's sketch).** Publishing is a PR adding a script + a manifest + docs; the **review is the QA gate** and ensures documentation. It needs *very clear* submission instructions, ideally a **walk-through** (ties directly to the auto-generated-walkthrough-demos intake).
+
+**The distinguishing concern — scripts are executable code.** Unlike the refdist registry (inert data) and the model registry (weights run by a runtime we control), a shared script is **arbitrary code that runs on the user's machine**. So this registry carries a trust/security burden the others don't: review can't fully vouch for safety; the app should signal trust clearly and likely **sandbox / require explicit consent** before running a community script (overlaps the agent-safety/sandboxing open question from the AI-agent-surface intake); and CI "validation" leans toward lint / import-check / a sandboxed smoke-run rather than data conformance. This is the part the design session must get right.
+
+**The promotion loop (a good dynamic the user flagged).** The review process surfaces scripts that prove broadly useful — a documented path for *"popular community script → candidate to build into the engine itself."* Scripts become a proving ground for built-in features (the way shell plugins / git aliases graduate into core).
+
+**Connections.** Scripting surface (E8 / E9 / Python API); the registry mechanism — refdist (C8) + models (E11-3b) + now scripts = **three** registries, which materially strengthens the deferred *parallel-vs-shared registry-core* reassessment (three concrete instances to generalize from); the submission walk-through (#2); in-app browse / install / run (a "script browser," mirroring a refdist/model browser); provenance + attribution for shared scripts.
+
+**Open questions for the design session.** Manifest shape (`script.toml`: title / author / license / `sadda`-version compat / APIs-used / tags / example invocation); curated-tiers vs flat-with-trust-signals; the **security model** (sandbox? capability limits? consent-to-run UX; static checks vs sandboxed smoke-run in CI); how the "promote to engine" path is tracked (labels / issues); and versioning + compat as the `sadda.*` API evolves under shared scripts.
+
+**Status.** Roadmap intake only; ~Phase 4+. Immediate path unchanged: the 0.3.x release, then Phase 4.
+
+---
+
 ## 2026-05-27 — E12b-2b: fixed-length mel + real-model validation (E12 / cluster E complete)
 
 The "both" the maintainer asked for: a fixed-length-mel harness feature, plus the embedding harness validated against two *real* models (one per representation). This closes E12, cluster E, and Phase 3's ML line.
