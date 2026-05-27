@@ -6,6 +6,30 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-27 — GUI: keyboard scrubbing + accessibility (palette / colormap / UI scale); WSLg renderer note
+
+Three user asks from a session of hands-on testing. Two shipped; one is a host-environment diagnosis pending the user's confirmation.
+
+### 1. Keyboard scrubbing (shipped)
+
+When zoomed into a portion of a recording there was no *discoverable* way to move along the file — shift+scroll-wheel panned (since C5's `handle_zoom_and_scroll`) but nothing advertised it. Added **Left/Right** to pan a quarter-window per press and **Home/End** to snap to the file start/end, built on `TimelineState::scroll_by` (already clamps against bundle bounds + unit-tested). Suppressed while any widget has focus or a label is being edited, so the keys still reach text editors.
+
+### 2. Accessibility: plot colours + font size (shipped)
+
+The user asked for accessible plot palettes + font-size control; chose **CVD-safe presets** over full per-element pickers. Implemented as an Appearance group under View → Theme, all persisted:
+
+- **Plot palette** (`PlotPalette`: Default / Okabe–Ito). The colourblind-safe scheme recolours only where colour must be *discriminated*: the overlaid formants F1…Fn (one shared lane) and the coexisting observed/normative/target reference bands. Single-series lanes (f0, intensity, VAD) are unambiguous and left alone; band meaning stays carried redundantly by the TARGET tag + dashed border, never colour alone. Palette: Okabe & Ito, "Color Universal Design" (2008), <https://jfly.uni-koeln.de/color/>.
+- **Spectrogram colormap** gains **Cividis** (CVD-optimised, luminance-monotonic) alongside the existing Viridis/Magma/Greyscale — `colorous::CIVIDIS`, one arm in `sample_colormap`, picked up by the existing `==`-based cache invalidation.
+- **UI scale** slider (0.8–2.0×) via egui `zoom_factor`, scaling all text + widgets relative to native density.
+
+`state.rs` stays egui-free (the enum + serde defaults live there; colour resolution stays in `main.rs`). Tests: palette schemes non-aliasing + internally distinct; Cividis sampling distinct; appearance defaults deserialise to native scale (guarding the serde default against f32's `0.0`, which would shrink the UI to nothing). Deferred (logged): per-element colour pickers if fine control is wanted later; recolouring the single-series lanes for full scheme coherence.
+
+### 3. WSLg GL hang (diagnosis, pending user confirmation)
+
+User reported the app hanging at launch after `Dropped Escape call with ulEscapeCode : 0x03007703`. Diagnosis: that line is a WSLg DirectX/GL-virtualisation message emitted during GL context creation; the app renders via **glow (OpenGL)** (eframe with only the `persistence` feature → default renderer). It is **not** ORT (load-dynamic, loaded lazily on first VAD/embedding call, never at startup — and the user's `ORT_DYLIB_PATH` pointed at `libonnxruntime_providers_shared.so`, the tiny provider shim, not `libonnxruntime.so.1.26.0`) and **not** the new window icon (decoded pre-`run_native`, before the GL message). Mitigations offered, in order: `wsl --shutdown` then relaunch; `LIBGL_ALWAYS_SOFTWARE=1` to isolate the hardware-GL path; if persistent, switch the app to the **wgpu** renderer (the original stack plan) or make the renderer env-selectable. Awaiting which one yields a window before hardening.
+
+---
+
 ## 2026-05-26 — Roadmap intake: AI-agent-native surface + auto-generated walkthrough demos
 
 Two roadmap additions raised by the user, **logged not designed** (like the 2026-05-25 bundle-rename / TikZ-export intake). Neither is in the Phase 3 plan; each needs a dedicated design session and decomposition into slices when slotted (likely Phase 4+ / v1.x). Captured here with prior art, how they ride on what already exists, and the questions to settle.
