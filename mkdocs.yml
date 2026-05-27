@@ -8,6 +8,8 @@ copyright: Copyright &copy; Daniel Brenner. Dual-licensed under Apache 2.0 OR MI
 
 theme:
   name: material
+  logo: assets/logo.png
+  favicon: assets/favicon.png
   features:
     - navigation.instant
     - navigation.tracking

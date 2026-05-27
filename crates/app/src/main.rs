@@ -80,11 +80,18 @@ fn main() -> eframe::Result<()> {
     // auto-initialize (the script-engine's first run_script).
     pyo3::append_to_inittab!(sadda);
 
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1024.0, 720.0])
+        .with_min_inner_size([640.0, 480.0])
+        .with_title(APP_TITLE);
+    // Window / taskbar / dock icon, embedded at build time. Decoded at
+    // startup; if the bundled PNG ever fails to decode we just launch
+    // without an icon rather than refusing to start.
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")) {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1024.0, 720.0])
-            .with_min_inner_size([640.0, 480.0])
-            .with_title(APP_TITLE),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(

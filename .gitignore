@@ -39,3 +39,6 @@ Thumbs.db
 *.swo
 .idea/
 .vscode/
+
+# WSL/NTFS "mark of the web" alternate-data-stream artifacts
+*:Zone.Identifier
