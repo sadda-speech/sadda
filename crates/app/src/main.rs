@@ -35,7 +35,7 @@ use crate::sadda_app::{
     with_snapshot_active,
 };
 use crate::state::{
-    ColormapKind, EnvelopeCache, MeasureTrackConfig, PersistedState, RefdistOverlay,
+    ColormapKind, EnvelopeCache, MeasureTrackConfig, PersistedState, PlotPalette, RefdistOverlay,
     SpectrogramConfig, ThemePref, TimelineState, build_envelope_for_range, colormap_bake,
     format_reference_lane_caption, nearest_frame_index, power_to_db_normalized, truncate_label,
 };
@@ -2061,12 +2061,32 @@ fn draw_refdist_band(
     x0: f64,
     x1: f64,
     y_top: f64,
+    palette: PlotPalette,
 ) {
     let s = &band.summary;
-    let (base, tag) = match band.kind {
-        MeasureKind::ObservedDistribution => (egui::Color32::from_rgb(90, 140, 210), "observed"),
-        MeasureKind::SummaryNormativeRange => (egui::Color32::from_rgb(70, 165, 95), "norm"),
-        MeasureKind::TargetZone => (egui::Color32::from_rgb(230, 160, 40), "TARGET"),
+    // Observed / normative / target bands can share a lane, so their
+    // colours are a discrimination case → Okabe–Ito under the CVD palette
+    // (blue / bluish-green / vermillion). The "TARGET" tag and the dashed
+    // border carry the meaning redundantly, never colour alone.
+    let (base, tag) = match (palette, band.kind) {
+        (PlotPalette::Default, MeasureKind::ObservedDistribution) => {
+            (egui::Color32::from_rgb(90, 140, 210), "observed")
+        }
+        (PlotPalette::Default, MeasureKind::SummaryNormativeRange) => {
+            (egui::Color32::from_rgb(70, 165, 95), "norm")
+        }
+        (PlotPalette::Default, MeasureKind::TargetZone) => {
+            (egui::Color32::from_rgb(230, 160, 40), "TARGET")
+        }
+        (PlotPalette::OkabeIto, MeasureKind::ObservedDistribution) => {
+            (egui::Color32::from_rgb(0, 114, 178), "observed")
+        }
+        (PlotPalette::OkabeIto, MeasureKind::SummaryNormativeRange) => {
+            (egui::Color32::from_rgb(0, 158, 115), "norm")
+        }
+        (PlotPalette::OkabeIto, MeasureKind::TargetZone) => {
+            (egui::Color32::from_rgb(213, 94, 0), "TARGET")
+        }
     };
     let alpha = |a: u8| egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), a);
 
@@ -2246,17 +2266,31 @@ fn draw_cursor_line(plot_ui: &mut egui_plot::PlotUi<'_>, cursor: f64, y_min: f64
     );
 }
 
-/// D10: per-formant dot colour (F1, F2, F3, …). Cycles through a small
-/// warm-leaning palette; wraps for formant slots beyond the palette.
-fn formant_color(slot: usize) -> egui::Color32 {
-    const PALETTE: [egui::Color32; 5] = [
+/// D10: per-formant dot colour (F1, F2, F3, …). The formants share one
+/// lane, so this is the main place colour has to be *discriminated* —
+/// hence the colourblind-safe alternate. Wraps for slots beyond the set.
+fn formant_color(palette: PlotPalette, slot: usize) -> egui::Color32 {
+    const DEFAULT: [egui::Color32; 5] = [
         egui::Color32::from_rgb(220, 60, 60),  // F1 red
         egui::Color32::from_rgb(230, 140, 40), // F2 orange
         egui::Color32::from_rgb(200, 80, 170), // F3 magenta
         egui::Color32::from_rgb(120, 90, 200), // F4 violet
         egui::Color32::from_rgb(90, 160, 90),  // F5 green
     ];
-    PALETTE[slot % PALETTE.len()]
+    // Okabe–Ito qualitative palette, ordered for maximum separation:
+    // vermillion, bluish-green, reddish-purple, sky-blue, orange.
+    const OKABE_ITO: [egui::Color32; 5] = [
+        egui::Color32::from_rgb(213, 94, 0),
+        egui::Color32::from_rgb(0, 158, 115),
+        egui::Color32::from_rgb(204, 121, 167),
+        egui::Color32::from_rgb(86, 180, 233),
+        egui::Color32::from_rgb(230, 159, 0),
+    ];
+    let set = match palette {
+        PlotPalette::Default => DEFAULT,
+        PlotPalette::OkabeIto => OKABE_ITO,
+    };
+    set[slot % set.len()]
 }
 
 /// D10: shared scaffolding for a measure-track lane. Owns the plot
@@ -2832,6 +2866,11 @@ impl eframe::App for SaddaApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.apply_theme(ui.ctx());
+        // Accessibility: apply the persisted UI zoom factor. Idempotent
+        // and cheap — egui only relays out when the value actually
+        // changes — so setting it every frame keeps it in force without
+        // tracking dirtiness ourselves.
+        ui.ctx().set_zoom_factor(self.persisted.ui_scale);
 
         // Drive the playback-cursor advance before any pane
         // renders, so they all see the same `timeline.cursor` this
@@ -3194,6 +3233,30 @@ impl SaddaApp {
             ui.radio_value(&mut self.persisted.theme, ThemePref::System, "System");
             ui.radio_value(&mut self.persisted.theme, ThemePref::Light, "Light");
             ui.radio_value(&mut self.persisted.theme, ThemePref::Dark, "Dark");
+            ui.separator();
+            // Accessibility: plot colour scheme + UI zoom, both persisted.
+            // The palette only recolours the cases where colour has to be
+            // told apart (overlaid formants, coexisting reference bands);
+            // the spectrogram has its own Cividis option in its toolbar.
+            ui.label("Plot palette");
+            ui.radio_value(
+                &mut self.persisted.palette,
+                PlotPalette::Default,
+                PlotPalette::Default.label(),
+            );
+            ui.radio_value(
+                &mut self.persisted.palette,
+                PlotPalette::OkabeIto,
+                PlotPalette::OkabeIto.label(),
+            );
+            ui.horizontal(|ui| {
+                ui.label("UI scale");
+                ui.add(
+                    egui::Slider::new(&mut self.persisted.ui_scale, 0.8..=2.0)
+                        .step_by(0.1)
+                        .suffix("×"),
+                );
+            });
             ui.separator();
             // D10: measure-track lane visibility. Each toggle persists
             // across launches; enabling a lane triggers the analysis
@@ -3647,6 +3710,7 @@ impl SaddaApp {
                     for kind in [
                         ColormapKind::Viridis,
                         ColormapKind::Magma,
+                        ColormapKind::Cividis,
                         ColormapKind::Greyscale,
                     ] {
                         if ui.selectable_value(&mut cmap, kind, kind.label()).clicked() {
@@ -3681,6 +3745,7 @@ impl SaddaApp {
         let frames = &tc.f0;
         let threshold = cfg.f0_voicing_threshold;
         let band = self.overlays.f0.as_ref().and_then(|(_, b)| b.as_ref());
+        let palette = self.persisted.palette;
         let x0 = self.timeline.view_start;
         let x1 = self.timeline.view_end;
         let y_top = cfg.f0_max_hz as f64;
@@ -3693,7 +3758,7 @@ impl SaddaApp {
             |plot_ui| {
                 // Band first, behind the contour.
                 if let Some(band) = band {
-                    draw_refdist_band(plot_ui, band, x0, x1, y_top);
+                    draw_refdist_band(plot_ui, band, x0, x1, y_top, palette);
                 }
                 let pts: Vec<[f64; 2]> = frames
                     .iter()
@@ -3724,6 +3789,7 @@ impl SaddaApp {
         };
         let frames = &tc.formants;
         let n = cfg.formant_count;
+        let palette = self.persisted.palette;
         measure_lane(
             ui,
             "formant_lane_plot",
@@ -3744,7 +3810,7 @@ impl SaddaApp {
                         plot_ui.points(
                             Points::new(format!("F{}", slot + 1), PlotPoints::from(pts))
                                 .radius(1.5)
-                                .color(formant_color(slot)),
+                                .color(formant_color(palette, slot)),
                         );
                     }
                 }
@@ -3768,6 +3834,7 @@ impl SaddaApp {
             .intensity
             .as_ref()
             .and_then(|(_, b)| b.as_ref());
+        let palette = self.persisted.palette;
         let x0 = self.timeline.view_start;
         let x1 = self.timeline.view_end;
         measure_lane(
@@ -3778,7 +3845,7 @@ impl SaddaApp {
             "intensity (dB)",
             |plot_ui| {
                 if let Some(band) = band {
-                    draw_refdist_band(plot_ui, band, x0, x1, 0.0);
+                    draw_refdist_band(plot_ui, band, x0, x1, 0.0, palette);
                 }
                 let pts: Vec<[f64; 2]> = frames
                     .iter()
@@ -4756,5 +4823,38 @@ impl SaddaApp {
         if let Some(p) = to_remove {
             self.persisted.remove_recent(&p);
         }
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::{PlotPalette, formant_color};
+
+    #[test]
+    fn formant_palette_differs_by_scheme_and_is_internally_distinct() {
+        // Switching schemes must actually change the colours — a no-op
+        // accessibility toggle is worse than none.
+        assert_ne!(
+            formant_color(PlotPalette::Default, 0),
+            formant_color(PlotPalette::OkabeIto, 0),
+        );
+        // Within each scheme the first five formant slots are all
+        // distinct, so F1..F5 are separable by colour.
+        for palette in [PlotPalette::Default, PlotPalette::OkabeIto] {
+            let colours: Vec<_> = (0..5).map(|s| formant_color(palette, s)).collect();
+            for i in 0..colours.len() {
+                for j in (i + 1)..colours.len() {
+                    assert_ne!(
+                        colours[i], colours[j],
+                        "slots {i}/{j} collide in {palette:?}"
+                    );
+                }
+            }
+        }
+        // Slots past the set wrap back to the start.
+        assert_eq!(
+            formant_color(PlotPalette::OkabeIto, 0),
+            formant_color(PlotPalette::OkabeIto, 5),
+        );
     }
 }
