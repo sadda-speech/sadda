@@ -44,7 +44,10 @@ pub use live::{
 #[cfg(feature = "ml")]
 pub use ml::{SpeechSegment, VadFrame, speech_segments, vad};
 #[cfg(feature = "ml")]
-pub use models::{Model, ModelManifest, ModelStore, load_model, vad_bundled};
+pub use models::{
+    Model, ModelManifest, ModelRegistryEntry, ModelRegistryIndex, ModelStore, load_model,
+    parse_model_index, vad_bundled,
+};
 pub use pitch::{PitchConfig, PitchFrame, autocorrelation};
 pub use refdist::{
     Citation as RefdistCitation, Histogram, Measure, MeasureKind, Population, Privacy, QuerySpec,

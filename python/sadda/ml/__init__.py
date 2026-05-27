@@ -35,6 +35,8 @@ from sadda._stability import provisional
 
 __all__ = [
     "Model",
+    "get_model",
+    "install_model",
     "load_model",
     "speech_segments",
     "vad",
@@ -56,6 +58,21 @@ def load_model(id):  # noqa: A002
     ``.version`` / ``.kind`` / ``.weights_checksum`` metadata.
     """
     return _native.ml.load_model(id)
+
+
+@provisional
+def install_model(src_dir, *, root=None):
+    """Install a model directory (a ``model.toml`` + its files) into the
+    store by copying it in — how the bundled set seeds the cache and where
+    a fetched model lands. Returns the installed :class:`Model`."""
+    return _native.ml.install_model(src_dir, root=root)
+
+
+@provisional
+def get_model(id, version, *, root=None):  # noqa: A002
+    """The model with this ``id`` + ``version`` in the store (the per-user
+    cache by default, or an explicit ``root``), or ``None``."""
+    return _native.ml.get_model(id, version, root=root)
 
 
 @provisional

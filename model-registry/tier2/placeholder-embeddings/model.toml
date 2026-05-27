@@ -1,0 +1,29 @@
+id = "sadda/placeholder-embeddings"
+version = "0.1.0"
+title = "PLACEHOLDER speech embedding model (synthetic entry)"
+upstream_source = "https://example.invalid/placeholder-embeddings"
+license = "Apache-2.0"
+
+[model]
+kind = "embedding"
+format = "onnx"
+url = "https://example.invalid/placeholder-embeddings/model.onnx"
+file_checksum = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+[input]
+modality = "audio"
+sample_rate_hz = 16000
+channels = 1
+
+[output]
+tier_kind = "continuous_vector"
+channels = 768
+sample_rate_hz = 50
+
+[compute]
+cpu_min_ram_mb = 1024
+gpu = "optional"
+
+[citation]
+authors = ["sadda placeholder generator"]
+year = 2026

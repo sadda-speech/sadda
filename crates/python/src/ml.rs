@@ -126,3 +126,36 @@ pub(crate) fn load_model(id: &str) -> PyResult<PyModel> {
         inner: sadda_engine::load_model(id).map_err(engine_err_to_py)?,
     })
 }
+
+fn store_for(root: Option<String>) -> PyResult<sadda_engine::ModelStore> {
+    match root {
+        Some(r) => Ok(sadda_engine::ModelStore::new(r)),
+        None => sadda_engine::ModelStore::user_default().map_err(engine_err_to_py),
+    }
+}
+
+/// Installs a model directory (a `model.toml` + its files) into the store
+/// by copying it in — how the bundled set seeds the cache and where a
+/// fetched model lands (E12). Returns the installed [`PyModel`].
+#[pyfunction]
+#[pyo3(signature = (src_dir, *, root=None))]
+pub(crate) fn install_model(src_dir: &str, root: Option<String>) -> PyResult<PyModel> {
+    let inner = store_for(root)?
+        .install_from_dir(src_dir)
+        .map_err(engine_err_to_py)?;
+    Ok(PyModel { inner })
+}
+
+/// The model with this `id` + `version` in the store (the per-user cache
+/// by default, or an explicit `root`), or `None`.
+#[pyfunction]
+#[pyo3(signature = (id, version, *, root=None))]
+pub(crate) fn get_model(
+    id: &str,
+    version: &str,
+    root: Option<String>,
+) -> PyResult<Option<PyModel>> {
+    Ok(store_for(root)?
+        .get(id, version)
+        .map(|inner| PyModel { inner }))
+}

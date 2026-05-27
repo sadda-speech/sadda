@@ -51,6 +51,29 @@ Both are roadmap intake only. The immediate path is unchanged: finish **E11** (M
 
 ---
 
+## 2026-05-27 — Model registry: repo scaffold + index + CI gate (E11, part 3b)
+
+The C8 analogue: stands up the model registry as a separate-repo-shaped artifact, mirroring `refdist-registry/`. Completes E11; the network half (fetch + on-demand models + embeddings) is E12.
+
+### What landed
+
+- **`model-registry/`** (in-repo, designed to split out to `sadda-speech/model-registry`): `tier2/` (curated) + `tier3/` (community); `README.md` + `SCHEMA.md` (the `model.toml` field reference, kept in sync with `engine::models`); `validate.py` (the CI gate, self-contained stdlib `tomllib` — no polars, no sadda wheel); `build_index.py` (emits `index.json` in the `ModelRegistryIndex` shape); `make_placeholders.py`; `.github/workflows/registry-ci.yml`.
+- **Weights live elsewhere.** Unlike refdist (data inline), model entries are **manifest-only** — `model.toml` + `LICENSE`, no weights. The manifest declares a `url` + `sha256` and the engine fetches/verifies on demand (E12). Only the tier-1 bundled set ships weights inline (`models-bundled/silero-vad/`). `validate.py` enforces this: a local `file` must exist, *or* a `url` + `file_checksum` must be declared.
+- **Validation is shallower than refdist's, by design** (per the 2026-05-20 entry): manifest fields, known `model.kind` + `format` (tier 2 prefers ONNX), license + LICENSE file, weights-resolvable, `sha256:<64hex>` checksum shape, known `output.tier_kind` / `compute.gpu` — but it can't validate model *accuracy*; curated trust leans on editorial review.
+- **Synthetic placeholder set** (`make_placeholders.py`): `tier2/placeholder-embeddings` (Apache-2.0, `continuous_vector` output) + `tier3/placeholder-asr` (MIT), both url-based with `example.invalid` placeholders — exercising the pipeline until real curated models (wav2vec2-base, whisper-tiny/base) land with E12.
+- **Engine**: `ModelRegistryIndex` / `ModelRegistryEntry` + `parse_model_index()` (parallel to refdist's), so the engine can read a hosted registry's index.
+- **Python**: `sadda.ml.install_model(src_dir, root=…)` + `sadda.ml.get_model(id, version, root=…)` (PROVISIONAL) — install a model dir into the store and resolve it back, mirroring `sadda.refdist.install`/`get`.
+
+### Validation
+
+Engine: 11 `models` units (added `parses_registry_index`). Python: `test_models_registry.py` runs `validate.py` (pass on the placeholder set **and** the file-based bundled set; rejects url-without-checksum, missing LICENSE, unknown kind), `build_index.py` (entries + tier/kind/format/license carried through — the engine-schema contract checked from Python), and the bundled-model install→`get_model` round-trip. Full CI gate sequence green locally on 1.95 (fmt, clippy `--workspace --all-targets -D warnings`, build, `cargo test --workspace`, stub unchanged, pytest 11 pass + 3 ORT-skip).
+
+### E11 complete — what's deferred to E12
+
+`hf://` passthrough + HTTP weight download (+ checksum verify) + the wav2vec2/Whisper curated starter set + inference results as embedding tiers (`continuous_vector`). Also: ProcessingRun(ml_model) recording at project-aware call sites; the architecture-consolidation reassessment (parallel `models` vs shared core with refdist) once both registries are concrete; ORT-sidecar packaging for the 0.3.2 binaries.
+
+---
+
 ## 2026-05-27 — Model registry: consume side + load_model/Model (E11, part 3a)
 
 Implements the design entry's part 3a (the C7 analogue): the model-registry **consumption** side, offline-first, no network.
