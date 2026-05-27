@@ -6,6 +6,51 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-26 — Roadmap intake: AI-agent-native surface + auto-generated walkthrough demos
+
+Two roadmap additions raised by the user, **logged not designed** (like the 2026-05-25 bundle-rename / TikZ-export intake). Neither is in the Phase 3 plan; each needs a dedicated design session and decomposition into slices when slotted (likely Phase 4+ / v1.x). Captured here with prior art, how they ride on what already exists, and the questions to settle.
+
+### 1. AI-agent-native infrastructure
+
+**Thesis.** As AI agents become routine collaborators, sadda should be a tool an agent can drive *naturally* for the speech-science work we already support — acoustic measurement, corpus-scale analysis, statistical modelling, reports/figures. This is squarely the group-2 (speech-AI-engineer) audience from the 2026-05-16 survey, and an extension of the "scriptable like Parselmouth, ML-native" thesis. The user is themselves this audience.
+
+**Most of the substrate already exists** — the gap is an *agent-shaped* surface over it:
+- Python API (`sadda.*`, Polars-native, typed units, stability tiers, `.pyi` stubs) — the natural agent substrate.
+- Embedded scripting (E8) + `sadda.app` command registration + palette (E9).
+- Recipe record/replay (F1) — reproducible pipelines.
+- Provenance + citation export (A1) — auditable, reproducible analyses (critical for agent-generated work).
+- Corpus model + dense/sparse tiers + refdist — the data substrate for batch work.
+
+**Candidate infra to think through (the user's list, organised):**
+- **MCP server** (Model Context Protocol) — the modern "tool use" infra: expose sadda capabilities (open/scan corpus, measure features, query refdist, run a model, generate a report/figure) as MCP tools so any MCP-capable agent can drive it. Probably the centrepiece.
+- **A supported `SKILL.md`** (Claude-skill format) — teaches an agent the common workflows ("measure jitter/shimmer/CPPS over this corpus, compare to a normative refdist, write a report"). Explicitly requested.
+- **High-level task API + structured outputs** — batch acoustic measurement over a corpus → tidy DataFrame; one-call "measure set X over corpus Y"; agent-legible errors that say what to do next. Builds on the existing Polars/typed-unit returns.
+- **Statistical modelling of speech features** — integration points (Polars → statsmodels/scikit/R) or a thin built-in modelling layer; overlaps the AI-engineer audience's existing tooling.
+- **Reports + figure generation** — programmatic, headless report assembly (markdown/HTML/PDF) + figures; ties directly to the deferred **TikZ/specTeX figure-export** item (a scriptable figure IR serves both humans and agents).
+- **Headless / sandboxable operation** — agents use the engine/Python path, not the GUI; keep that path first-class and consider a CLI front.
+
+**Open questions for the design session:** MCP scope + transport + auth/sandboxing for agent-driven file/corpus ops; how much is genuinely new vs. polishing the Python API into task-level calls; report + figure IR (shared with the TikZ item); whether agents ever drive the GUI or strictly the headless API; safety posture for destructive corpus operations. Cross-cutting — not a single slice.
+
+### 2. Auto-generated walkthrough demos (instruction + testing)
+
+**Idea.** A full screen-capture walkthrough of every major module/feature, ideally **auto-generated from documentation/markup**, with **synthesized voiceover** — serving *both* onboarding/instruction *and* end-to-end UI testing.
+
+**Why it's two birds:** the GUI rendering currently has no automated coverage (flagged in the D10 entry — panes are validated by mirroring tested code, not by driving the UI). A scripted walkthrough that drives the app and captures frames is, with visual diffing, also a regression test of the whole UI.
+
+**Prior art / shape:**
+- **Praat's Demo Window** (already noted in the 2026-05-16 survey) — scripted GUI demonstrations; the closest domain analogue.
+- A declarative **tour spec** (ordered steps: open project → select bundle → show spectrogram → toggle f0 track → add a refdist overlay → …), each step carrying narration text. Co-locating the spec with the mkdocs feature pages keeps docs and demos in sync ("auto-generated from markup").
+- **GUI driving**: egui is immediate-mode, so this likely means a built-in *tour/demo runner* that scripts app state + injects events (the `sadda.app` scripting from E9 and the recipe replay from F1 are the closest existing levers), plus a screen recorder (ffmpeg) and **TTS** for the voiceover from the same narration text.
+- Terminal-side analogues (VHS / asciinema) for the Python/CLI surface.
+
+**Open questions:** tour-spec format + home (docs-embedded vs separate); the egui-driving mechanism (in-app demo runner vs external input injection); capture + assembly pipeline; TTS engine + voice licensing; degree of auto-generation vs hand-authoring; short per-feature clips for the docs site vs one long walkthrough. Likely a Phase 6/7 (polish + docs) investment, or an incremental tooling track once the GUI surface stabilises.
+
+### Status
+
+Both are roadmap intake only. The immediate path is unchanged: finish **E11** (ML inference) and the rest of Phase 3. Revisit each with its own design session when scheduled.
+
+---
+
 ## 2026-05-26 — ML inference: ort-bundling spike + first bundled model (E11, part 1)
 
 Opens cluster E (ML inference, 0.3.2). The plan mandated an **`ort`-bundling spike before E11**, because 0.3.2's headline risks are binary size and cross-platform ONNX Runtime linking. Ran the spike, settled the integration strategy, then landed the engine half of E11: a feature-gated ML path and the first bundled model (Silero VAD), end to end.
