@@ -70,6 +70,21 @@ pub struct PersistedState {
     /// users don't lose typed scripts.
     #[serde(default)]
     pub script_buffer: String,
+    /// Accessibility: colour scheme for the measure-track lanes and
+    /// reference overlays. See [`PlotPalette`].
+    #[serde(default)]
+    pub palette: PlotPalette,
+    /// Accessibility: UI zoom factor (egui `zoom_factor`) — scales all
+    /// text and widgets relative to the native pixel density. 1.0 =
+    /// native; the Appearance menu exposes ~0.8–2.0.
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f32,
+}
+
+/// Default UI zoom factor (native size). A free fn because `serde`'s
+/// `default` needs a path, and `f32::default()` would give `0.0`.
+fn default_ui_scale() -> f32 {
+    1.0
 }
 
 impl PersistedState {
@@ -313,6 +328,10 @@ pub enum ColormapKind {
     Viridis,
     /// Dark-mode-friendly perceptually-uniform alternate; black → purple → red → yellow.
     Magma,
+    /// Perceptually-uniform map optimised for colour-vision deficiency
+    /// (dark blue → grey → yellow). The accessibility pick — it stays
+    /// monotonic in luminance for all common forms of CVD.
+    Cividis,
     /// Classic black-and-white spectrogram; Praat refugees.
     Greyscale,
 }
@@ -323,7 +342,37 @@ impl ColormapKind {
         match self {
             ColormapKind::Viridis => "Viridis",
             ColormapKind::Magma => "Magma",
+            ColormapKind::Cividis => "Cividis (CVD-safe)",
             ColormapKind::Greyscale => "Greyscale",
+        }
+    }
+}
+
+/// Colour scheme for the measure-track lanes and reference overlays.
+/// `Default` keeps the original warm-leaning scheme; `OkabeIto` swaps in
+/// the Okabe–Ito colourblind-safe qualitative palette where colour
+/// actually has to be *discriminated* — the overlaid formants F1…Fn that
+/// share one lane, and the observed / normative / target reference bands
+/// that coexist on a lane. Single-series lanes (f0, intensity, VAD) are
+/// already unambiguous, so they're left alone. Lives in [`PersistedState`].
+///
+/// Okabe & Ito, "Color Universal Design" (2008);
+/// <https://jfly.uni-koeln.de/color/>.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum PlotPalette {
+    /// Original warm-leaning scheme.
+    #[default]
+    Default,
+    /// Okabe–Ito colourblind-safe qualitative palette.
+    OkabeIto,
+}
+
+impl PlotPalette {
+    /// Human-readable label for the Appearance menu.
+    pub fn label(self) -> &'static str {
+        match self {
+            PlotPalette::Default => "Default",
+            PlotPalette::OkabeIto => "Colourblind-safe (Okabe–Ito)",
         }
     }
 }
@@ -551,6 +600,10 @@ fn sample_colormap(kind: ColormapKind, t: f32) -> (u8, u8, u8) {
             let c = colorous::MAGMA.eval_continuous(t);
             (c.r, c.g, c.b)
         }
+        ColormapKind::Cividis => {
+            let c = colorous::CIVIDIS.eval_continuous(t);
+            (c.r, c.g, c.b)
+        }
         ColormapKind::Greyscale => {
             let v = (t * 255.0).round() as u8;
             (v, v, v)
@@ -619,6 +672,31 @@ mod spectrogram_tests {
         assert_eq!(rgba[0], 255, "image top row should be the high-freq cell");
         // Image row 1 (bottom) should reflect the low freq (0.0 → 0).
         assert_eq!(rgba[4], 0, "image bottom row should be the low-freq cell");
+    }
+
+    #[test]
+    fn cividis_colormap_is_distinct() {
+        // Endpoints differ, and Cividis differs from Viridis at the
+        // midpoint — guards the new match arm against accidentally
+        // aliasing another scheme.
+        assert_ne!(
+            sample_colormap(ColormapKind::Cividis, 0.0),
+            sample_colormap(ColormapKind::Cividis, 1.0),
+        );
+        assert_ne!(
+            sample_colormap(ColormapKind::Cividis, 0.5),
+            sample_colormap(ColormapKind::Viridis, 0.5),
+        );
+    }
+
+    #[test]
+    fn appearance_defaults_are_native_scale_and_default_palette() {
+        // A persisted state written before these fields existed must
+        // deserialise to native size + the default scheme, never f32's
+        // 0.0 (which would shrink the whole UI to nothing).
+        assert_eq!(default_ui_scale(), 1.0);
+        assert_eq!(PlotPalette::default(), PlotPalette::Default);
+        assert_eq!(ColormapKind::default(), ColormapKind::Viridis);
     }
 }
 
