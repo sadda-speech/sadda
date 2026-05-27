@@ -26,6 +26,8 @@ use sadda_engine::pitch::{PitchConfig, PitchFrame, PitchMethod, pitch};
 // D10 refdist overlays: resolve a distribution from the store and turn
 // it into a band the lane draws behind its contour.
 use sadda_engine::{Histogram, MeasureKind, RefDist, RefdistStore, Summary};
+// E11 VAD lane: the engine's `ml` feature is enabled for the app.
+use sadda_engine::{VadFrame, vad_bundled};
 
 use crate::playback::Playback;
 use crate::sadda_app::{
@@ -547,6 +549,12 @@ struct MeasureTrackCache {
     formants: Vec<FormantFrame>,
     /// Per-frame intensity (dB-FS).
     intensity: Vec<IntensityFrame>,
+    /// Per-window VAD speech probabilities (empty if the lane is hidden
+    /// or VAD failed — see `vad_error`).
+    vad: Vec<VadFrame>,
+    /// Set when the VAD lane is visible but inference failed (e.g. ONNX
+    /// Runtime not available); rendered as a hint in the lane.
+    vad_error: Option<String>,
 }
 
 /// D10: a resolved reference-distribution band, ready to draw on a lane.
@@ -1767,24 +1775,37 @@ fn build_spectrogram_texture(
 fn compute_measure_tracks(env: &EnvelopeCache, cfg: MeasureTrackConfig) -> MeasureTrackCache {
     let sr = env.sample_rate;
 
-    let f0 = if cfg.f0_visible {
-        // pitch() wants an owned Audio. Recompute is rare (bundle /
-        // config change only), so the one-off sample clone is fine.
-        let audio = sadda_engine::Audio {
-            samples: env.mono_samples.clone(),
-            sample_rate: sr,
-            channels: 1,
-        };
-        let pcfg = PitchConfig {
-            min_freq_hz: cfg.f0_min_hz,
-            max_freq_hz: cfg.f0_max_hz,
-            voicing_threshold: cfg.f0_voicing_threshold,
-            ..PitchConfig::default()
-        };
-        pitch(&audio, &pcfg, PitchMethod::WindowedAutocorrelation)
-    } else {
-        Vec::new()
-    };
+    // pitch() and the VAD model both want an owned Audio; build it once if
+    // either lane needs it. Recompute is rare (bundle / config change
+    // only), so the one-off sample clone is fine.
+    let audio = (cfg.f0_visible || cfg.vad_visible).then(|| sadda_engine::Audio {
+        samples: env.mono_samples.clone(),
+        sample_rate: sr,
+        channels: 1,
+    });
+
+    let mut f0 = Vec::new();
+    let mut vad = Vec::new();
+    let mut vad_error = None;
+    if let Some(audio) = &audio {
+        if cfg.f0_visible {
+            let pcfg = PitchConfig {
+                min_freq_hz: cfg.f0_min_hz,
+                max_freq_hz: cfg.f0_max_hz,
+                voicing_threshold: cfg.f0_voicing_threshold,
+                ..PitchConfig::default()
+            };
+            f0 = pitch(audio, &pcfg, PitchMethod::WindowedAutocorrelation);
+        }
+        if cfg.vad_visible {
+            // VAD needs ONNX Runtime at runtime; a missing/incompatible
+            // ORT surfaces as an error, shown as a hint in the lane.
+            match vad_bundled(audio) {
+                Ok(frames) => vad = frames,
+                Err(e) => vad_error = Some(e.to_string()),
+            }
+        }
+    }
 
     let formants = if cfg.formants_visible {
         let fcfg = FormantsConfig {
@@ -1810,6 +1831,8 @@ fn compute_measure_tracks(env: &EnvelopeCache, cfg: MeasureTrackConfig) -> Measu
         f0,
         formants,
         intensity: intensity_frames,
+        vad,
+        vad_error,
     }
 }
 
@@ -3143,6 +3166,7 @@ impl SaddaApp {
             ui.checkbox(&mut self.persisted.tracks.f0_visible, "f0");
             ui.checkbox(&mut self.persisted.tracks.formants_visible, "Formants");
             ui.checkbox(&mut self.persisted.tracks.intensity_visible, "Intensity");
+            ui.checkbox(&mut self.persisted.tracks.vad_visible, "VAD (speech)");
             // D10: reference-distribution overlay pickers, one per
             // band-capable lane. Each lists installed distributions whose
             // parameter matches the lane, narrowed by subgroup.
@@ -3328,6 +3352,15 @@ impl SaddaApp {
         self.rebuild_overlays_if_stale();
         if self.active_envelope.is_some() {
             let tracks = self.persisted.tracks;
+            // Registered first → bottommost lane (just above the tiers).
+            if tracks.vad_visible {
+                egui::Panel::bottom("vad_lane")
+                    .resizable(true)
+                    .default_size(MEASURE_LANE_HEIGHT)
+                    .min_size(48.0)
+                    .frame(egui::Frame::NONE)
+                    .show_inside(ui, |ui| self.vad_lane_pane(ui));
+            }
             if tracks.intensity_visible {
                 egui::Panel::bottom("intensity_lane")
                     .resizable(true)
@@ -3719,6 +3752,77 @@ impl SaddaApp {
                     plot_ui.line(
                         Line::new("intensity", PlotPoints::from(pts))
                             .color(egui::Color32::from_rgb(225, 170, 40)),
+                    );
+                }
+            },
+        );
+    }
+
+    /// E11: VAD (voice-activity) lane. Draws the per-window speech
+    /// probability (0–1) with a dashed threshold line; windows above the
+    /// threshold are shaded as speech. If VAD couldn't run (e.g. ONNX
+    /// Runtime not available) the lane shows the reason instead.
+    fn vad_lane_pane(&mut self, ui: &mut egui::Ui) {
+        let cfg = self.persisted.tracks;
+        let Some(tc) = self.active_tracks.as_ref() else {
+            ui.centered_and_justified(|ui| {
+                ui.label(egui::RichText::new("(computing VAD…)").weak());
+            });
+            return;
+        };
+        if let Some(err) = &tc.vad_error {
+            ui.centered_and_justified(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("VAD unavailable — {err}"))
+                        .weak()
+                        .small(),
+                );
+            });
+            return;
+        }
+        let frames = &tc.vad;
+        let threshold = cfg.vad_threshold as f64;
+        let x0 = self.timeline.view_start;
+        let x1 = self.timeline.view_end;
+        // Half a Silero window (~16 ms at 16 kHz) for shading extents.
+        let half = (512.0 / 16_000.0) / 2.0;
+        measure_lane(
+            ui,
+            "vad_lane_plot",
+            &mut self.timeline,
+            (0.0, 1.0),
+            "VAD (speech p)",
+            |plot_ui| {
+                // Shade windows above threshold as speech regions.
+                for f in frames.iter().filter(|f| f.speech_prob as f64 >= threshold) {
+                    let (lo, hi) = (f.time_seconds - half, f.time_seconds + half);
+                    plot_ui.polygon(
+                        Polygon::new(
+                            "",
+                            PlotPoints::from(vec![[lo, 0.0], [hi, 0.0], [hi, 1.0], [lo, 1.0]]),
+                        )
+                        .fill_color(egui::Color32::from_rgba_unmultiplied(90, 160, 90, 40))
+                        .stroke(egui::Stroke::NONE),
+                    );
+                }
+                // Threshold line.
+                plot_ui.line(
+                    Line::new(
+                        "threshold",
+                        PlotPoints::from(vec![[x0, threshold], [x1, threshold]]),
+                    )
+                    .color(egui::Color32::from_gray(140))
+                    .style(LineStyle::dashed_loose()),
+                );
+                // Speech-probability contour.
+                let pts: Vec<[f64; 2]> = frames
+                    .iter()
+                    .map(|f| [f.time_seconds, f.speech_prob as f64])
+                    .collect();
+                if pts.len() >= 2 {
+                    plot_ui.line(
+                        Line::new("speech_p", PlotPoints::from(pts))
+                            .color(egui::Color32::from_rgb(70, 165, 95)),
                     );
                 }
             },

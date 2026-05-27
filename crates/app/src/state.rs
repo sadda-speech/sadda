@@ -371,6 +371,10 @@ pub struct MeasureTrackConfig {
     pub formants_visible: bool,
     /// Whether the intensity lane is shown.
     pub intensity_visible: bool,
+    /// Whether the VAD (speech-activity) lane is shown. Requires ONNX
+    /// Runtime at runtime; the lane shows a hint if it isn't available.
+    #[serde(default)]
+    pub vad_visible: bool,
     /// f0 search floor (Hz). Doubles as the f0 lane's y-axis minimum.
     pub f0_min_hz: f32,
     /// f0 search ceiling (Hz). Doubles as the f0 lane's y-axis maximum.
@@ -386,13 +390,20 @@ pub struct MeasureTrackConfig {
     pub formant_max_hz: f32,
     /// Intensity lane y-axis floor (dB-FS). The ceiling is fixed at 0.
     pub intensity_floor_db: f32,
+    /// VAD speech-probability threshold, drawn as a line on the VAD lane.
+    #[serde(default = "default_vad_threshold")]
+    pub vad_threshold: f32,
+}
+
+fn default_vad_threshold() -> f32 {
+    0.5
 }
 
 impl MeasureTrackConfig {
     /// True when at least one lane is enabled — used to skip the
     /// analysis recompute entirely when every lane is hidden.
     pub fn any_visible(&self) -> bool {
-        self.f0_visible || self.formants_visible || self.intensity_visible
+        self.f0_visible || self.formants_visible || self.intensity_visible || self.vad_visible
     }
 }
 
@@ -437,12 +448,14 @@ impl Default for MeasureTrackConfig {
             f0_visible: true,
             formants_visible: false,
             intensity_visible: false,
+            vad_visible: false,
             f0_min_hz: 75.0,
             f0_max_hz: 500.0,
             f0_voicing_threshold: 0.45,
             formant_count: 5,
             formant_max_hz: 5500.0,
             intensity_floor_db: -80.0,
+            vad_threshold: 0.5,
         }
     }
 }
