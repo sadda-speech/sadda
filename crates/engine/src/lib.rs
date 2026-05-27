@@ -46,7 +46,7 @@ pub use ml::{SpeechSegment, VadFrame, speech_segments, vad};
 #[cfg(feature = "ml")]
 pub use models::{
     Model, ModelManifest, ModelRegistryEntry, ModelRegistryIndex, ModelStore, load_model,
-    parse_model_index, vad_bundled,
+    parse_model_index, vad_bundled, verify_checksum,
 };
 pub use pitch::{PitchConfig, PitchFrame, autocorrelation};
 pub use refdist::{

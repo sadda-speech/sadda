@@ -51,6 +51,29 @@ Both are roadmap intake only. The immediate path is unchanged: finish **E11** (M
 
 ---
 
+## 2026-05-27 — E12a: on-demand model download (`hf://` + checksum), behind the `download` feature
+
+Implements the spike's recommended path (maintainer-approved). The engine gains its first network capability — fetching model weights on demand — **strictly opt-in** (architectural principle #10): a default-OFF `download` cargo feature that no workspace member enables, so the base engine, the Python wheel, and the app stay network-free.
+
+### What landed (engine only)
+
+- **`download` feature** (`= ["ml", "dep:ureq"]`, default OFF). `ureq` 3 with `default-features = false, features = ["rustls"]` → rustls (ring) TLS, **no gzip/cookies, no async runtime**. Network-free builds are unchanged.
+- **`load_model("hf://<org>/<name>/<file>[@<rev>]")`** — with `download`, fetches the file into `~/.local/share/sadda/models/hf/<repo>/<rev>/<file>` (skipped if cached) and returns a runnable `Model`; without the feature, a clear "needs `download`" error (not a silent no-op). HF passthrough is **unverified/uncurated** (no manifest — the trust tier the 2026-05-20 entry calls out); auth via `HF_TOKEN`.
+- **`download_file`** streams to a `.part` temp then renames (no partial file ever looks cached); raises a clean error on HTTP failure. **`verify_checksum(path, "sha256:…")`** (pub, `sha2`) is the trust check for curated/fetched weights — the HF silero copy's sha256 ≠ the bundled pip copy's, so checksums are pinned **per source**.
+- No new Python/GUI surface: the wheel doesn't enable `download` (per the approved network-free-wheel decision), so `sadda.ml.load_model("hf://…")` returns the clean "needs download" error there. A `download`-enabled wheel/extra is a later packaging decision.
+
+### Validation
+
+Engine: non-network units (`verify_checksum` match/mismatch, `parse_hf_id`, `hf_resolve_url`, and the no-feature error path) run in the default + `--features download` builds. A real end-to-end test (gated behind `SADDA_NET_TESTS`) downloaded the public HF silero-vad ONNX and ran VAD on it — **`hf://` → fetch → `Model.vad` in 1.2 s**. CI gains a `cargo clippy + test -p sadda-engine --features download` step (network/ORT tests skip there). Full local gate sequence green on 1.95 (fmt, clippy default + `--features download`, build, `cargo test --workspace`, pytest 11 pass + 3 ORT-skip).
+
+### Deferred to E12b / later
+
+- **Embedding tiers** — inference output (wav2vec2/HuBERT) → B3 `continuous_vector` dense tiers (local; the next E12 slice).
+- **Curated url-fetch** — `sadda/…` entries whose `model.toml` declares `url` + `file_checksum` (vs. the placeholders' `example.invalid`): download into the store dir and **verify against the manifest checksum** (the `verify_checksum` path, exercised once real curated entries exist).
+- A `download`-enabled wheel/extra; `ProcessingRun(ml_model)` recording at project-aware call sites; HF auth-UX beyond `HF_TOKEN`; the parallel-vs-shared registry reassessment.
+
+---
+
 ## 2026-05-27 — E12 network spike: ureq3 + checksum + HF passthrough (findings + decisions)
 
 E12 introduces the **engine's first network capability** (HTTP weight download + `hf://` passthrough). That bumps architectural principle #10 (2026-05-16: *"local-first; explicit opt-in for any network feature"*), so — like the `ort` spike — this de-risks the approach before committing a dependency, and **pauses for the maintainer's nod** rather than auto-implementing. Throwaway, `/tmp/net-spike`, nothing committed to the engine.

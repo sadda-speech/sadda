@@ -45,6 +45,15 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+      # The `download` feature (E12, network model fetch) isn't enabled by
+      # any workspace member, so the default --workspace passes above don't
+      # compile it. Check + test it explicitly. Network/ORT-gated tests
+      # skip here (no SADDA_NET_TESTS, no ORT_DYLIB_PATH).
+      - name: cargo clippy + test (download feature)
+        run: |
+          cargo clippy -p sadda-engine --features download --all-targets -- -D warnings
+          cargo test -p sadda-engine --features download
+
       - name: Install uv
         uses: astral-sh/setup-uv@v6
 
