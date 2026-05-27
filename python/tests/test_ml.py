@@ -92,6 +92,27 @@ def test_load_model_is_provisional() -> None:
     assert get_stability(sadda.ml.load_model) == "provisional"
 
 
+def test_model_embeddings_from_fixture(tmp_path) -> None:
+    # Load a synthetic embedding fixture (waveform-input) via local:// and
+    # run it; skips cleanly without ORT.
+    from pathlib import Path
+
+    fixture = (
+        Path(__file__).resolve().parents[2]
+        / "crates/engine/tests/ml_fixtures/waveform-embed"
+    )
+    wav = tmp_path / "silence.wav"
+    _silence_wav(wav)
+    audio = sadda.load_wav(str(wav))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = sadda.ml.load_model(f"local://{fixture}")
+        emb = _ort_or_skip(lambda: m.embeddings(audio))
+    assert emb.ndim == 2
+    assert emb.shape[1] == 8  # fixture DIMS
+    assert emb.shape[0] > 0
+
+
 def test_model_vad_matches_free_vad(tmp_path) -> None:
     wav = tmp_path / "silence.wav"
     _silence_wav(wav)

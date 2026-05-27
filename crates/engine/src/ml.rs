@@ -53,7 +53,7 @@ fn default_ort_name() -> &'static str {
 /// optional dependency). Resolves the same path `ort` will: the
 /// `ORT_DYLIB_PATH` env var, else the platform default name on the
 /// system search path.
-fn ensure_ort_available() -> Result<()> {
+pub(crate) fn ensure_ort_available() -> Result<()> {
     let path = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| default_ort_name().to_string());
     // SAFETY: opening a shared library for a load check; the handle is
     // dropped immediately (dlopen is ref-counted, so `ort`'s later load

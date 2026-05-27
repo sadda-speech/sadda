@@ -91,12 +91,27 @@ pub struct ModelInput {
     /// `audio` | `video` | `both`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modality: Option<String>,
+    /// Input representation the embedding harness must produce:
+    /// `waveform` (raw mono `[1, N]`; wav2vec2/HuBERT) or `log_mel` (a
+    /// log-mel spectrogram `[1, n_mels, T]`; the Whisper-encoder contract).
+    /// Defaults to `waveform` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub representation: Option<String>,
     /// Expected sample rate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample_rate_hz: Option<u32>,
     /// Expected channel count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channels: Option<u16>,
+    /// `log_mel`: number of mel bands (e.g. 80).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_mels: Option<usize>,
+    /// `log_mel`: FFT window size in samples (e.g. 400).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_fft: Option<usize>,
+    /// `log_mel`: hop length in samples (e.g. 160).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hop_length: Option<usize>,
 }
 
 /// `[output]` block — ties inference results to a tier kind.
@@ -207,6 +222,105 @@ impl Model {
             .file_path()
             .ok_or_else(|| model_err(format!("model {:?} has no local file", self.manifest.id)))?;
         crate::ml::vad(audio, &path)
+    }
+
+    /// Runs this model as an **embedding extractor** over `audio`,
+    /// returning a `(frames × dims)` matrix. The audio is mono-mixed,
+    /// resampled to the manifest's `input.sample_rate_hz`, and shaped per
+    /// `input.representation`: `waveform` → a `[1, N]` tensor
+    /// (wav2vec2/HuBERT), or `log_mel` → a `[1, n_mels, T]` log-mel
+    /// spectrogram (the Whisper-encoder contract; mel params from the
+    /// manifest). The model's actual input/output tensor names are read
+    /// from the session, so any embedding ONNX works without code changes;
+    /// the output is taken as `[batch, frames, dims]`. Errors if ONNX
+    /// Runtime is unavailable or the audio is too short.
+    pub fn embeddings(&self, audio: &Audio) -> Result<ndarray::Array2<f64>> {
+        use ort::value::Tensor;
+        let ort_err = |e: ort::Error| model_err(e.to_string());
+
+        let path = self
+            .file_path()
+            .ok_or_else(|| model_err(format!("model {:?} has no local file", self.manifest.id)))?;
+        crate::ml::ensure_ort_available()?;
+        let mut session = ort::session::Session::builder()
+            .map_err(ort_err)?
+            .commit_from_file(&path)
+            .map_err(ort_err)?;
+
+        let sr = self.manifest.input.sample_rate_hz.unwrap_or(16_000);
+        let mono: Vec<f32> = audio.mono_samples().collect();
+        let samples = crate::dsp::resample_to_hz(&mono, audio.sample_rate, sr);
+
+        // The model's own tensor names — so the harness is model-agnostic.
+        let input_name = session
+            .inputs
+            .first()
+            .map(|i| i.name.clone())
+            .ok_or_else(|| model_err("model declares no inputs"))?;
+        let output_name = session
+            .outputs
+            .first()
+            .map(|o| o.name.clone())
+            .ok_or_else(|| model_err("model declares no outputs"))?;
+
+        let rep = self
+            .manifest
+            .input
+            .representation
+            .as_deref()
+            .unwrap_or("waveform");
+        let input = match rep {
+            "waveform" => {
+                Tensor::from_array(([1usize, samples.len()], samples)).map_err(ort_err)?
+            }
+            "log_mel" => {
+                let n_mels = self.manifest.input.n_mels.unwrap_or(80);
+                let n_fft = self.manifest.input.n_fft.unwrap_or(400);
+                let hop = self.manifest.input.hop_length.unwrap_or(160);
+                let lm =
+                    crate::dsp::log_mel(&samples, sr, n_fft, hop, n_mels, 0.0, sr as f32 / 2.0);
+                let t = lm.nrows();
+                if t == 0 {
+                    return Err(model_err("audio shorter than one log-mel window"));
+                }
+                // [n_mels, T], row-major.
+                let mut flat = Vec::with_capacity(n_mels * t);
+                for m in 0..n_mels {
+                    for fr in 0..t {
+                        flat.push(lm[[fr, m]]);
+                    }
+                }
+                Tensor::from_array(([1usize, n_mels, t], flat)).map_err(ort_err)?
+            }
+            other => {
+                return Err(model_err(format!(
+                    "unsupported input.representation {other:?} (expected waveform | log_mel)"
+                )));
+            }
+        };
+
+        let outputs = session
+            .run(ort::inputs![input_name.as_str() => input])
+            .map_err(ort_err)?;
+        let (shape, data) = outputs[output_name.as_str()]
+            .try_extract_tensor::<f32>()
+            .map_err(ort_err)?;
+        // Output is [batch, frames, dims]; dims is the last axis.
+        let dims = shape
+            .last()
+            .copied()
+            .filter(|&d| d > 0)
+            .ok_or_else(|| model_err("embedding output has no dims"))? as usize;
+        if data.is_empty() || data.len() % dims != 0 {
+            return Err(model_err(format!(
+                "embedding output length {} not a multiple of dims {dims}",
+                data.len()
+            )));
+        }
+        let frames = data.len() / dims;
+        Ok(ndarray::Array2::from_shape_fn((frames, dims), |(t, d)| {
+            data[t * dims + d] as f64
+        }))
     }
 }
 
@@ -786,6 +900,60 @@ tier_kind = "interval"
         };
         let e = m.vad(&audio).unwrap_err();
         assert!(format!("{e}").contains("not vad"));
+    }
+
+    fn fixture_model(name: &str) -> Model {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/ml_fixtures")
+            .join(name);
+        Model::from_dir(dir).expect("fixture model dir")
+    }
+
+    fn one_second_noise() -> Audio {
+        let mut seed = 0x2545F4914F6CDD1Du64;
+        let samples = (0..16_000)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                ((seed >> 40) as f32 / (1u64 << 24) as f32) - 0.5
+            })
+            .collect();
+        Audio {
+            samples,
+            sample_rate: 16_000,
+            channels: 1,
+        }
+    }
+
+    // The embedding harness, validated with synthetic ONNX fixtures — one
+    // per input representation. ORT-gated: skips cleanly without ORT.
+    #[test]
+    fn embeddings_waveform_fixture() {
+        let m = fixture_model("waveform-embed");
+        assert_eq!(m.manifest.input.representation.as_deref(), Some("waveform"));
+        match m.embeddings(&one_second_noise()) {
+            Ok(emb) => {
+                assert_eq!(emb.ncols(), 8, "DIMS");
+                assert!(emb.nrows() > 0, "frames");
+            }
+            Err(EngineError::Ml(msg)) => eprintln!("skipped (ORT unavailable): {msg}"),
+            Err(e) => panic!("unexpected: {e}"),
+        }
+    }
+
+    #[test]
+    fn embeddings_logmel_fixture() {
+        let m = fixture_model("logmel-embed");
+        assert_eq!(m.manifest.input.representation.as_deref(), Some("log_mel"));
+        match m.embeddings(&one_second_noise()) {
+            Ok(emb) => {
+                assert_eq!(emb.ncols(), 8, "DIMS");
+                assert!(emb.nrows() > 0, "frames");
+            }
+            Err(EngineError::Ml(msg)) => eprintln!("skipped (ORT unavailable): {msg}"),
+            Err(e) => panic!("unexpected: {e}"),
+        }
     }
 
     // End-to-end inference through the bundled model. Requires a runtime
