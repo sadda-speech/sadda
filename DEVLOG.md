@@ -51,6 +51,38 @@ Both are roadmap intake only. The immediate path is unchanged: finish **E11** (M
 
 ---
 
+## 2026-05-27 — E12 network spike: ureq3 + checksum + HF passthrough (findings + decisions)
+
+E12 introduces the **engine's first network capability** (HTTP weight download + `hf://` passthrough). That bumps architectural principle #10 (2026-05-16: *"local-first; explicit opt-in for any network feature"*), so — like the `ort` spike — this de-risks the approach before committing a dependency, and **pauses for the maintainer's nod** rather than auto-implementing. Throwaway, `/tmp/net-spike`, nothing committed to the engine.
+
+### Findings
+
+- **`ureq` 3.3 (rustls) downloads cleanly, fully sync — no async runtime.** Fetched a public HF model (silero-vad ONNX, 2.24 MB) over HTTPS in ~0.9 s, streamed to disk, sha256-verified. `ureq::get(url).header("Authorization", …).call()?` → `body_mut().with_config().limit(N).reader()` → `io::copy`. A 404 / bad URL returns a clean `Err` (no panic).
+- **No `hf-hub` needed.** `hf://<repo>` resolves to a stable URL we construct ourselves — `https://huggingface.co/{repo}/resolve/{rev}/{file}` — keeping one HTTP client and our own cache layout. (`hf-hub` 0.4 also pulls an *older* `ureq` 2, so using it alongside `ureq` 3 means two HTTP stacks; rejected for E12. Revisit only if we want its caching/auth conveniences later.)
+- **Auth** is a `Authorization: Bearer $HF_TOKEN` header — trivial; public models need none.
+- **Checksum** verify is trivial with `sha2` (already an engine dependency). The HF silero copy's sha256 (`a4a068cd…`) ≠ the bundled pip copy's (`1a153a22…`), confirming checksums must be pinned **per source**, not assumed identical across mirrors.
+- **Cost** (the headline concern): `ureq` 3 + `rustls` + `ring` + `sha2` ≈ 48 transitive crates, ~+2 MB to the (stripped) binary — almost entirely TLS (`rustls`/`ring`). **No tokio/reqwest/hyper.** `ring` is the heaviest compile.
+
+### Recommended approach (for confirmation)
+
+1. **Client: `ureq` 3** (sync, rustls, no async — matches the engine's sync nature). Not `reqwest` (async + tokio + heavier).
+2. **TLS: `rustls`** (no system OpenSSL dependency → portable cross-platform builds), not native-tls.
+3. **HF: raw HTTP to the self-constructed resolve URL**, auth via `HF_TOKEN` Bearer header. No `hf-hub`.
+4. **Feature-gate the network behind a default-OFF cargo feature** (e.g. `download`, or fold into the on-demand-`ml` path) so the base engine + wheel stay network-free — the ~2 MB + 48 crates land only for download-enabled builds (principle #10).
+5. **Checksum-verify on fetch** against the manifest's `file_checksum`; cache fetched weights under `~/.local/share/sadda/models/hf/<repo>/<rev>/…` (the 2026-05-20 layout).
+6. **Tests/CI: gate actual downloads** behind a network/env marker (like the ORT-gated tests); default CI stays offline.
+
+### Decisions awaiting the maintainer (principle #10 — explicit opt-in)
+
+Whether to add the network dependency at all, the feature-gate name/shape, the HF auth UX surface, and whether the **embedding-tier plumbing** (local, no network — inference output → B3 `continuous_vector` dense tiers) should land *first* as a no-network E12 slice while the network half is blessed. **Paused here for that call.**
+
+### Sources / references
+
+- `ureq`: <https://github.com/algesten/ureq> ; `hf-hub`: <https://github.com/huggingface/hf-hub>
+- 2026-05-16 architectural principles (#10 local-first / opt-in network); 2026-05-20 ML-registry entry (cache layout, HF passthrough, auth deferral).
+
+---
+
 ## 2026-05-27 — Model registry: repo scaffold + index + CI gate (E11, part 3b)
 
 The C8 analogue: stands up the model registry as a separate-repo-shaped artifact, mirroring `refdist-registry/`. Completes E11; the network half (fetch + on-demand models + embeddings) is E12.
