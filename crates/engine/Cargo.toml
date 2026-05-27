@@ -16,8 +16,17 @@ rust-version.workspace = true
 # KB), never the ~23 MB ONNX Runtime, to the binary. See the 2026-05-26
 # ort-bundling spike in DEVLOG.
 ml = ["dep:ort", "dep:libloading"]
+# E12: on-demand model download (HTTP + `hf://` passthrough). Default OFF —
+# the base engine + wheel stay network-free (architectural principle #10,
+# explicit opt-in for any network feature). Implies `ml` (you download
+# models to run them) and pulls `ureq` (rustls TLS, fully sync, no async
+# runtime). See the 2026-05-27 E12 network-spike DEVLOG entry.
+download = ["ml", "dep:ureq"]
 
 [dependencies]
+# E12 on-demand download (feature = "download"). rustls (ring) TLS, no gzip
+# /cookies, no async runtime — see the network spike.
+ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }
 arrow = { version = "58", default-features = false }
 # E11 ML inference (feature = "ml"). load-dynamic: no build-time ORT
 # download/link; the runtime ONNX Runtime is resolved at load time.

@@ -9,7 +9,9 @@
 //! - `local://<path>` — a model directory (with `model.toml`), or a bare
 //!   model file (a minimal manifest is synthesized; the caller asserts the
 //!   task by which method it calls).
-//! - `hf://<repo>` — HuggingFace passthrough; arrives in E12 (clear error).
+//! - `hf://<org>/<name>/<file>[@<rev>]` — HuggingFace passthrough: with the
+//!   `download` feature, fetches the file into the cache and runs it
+//!   (unverified/uncurated); without it, a clear "needs `download`" error.
 //!
 //! The architecture is deliberately a *parallel* module rather than a
 //! shared generic core with refdist; revisit after E12 once both
@@ -341,15 +343,146 @@ pub fn parse_model_index(json: &str) -> Result<ModelRegistryIndex> {
     serde_json::from_str(json).map_err(|e| model_err(format!("invalid model index.json: {e}")))
 }
 
+/// Verifies a file's SHA-256 against an expected `sha256:<hex>` string
+/// (case-insensitive) — the trust check applied to fetched/curated
+/// weights against a manifest's `file_checksum`.
+pub fn verify_checksum(path: &Path, expected: &str) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut f = fs::File::open(path)
+        .map_err(|e| model_err(format!("cannot open {} for checksum: {e}", path.display())))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| model_err(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let got = format!("sha256:{:x}", hasher.finalize());
+    if got.eq_ignore_ascii_case(expected) {
+        Ok(())
+    } else {
+        Err(model_err(format!(
+            "checksum mismatch for {}: expected {expected}, got {got}",
+            path.display()
+        )))
+    }
+}
+
+/// Parses an `hf://<org>/<name>/<file…>[@<rev>]` id into
+/// `(repo = "<org>/<name>", rev, file)`. `rev` defaults to `main`.
+#[cfg(feature = "download")]
+fn parse_hf_id(rest: &str) -> Result<(String, String, String)> {
+    let (path, rev) = match rest.rsplit_once('@') {
+        Some((p, r)) => (p, r.to_string()),
+        None => (rest, "main".to_string()),
+    };
+    let parts: Vec<&str> = path.splitn(3, '/').collect();
+    if parts.len() < 3 || parts.iter().any(|p| p.is_empty()) {
+        return Err(model_err(format!(
+            "hf:// id {rest:?} must be `hf://<org>/<name>/<file>[@<rev>]`"
+        )));
+    }
+    Ok((
+        format!("{}/{}", parts[0], parts[1]),
+        rev,
+        parts[2].to_string(),
+    ))
+}
+
+/// The HuggingFace "resolve" URL for a repo file at a revision.
+#[cfg(feature = "download")]
+fn hf_resolve_url(repo: &str, rev: &str, file: &str) -> String {
+    format!("https://huggingface.co/{repo}/resolve/{rev}/{file}")
+}
+
+/// Downloads `url` to `dest` (atomically, via a `.part` temp), sending an
+/// `Authorization: Bearer` header when `token` is given. Streams — no
+/// whole-file buffering.
+#[cfg(feature = "download")]
+fn download_file(url: &str, dest: &Path, token: Option<&str>) -> Result<u64> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut req = ureq::get(url);
+    if let Some(t) = token {
+        req = req.header("Authorization", &format!("Bearer {t}"));
+    }
+    let mut resp = req
+        .call()
+        .map_err(|e| model_err(format!("download {url}: {e}")))?;
+    let tmp = dest.with_extension("part");
+    let mut file = fs::File::create(&tmp)?;
+    // Cap well above any single model file; ureq's default body limit is small.
+    let mut reader = resp.body_mut().with_config().limit(16 << 30).reader();
+    let n = std::io::copy(&mut reader, &mut file).map_err(|e| model_err(e.to_string()))?;
+    drop(file);
+    fs::rename(&tmp, dest)?;
+    Ok(n)
+}
+
+/// Resolves an `hf://…` id by downloading the file into the model cache
+/// (`<store>/hf/<repo>/<rev>/<file>`, skipped if already present) and
+/// returning a [`Model`] over it. HuggingFace passthrough is **unverified
+/// and uncurated** (no manifest, no quality guarantee — the trust tier the
+/// 2026-05-20 entry calls out); auth via the `HF_TOKEN` env var.
+#[cfg(feature = "download")]
+fn fetch_hf(id: &str) -> Result<Model> {
+    let rest = id.strip_prefix("hf://").unwrap_or(id);
+    let (repo, rev, file) = parse_hf_id(rest)?;
+    let dir = ModelStore::user_default()?
+        .root()
+        .join("hf")
+        .join(&repo)
+        .join(&rev);
+    let dest = dir.join(&file);
+    if !dest.is_file() {
+        let token = std::env::var("HF_TOKEN").ok();
+        download_file(&hf_resolve_url(&repo, &rev, &file), &dest, token.as_deref())?;
+    }
+    // Synthesized manifest: hf passthrough declares no kind (the caller
+    // asserts the task by which method it calls).
+    Ok(Model {
+        manifest: ModelManifest {
+            id: format!("hf://{repo}/{file}"),
+            version: rev,
+            title: String::new(),
+            upstream_source: Some(format!("https://huggingface.co/{repo}")),
+            license: None,
+            model: ModelSpec {
+                format: "onnx".into(),
+                file: Some(file),
+                ..ModelSpec::default()
+            },
+            input: ModelInput::default(),
+            output: ModelOutput::default(),
+            compute: ModelCompute::default(),
+            citation: ModelCitation::default(),
+        },
+        dir,
+    })
+}
+
 /// Resolves a model by id. See the module docs for the three schemes.
 pub fn load_model(id: &str) -> Result<Model> {
     if let Some(rest) = id.strip_prefix("local://") {
         return resolve_local(Path::new(rest));
     }
     if id.starts_with("hf://") {
-        return Err(model_err(format!(
-            "hf:// passthrough for {id:?} arrives in E12; use a curated `sadda/…` id or `local://…` for now"
-        )));
+        #[cfg(feature = "download")]
+        {
+            return fetch_hf(id);
+        }
+        #[cfg(not(feature = "download"))]
+        {
+            return Err(model_err(format!(
+                "resolving {id:?} requires the `download` feature (network); rebuild sadda \
+                 with `--features download`, or use a curated `sadda/…` id or `local://…`"
+            )));
+        }
     }
     // Curated `sadda/<name>[@version]`: user store first, then bundled set.
     let (name_id, version) = match id.split_once('@') {
@@ -533,10 +666,70 @@ tier_kind = "interval"
         assert_eq!(m.file_path(), Some(onnx));
     }
 
+    #[cfg(not(feature = "download"))]
     #[test]
-    fn load_model_hf_is_deferred_error() {
+    fn load_model_hf_needs_download_feature() {
         let e = load_model("hf://facebook/wav2vec2-base-960h").unwrap_err();
-        assert!(format!("{e}").contains("E12"));
+        assert!(format!("{e}").contains("download"));
+    }
+
+    #[test]
+    fn verify_checksum_matches_and_mismatches() {
+        let dir = temp_dir();
+        let path = dir.join("blob.bin");
+        fs::write(&path, b"hello sadda").unwrap();
+        // sha256("hello sadda")
+        let expected = "sha256:7f6dc7da26a99c2086f607e02f8211b323f5746a09bf8b9f3ef3d92dfb9c92be";
+        // Compute once to avoid hard-coding a possibly-wrong constant:
+        let got = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(b"hello sadda");
+            format!("sha256:{:x}", h.finalize())
+        };
+        assert!(verify_checksum(&path, &got).is_ok());
+        assert!(verify_checksum(&path, "sha256:deadbeef").is_err());
+        let _ = expected;
+    }
+
+    #[cfg(feature = "download")]
+    #[test]
+    fn hf_id_parsing_and_url() {
+        let (repo, rev, file) = parse_hf_id("onnx-community/silero-vad/onnx/model.onnx").unwrap();
+        assert_eq!(repo, "onnx-community/silero-vad");
+        assert_eq!(rev, "main");
+        assert_eq!(file, "onnx/model.onnx");
+        let (_, rev2, _) = parse_hf_id("org/name/file.onnx@abc123").unwrap();
+        assert_eq!(rev2, "abc123");
+        assert!(parse_hf_id("too/short").is_err());
+        assert_eq!(
+            hf_resolve_url("org/name", "main", "f.onnx"),
+            "https://huggingface.co/org/name/resolve/main/f.onnx"
+        );
+    }
+
+    // Real network download (+ inference). Gated behind SADDA_NET_TESTS so
+    // it never runs in CI; needs network and (for .vad) ONNX Runtime.
+    #[cfg(feature = "download")]
+    #[test]
+    fn fetch_hf_downloads_and_runs() {
+        if std::env::var("SADDA_NET_TESTS").is_err() {
+            eprintln!("fetch_hf_downloads_and_runs skipped (set SADDA_NET_TESTS=1)");
+            return;
+        }
+        let m = load_model("hf://onnx-community/silero-vad/onnx/model.onnx").unwrap();
+        assert!(m.file_path().unwrap().is_file());
+        // If ORT is present, the downloaded model actually runs.
+        let audio = Audio {
+            samples: vec![0.0f32; 16_000],
+            sample_rate: 16_000,
+            channels: 1,
+        };
+        match m.vad(&audio) {
+            Ok(frames) => assert!(!frames.is_empty()),
+            Err(EngineError::Ml(msg)) => eprintln!("vad skipped (ORT unavailable): {msg}"),
+            Err(e) => panic!("unexpected: {e}"),
+        }
     }
 
     #[test]
