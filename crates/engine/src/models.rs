@@ -290,6 +290,57 @@ impl ModelStore {
     }
 }
 
+/// One entry in a model registry's published `index.json` — the discovery
+/// metadata for a model available from a hosted registry, without its
+/// weights. Parallel to `refdist::RegistryEntry`; the engine reads the
+/// index to list what's available, the weights are fetched separately
+/// (E12).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelRegistryEntry {
+    /// Model id.
+    pub id: String,
+    /// Model version.
+    pub version: String,
+    /// Registry tier (2 = curated, 3 = community).
+    #[serde(default)]
+    pub tier: u8,
+    /// Human-readable title.
+    #[serde(default)]
+    pub title: String,
+    /// Model kind (`vad`, `embedding`, …).
+    #[serde(default)]
+    pub kind: String,
+    /// Weights format (`onnx`, …).
+    #[serde(default)]
+    pub format: String,
+    /// SPDX license id.
+    #[serde(default)]
+    pub license: Option<String>,
+    /// Path to the entry within the registry (e.g. `tier2/<dir>`).
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Whether this version has been yanked.
+    #[serde(default)]
+    pub yanked: bool,
+}
+
+/// A model registry's `index.json` (the GitHub-Pages artifact). Parallel
+/// to `refdist::RegistryIndex`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelRegistryIndex {
+    /// Index format version.
+    #[serde(default)]
+    pub schema_version: u32,
+    /// The models the registry publishes.
+    #[serde(default)]
+    pub entries: Vec<ModelRegistryEntry>,
+}
+
+/// Parses a model registry's `index.json`.
+pub fn parse_model_index(json: &str) -> Result<ModelRegistryIndex> {
+    serde_json::from_str(json).map_err(|e| model_err(format!("invalid model index.json: {e}")))
+}
+
 /// Resolves a model by id. See the module docs for the three schemes.
 pub fn load_model(id: &str) -> Result<Model> {
     if let Some(rest) = id.strip_prefix("local://") {
@@ -486,6 +537,27 @@ tier_kind = "interval"
     fn load_model_hf_is_deferred_error() {
         let e = load_model("hf://facebook/wav2vec2-base-960h").unwrap_err();
         assert!(format!("{e}").contains("E12"));
+    }
+
+    #[test]
+    fn parses_registry_index() {
+        let json = r#"{
+          "schema_version": 1,
+          "entries": [
+            { "id": "sadda/wav2vec2-base", "version": "1.0.0", "tier": 2,
+              "kind": "embedding", "format": "onnx", "license": "Apache-2.0",
+              "path": "tier2/wav2vec2-base" },
+            { "id": "sadda/whisper-tiny", "version": "1.0.0", "tier": 3 }
+          ]
+        }"#;
+        let index = parse_model_index(json).unwrap();
+        assert_eq!(index.schema_version, 1);
+        assert_eq!(index.entries.len(), 2);
+        assert_eq!(index.entries[0].tier, 2);
+        assert_eq!(index.entries[0].kind, "embedding");
+        assert_eq!(index.entries[0].license.as_deref(), Some("Apache-2.0"));
+        assert!(!index.entries[1].yanked);
+        assert!(index.entries[1].kind.is_empty()); // defaulted
     }
 
     #[test]

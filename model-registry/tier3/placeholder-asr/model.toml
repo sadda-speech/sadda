@@ -1,0 +1,26 @@
+id = "sadda/placeholder-asr"
+version = "0.1.0"
+title = "PLACEHOLDER transcription model (synthetic entry)"
+upstream_source = "https://example.invalid/placeholder-asr"
+license = "MIT"
+
+[model]
+kind = "transcription"
+format = "onnx"
+url = "https://example.invalid/placeholder-asr/model.onnx"
+file_checksum = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+
+[input]
+modality = "audio"
+sample_rate_hz = 16000
+
+[output]
+tier_kind = "interval"
+
+[compute]
+cpu_min_ram_mb = 2048
+gpu = "optional"
+
+[citation]
+authors = ["sadda placeholder generator"]
+year = 2026
