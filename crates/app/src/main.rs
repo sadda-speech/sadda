@@ -2851,6 +2851,35 @@ impl eframe::App for SaddaApp {
             self.toggle_playback();
         }
 
+        // Arrow keys scrub the view left / right (a quarter-window per
+        // press); Home / End snap to the start / end of the file. This
+        // is the discoverable, trackpad-free way to move through a long
+        // recording while zoomed in — shift+scroll-wheel pans too (see
+        // handle_zoom_and_scroll). Skipped while any widget has focus or
+        // a label is being edited, so the keys reach the editor instead.
+        // scroll_by clamps against the bundle bounds, so a full-width
+        // pan at either edge is a harmless no-op.
+        if self.selected_bundle_id.is_some()
+            && self.timeline.duration > 0.0
+            && self.label_edit.is_none()
+            && ui.ctx().memory(|m| m.focused().is_none())
+        {
+            let step = self.timeline.view_range() * 0.25;
+            let ctx = ui.ctx();
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)) {
+                self.timeline.scroll_by(step);
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)) {
+                self.timeline.scroll_by(-step);
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Home)) {
+                self.timeline.scroll_by(-self.timeline.duration);
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::End)) {
+                self.timeline.scroll_by(self.timeline.duration);
+            }
+        }
+
         // E8: Ctrl/Cmd+Enter runs the script buffer when the panel
         // is open. `Modifiers::COMMAND` covers Ctrl on Linux/Windows
         // and Cmd on macOS via egui's platform-aware handling.
