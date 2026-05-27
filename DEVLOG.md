@@ -51,6 +51,29 @@ Both are roadmap intake only. The immediate path is unchanged: finish **E11** (M
 
 ---
 
+## 2026-05-27 — Roadmap decision: in-app community surface = link-out (full chat declined)
+
+Explored a user-raised idea — an in-app community chat — and **made the call**: do **not** build real-time chat; meet the underlying goal (in-app community connection) with a lightweight **link-out surface**. The reasoning is recorded so it isn't re-litigated. The feature itself is ~Phase 4+/v1.x; this entry settles its *shape*.
+
+> **Decision (2026-05-27, with the maintainer):** adopt the lightweight, opt-in **"Community" link-out surface** as sadda's community-connection approach. Full real-time in-app chat is **declined**. The read-only Matrix mirror and the thin Matrix client are **deferred / not planned** unless explicitly revisited.
+
+**Why not full in-app chat.** It's a 24/7 *service* (relay / presence / history / storage), not a feature; it needs moderation (a legal + human burden — an empty or toxic chat is worse than none); and it collides head-on with sadda's local-first / no-telemetry / explicit-opt-in-network ethos (principle #10) and its privacy-non-negotiable audiences (clinical/HIPAA, forensic/chain-of-custody, field/data-sovereignty), who would be alarmed by a speech tool holding a live chat connection. Plus version-skew/rot and community cold-start/fragmentation. Prior art: scientific/desktop tools (Praat, R, Blender) link out; the ones that embed chat are cloud products (Figma, VS Code Live Share).
+
+**Adopted — a lightweight, opt-in "Community" surface.** Deep-links out to existing async, platform-moderated channels (GitHub Discussions, a Matrix/Zulip room, the docs), plus a context-aware "ask the community" (a pre-filled Discussion with sadda version + OS and opt-in, sanitized, no-data context). Zero infra, zero moderation burden, no data leaves, no live connection — ~90% of the value at ~1% of the cost. Composes with the registries' PR-discussion surfaces.
+
+**The "mirror a Slack server" variant (user idea).** Rather than build chat, *embed/mirror* an existing community server. By platform:
+- **Matrix is the clean answer** — open, federated, built for clients/embedding, and it **bridges Slack/Discord into a Matrix room**. So "mirror Slack" is best realized as: the community lives on Slack/Discord/Matrix → a Matrix bridge mirrors it → sadda is a thin Matrix client. You ride Matrix + its bridges; you build no server.
+- **Slack/Discord directly = the bad path** — closed APIs, OAuth-per-user, ToS restrictions on custom clients re-displaying content, free-tier history limits. Slack is actively hostile to mirroring; Discord offers only a limited read-only widget.
+- **Read-only mirror** (an in-app "community feed" of recent public messages + a "join the conversation →" link-out) is the lighter, lower-risk form vs. in-app participation: no compose UI ⇒ no in-app abuse vector, smaller moderation surface, still makes the community feel present. Full participation is the thin Matrix client.
+
+**Deferred "if real chat is ever wanted": a thin Matrix client** (federated, E2E, self-hostable, Matrix's own moderation tooling; Matrix-bridges-Slack/Discord if the community lives there). The only architecture compatible with the privacy ethos — but it still carries version + human-moderation costs, so it's "later, maybe," off-by-default + opt-in.
+
+**Open questions.** Which channels are canonical; whether a read-only Matrix-mirror feed is worth it (auth for non-public rooms, rate limits, the live-connection opt-in UX vs principle #10); moderation delegation; webview-vs-native for any embed.
+
+**Status.** Approach **decided** (link-out surface); the build is ~Phase 4+ and small. Immediate path unchanged: the 0.3.x release, then Phase 4.
+
+---
+
 ## 2026-05-27 — Roadmap intake: community script registry
 
 A user-raised feature, logged-not-designed (like the AI-agent-surface / walkthrough-demos / AI-engineer-directions intakes); ~Phase 4+/v1.x; needs its own design session.
