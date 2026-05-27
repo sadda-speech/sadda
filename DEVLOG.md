@@ -51,6 +51,26 @@ Both are roadmap intake only. The immediate path is unchanged: finish **E11** (M
 
 ---
 
+## 2026-05-26 — ML inference: Python `sadda.ml` surface + ml-on-by-default (E11, part 2a)
+
+Builds on part 1's engine `ml` foundation. Decision (with the user): **`ml` on by default in the shipped wheel + app** — under `load-dynamic` it costs ~150 KB of bindings, ONNX Runtime stays an optional runtime sidecar, and the surface errors cleanly (never crashes) when ORT is absent.
+
+### What landed
+
+- **`crates/python` enables `sadda-engine`'s `ml` feature** → every wheel build exposes `sadda.ml`. (Feature-unified across the workspace, so the engine's ml tests now also run under CI's `cargo test --workspace` — they skip cleanly without ORT, see below.)
+- **`sadda.ml.vad(audio)`** → `(times, speech_probs)` NumPy arrays (one Silero-VAD window per element; audio mono-mixed + resampled to 16 kHz internally). **`sadda.ml.speech_segments(audio, threshold=…)`** → merged `(start, end)` tuples. Both use the bundled model unless given a `model_path`. PROVISIONAL. This is also the **first concrete piece of the roadmap's AI-agent surface** — structured, headless, agent-legible.
+- `PyAudio` made `pub(crate)` so the new `crates/python/src/ml.rs` module can take it.
+
+### CI surface (the reason this was verified end-to-end before commit)
+
+Turning `ml` on workspace-wide changes what CI compiles and runs. Ran the **exact CI gate sequence** locally on a 1.95.0 toolchain: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --all-targets`, `cargo test --workspace`, stub regen + diff, and pytest. Two issues caught and fixed pre-push: a `clippy::type_complexity` on the `vad` np-tuple return (matched the existing `voiced_pitch` `#[allow]`), and fmt drift in the new file. The engine's ml e2e test runs under `cargo test --workspace` now and **skips cleanly without ORT** (the part-1 `libloading` probe); `test_ml.py` likewise skips its inference tests without ORT (1 pass + 2 skip) and runs them for real with `ORT_DYLIB_PATH` set (3 pass). The `.pyi` stub is unchanged (the ml submodule, like refdist, carries no `gen_stub` derives).
+
+### Deferred (still ahead in E11 + E12)
+
+GUI VAD tier (part 2b — surface VAD in the app), the on-demand model registry (parallel to refdist + `hf://` + `weights_checksum`), and E12 (wav2vec2/Whisper → embedding tiers). ORT-sidecar packaging for the 0.3.2 binaries remains a release-engineering task.
+
+---
+
 ## 2026-05-26 — ML inference: ort-bundling spike + first bundled model (E11, part 1)
 
 Opens cluster E (ML inference, 0.3.2). The plan mandated an **`ort`-bundling spike before E11**, because 0.3.2's headline risks are binary size and cross-platform ONNX Runtime linking. Ran the spike, settled the integration strategy, then landed the engine half of E11: a feature-gated ML path and the first bundled model (Silero VAD), end to end.

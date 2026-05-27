@@ -20,7 +20,10 @@ name = "stub_gen"
 path = "src/bin/stub_gen.rs"
 
 [dependencies]
-sadda-engine = { path = "../engine" }
+# E11: `ml` on by default for the shipped wheel — exposes `sadda.ml`.
+# load-dynamic keeps the wheel lean (ONNX Runtime is an optional runtime
+# sidecar); `sadda.ml.vad` returns a clean error if ORT isn't present.
+sadda-engine = { path = "../engine", features = ["ml"] }
 # NOTE: extension-module is enabled via pyproject.toml's [tool.maturin]
 # section when building the wheel; keeping it off here avoids unifying it
 # across the workspace (which would break crates/script-engine's
