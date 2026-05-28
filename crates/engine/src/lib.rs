@@ -42,7 +42,7 @@ pub use live::{
     MeterFrame, StoppedSession,
 };
 #[cfg(feature = "ml")]
-pub use ml::{SpeechSegment, VadFrame, speech_segments, vad};
+pub use ml::{SpeechSegment, VadFrame, probe_ort_dylib, speech_segments, vad};
 #[cfg(feature = "ml")]
 pub use models::{
     Model, ModelManifest, ModelRegistryEntry, ModelRegistryIndex, ModelStore, load_model,

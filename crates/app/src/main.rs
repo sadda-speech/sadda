@@ -73,6 +73,15 @@ fn main() -> eframe::Result<()> {
     // built, steering winit onto its X11 backend. No effect off WSL.
     force_x11_under_wsl();
 
+    // Release bundles ship libonnxruntime as a sidecar under
+    // `<exe-dir>/onnxruntime/`. If the user hasn't set ORT_DYLIB_PATH
+    // themselves, pick the sidecar up so ML features (VAD lane,
+    // embeddings) work without manual setup. The probe inside ensures
+    // we don't set the env var unless the file actually exports the
+    // ORT C API, avoiding a startup-time discovery that points the
+    // runtime at a bogus file.
+    discover_ort_sidecar();
+
     // E9: register the built-in `sadda` module BEFORE the embedded
     // CPython interpreter starts, so embedded scripts can
     // `import sadda.app` without needing the wheel pip-installed.
@@ -136,6 +145,69 @@ fn is_wsl() -> bool {
         || std::fs::read_to_string("/proc/sys/kernel/osrelease")
             .map(|s| s.to_ascii_lowercase().contains("microsoft"))
             .unwrap_or(false)
+}
+
+/// If `ORT_DYLIB_PATH` is unset and a libonnxruntime sidecar is bundled
+/// next to the executable (the layout the release workflow ships:
+/// `<exe-dir>/onnxruntime/`), validate it with the engine's probe and
+/// point `ORT_DYLIB_PATH` at it. Silent no-op otherwise — the user gets
+/// the same `set ORT_DYLIB_PATH` error from the engine at first ML use
+/// as before.
+fn discover_ort_sidecar() {
+    if std::env::var_os("ORT_DYLIB_PATH").is_some() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(dir) = exe.parent() else {
+        return;
+    };
+    let Some(path) = find_ort_in_dir(&dir.join("onnxruntime")) else {
+        return;
+    };
+    let Some(s) = path.to_str() else { return };
+    // SAFETY: called at the top of `main` before any thread is spawned,
+    // so there is no concurrent access to the environment.
+    unsafe { std::env::set_var("ORT_DYLIB_PATH", s) };
+}
+
+/// Looks for a probed-OK ONNX Runtime dylib inside `dir`. The match is
+/// platform-specific by filename; the engine's probe then rejects
+/// anything that doesn't export `OrtGetApiBase` (filtering out the
+/// `libonnxruntime_providers_shared` shim, which is a valid shared object
+/// but not the runtime). Returns the first candidate that passes the
+/// probe, preferring longer filenames so a versioned name like
+/// `libonnxruntime.so.1.26.0` beats a bare `libonnxruntime.so` symlink.
+fn find_ort_in_dir(dir: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+
+    #[cfg(target_os = "windows")]
+    let matches = |name: &str| {
+        let lower = name.to_ascii_lowercase();
+        lower.starts_with("onnxruntime") && lower.ends_with(".dll")
+    };
+    #[cfg(target_os = "macos")]
+    let matches = |name: &str| name.starts_with("libonnxruntime") && name.ends_with(".dylib");
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let matches = |name: &str| name.starts_with("libonnxruntime.so");
+
+    let mut candidates: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| matches(n) && !n.contains("providers_shared"))
+                .unwrap_or(false)
+        })
+        .collect();
+    candidates.sort_by_key(|p| std::cmp::Reverse(p.as_os_str().len()));
+
+    candidates.into_iter().find(|p| {
+        p.to_str()
+            .is_some_and(|s| sadda_engine::probe_ort_dylib(s).is_ok())
+    })
 }
 
 // `append_to_inittab!` registers under the wrapper function's name,
@@ -4844,6 +4916,42 @@ impl SaddaApp {
         if let Some(p) = to_remove {
             self.persisted.remove_recent(&p);
         }
+    }
+}
+
+#[cfg(test)]
+mod ort_sidecar_tests {
+    use super::find_ort_in_dir;
+
+    #[test]
+    fn missing_dir_returns_none() {
+        let tmp = std::env::temp_dir().join("sadda-ort-sidecar-missing");
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(find_ort_in_dir(&tmp).is_none());
+    }
+
+    #[test]
+    fn dir_without_runtime_returns_none() {
+        // A directory whose only "library-shaped" file isn't actually the
+        // runtime is rejected by the probe (matching the deferred-shim
+        // case). We use a libc-shaped name so the filename filter accepts
+        // it but the OrtGetApiBase symbol check fails.
+        let tmp =
+            std::env::temp_dir().join(format!("sadda-ort-sidecar-no-rt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // Empty file under a name the platform-glob would accept. The
+        // probe will fail to dlopen it (zero-byte ELF), so discovery
+        // returns None.
+        #[cfg(target_os = "windows")]
+        let name = "onnxruntime.dll";
+        #[cfg(target_os = "macos")]
+        let name = "libonnxruntime.dylib";
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let name = "libonnxruntime.so";
+        std::fs::write(tmp.join(name), b"").unwrap();
+        assert!(find_ort_in_dir(&tmp).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
 

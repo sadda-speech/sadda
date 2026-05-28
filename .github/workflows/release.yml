@@ -69,8 +69,10 @@ jobs:
           # macOS arm64 runners already have Rust; just ensure the target.
           CIBW_BEFORE_BUILD_MACOS: "rustup target add aarch64-apple-darwin"
           # Windows: the runner has Rust + maturin reaches it via PATH.
-          # Smoke-test: import the built wheel and check the version.
-          CIBW_TEST_COMMAND: 'python -c "import sadda; assert sadda.version().startswith(''0.1''), sadda.version()"'
+          # Smoke-test: import the built wheel and check the version
+          # looks well-formed. Tracking the 0.x line broadly so the test
+          # doesn't break on every release bump (was 0.1, then 0.2 …).
+          CIBW_TEST_COMMAND: 'python -c "import sadda; assert sadda.version().startswith(''0.''), sadda.version()"'
 
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v5
