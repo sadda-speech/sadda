@@ -24,6 +24,10 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   PYO3_PYTHON: "/usr/bin/python3"
+  # Opt JS actions into Node.js 24 ahead of the 2026-06-02 forced switch
+  # (silences the deprecation warning and catches any incompatibility
+  # early; covers every JS action without per-pin maintenance).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
