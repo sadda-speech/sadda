@@ -115,6 +115,25 @@ def test_voiced_pitch_naive_method_also_works() -> None:
         assert float(voicing[mid]) > 0.7
 
 
+def test_voiced_pitch_boersma_method_tracks_clean_tone() -> None:
+    """method='boersma' resolves to the faithful Boersma 1993 tracker
+    (Praat `Sound: To Pitch (ac)…`). For a clean 220 Hz tone with
+    fade-in/out, the median voiced f0 should land within 1 Hz."""
+    with tempfile.TemporaryDirectory() as td:
+        wav = Path(td) / "sine.wav"
+        _write_sine_wav(wav, freq=220.0, sample_rate=16_000, duration_s=0.6)
+        audio = sadda.load_wav(str(wav))
+        times, freqs, voicing = sadda.dsp.voiced_pitch(audio, method="boersma")
+        voiced = freqs[voicing >= 0.45]
+        assert len(voiced) > 5, f"expected several voiced frames, got {len(voiced)}"
+        import numpy as _np
+
+        median_f0 = float(_np.median(voiced))
+        assert abs(median_f0 - 220.0) < 1.0, (
+            f"boersma median f0 = {median_f0:.3f} Hz, expected ~220"
+        )
+
+
 def test_voiced_pitch_unknown_method_raises_value_error() -> None:
     with tempfile.TemporaryDirectory() as td:
         wav = Path(td) / "sine.wav"

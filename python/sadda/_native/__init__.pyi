@@ -1219,10 +1219,15 @@ def voiced_pitch(audio: Audio, *, frame_size_seconds: builtins.float = 0.0299999
     `method` selects the pitch tracker:
     - `"windowed_autocorrelation"` (default) — adopts Boersma 1993's
       window-correction idea (divides windowed-signal autocorrelation by
-      window autocorrelation); not a full Boersma implementation. Strict
+      window autocorrelation); fast single-peak tracker. Strict
       improvement on `"autocorrelation"`.
     - `"autocorrelation"` — naive time-domain autocorrelation (Phase-0
       tracker; what `sadda.dsp.f0(...)` calls).
+    - `"boersma"` — **faithful Boersma 1993 / Praat `Sound: To Pitch
+      (ac)…`** with `very_accurate = false`. Multi-candidate per-frame
+      detection + Viterbi path-finder with octave-cost / octave-jump-cost
+      / voiced-unvoiced-cost terms. Robust to halving / doubling /
+      transient errors; Praat-validated.
     
     `voicing_threshold` is informational here: the function returns voicing
     values for every frame so callers can apply their own threshold.

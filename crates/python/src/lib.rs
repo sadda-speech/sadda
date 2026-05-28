@@ -1785,11 +1785,10 @@ impl PyFormantFrame {
 fn parse_pitch_method(s: &str) -> PyResult<sadda_engine::pitch::PitchMethod> {
     match s {
         "autocorrelation" => Ok(sadda_engine::pitch::PitchMethod::Autocorrelation),
-        "windowed_autocorrelation" | "boersma" => {
-            Ok(sadda_engine::pitch::PitchMethod::WindowedAutocorrelation)
-        }
+        "windowed_autocorrelation" => Ok(sadda_engine::pitch::PitchMethod::WindowedAutocorrelation),
+        "boersma" => Ok(sadda_engine::pitch::PitchMethod::Boersma),
         other => Err(PyValueError::new_err(format!(
-            "unknown pitch method {other:?}; expected 'autocorrelation' or 'windowed_autocorrelation'"
+            "unknown pitch method {other:?}; expected 'autocorrelation', 'windowed_autocorrelation', or 'boersma'"
         ))),
     }
 }
@@ -1811,10 +1810,15 @@ fn parse_lpc_method(s: &str) -> PyResult<sadda_engine::dsp::LpcMethod> {
 /// `method` selects the pitch tracker:
 /// - `"windowed_autocorrelation"` (default) — adopts Boersma 1993's
 ///   window-correction idea (divides windowed-signal autocorrelation by
-///   window autocorrelation); not a full Boersma implementation. Strict
+///   window autocorrelation); fast single-peak tracker. Strict
 ///   improvement on `"autocorrelation"`.
 /// - `"autocorrelation"` — naive time-domain autocorrelation (Phase-0
 ///   tracker; what `sadda.dsp.f0(...)` calls).
+/// - `"boersma"` — **faithful Boersma 1993 / Praat `Sound: To Pitch
+///   (ac)…`** with `very_accurate = false`. Multi-candidate per-frame
+///   detection + Viterbi path-finder with octave-cost / octave-jump-cost
+///   / voiced-unvoiced-cost terms. Robust to halving / doubling /
+///   transient errors; Praat-validated.
 ///
 /// `voicing_threshold` is informational here: the function returns voicing
 /// values for every frame so callers can apply their own threshold.
@@ -1850,6 +1854,7 @@ fn voiced_pitch<'py>(
         min_freq_hz,
         max_freq_hz,
         voicing_threshold,
+        ..sadda_engine::pitch::PitchConfig::default()
     };
     let frames = sadda_engine::pitch::pitch(&audio.inner, &config, pitch_method);
     let times: Vec<f64> = frames.iter().map(|f| f.time_seconds).collect();

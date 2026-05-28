@@ -6,6 +6,56 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-28 — Faithful Boersma pitch tracker (deferred task #51 since C2)
+
+Closes the largest deferred item from the 2026-05-21 C2 entry: a faithful implementation of Boersma 1993, equivalent to Praat's `Sound: To Pitch (ac)…` with `very_accurate = false`. The pre-existing `windowed_autocorrelation` had been honestly named because it took only Boersma's window-correction idea and skipped the rest of the pipeline (no multi-candidate detection, no Viterbi, no octave-cost terms). For sadda's central audience — phoneticians coming from Praat — pitch is the single most-used measure, so this is the single highest user-visible capability gain on the deferred list.
+
+**Decisions** (DEVLOG-style multi-option questions, all recommended picks): Praat-golden + synthetic validation; full Praat-style Viterbi (multi-candidate per frame + global cost minimization, not a simplified dual-candidate or a sub-slice without the path-finder); method name `boersma` (direct, audience-recognizable, matches Praat terminology).
+
+### Algorithm
+
+`engine::pitch::boersma` follows Praat's `to_pitch_ac` pipeline exactly:
+
+1. Per frame: Hann-window the signal (matching `very_accurate = false`); compute autocorrelation `r_a(τ)` of the windowed signal and `r_w(τ)` of the window alone; form `r(τ) = r_a(τ) / r_w(τ)` — the C2 window-correction step.
+2. Local maxima of `r(τ)` for τ ∈ `[sr/max_freq_hz, sr/min_freq_hz]`. Each maximum refined by parabolic interpolation, then kept if it's in the top `max_candidates` (15, Praat default) by strength.
+3. Apply the per-frame octave-cost penalty: `strength = r(τ) - octave_cost · log2(min_pitch / f)` — equivalently `+ octave_cost · log2(f / min_pitch)`. This boosts higher-f candidates by `≈ 0.015` per octave, which breaks the otherwise-equal tie between τ and 2τ on a pure tone and fights octave-halving on harmonic signals.
+4. Add an unvoiced candidate per frame whose strength rises in quiet regions (Praat's silence/voicing trichotomy formula: `voicing_threshold + max(0, 2 - local_intensity / silence_threshold / (1 + voicing_threshold))`).
+5. Run Viterbi over all frames. Frame cost = `-strength`. Transition cost = `octave_jump_cost · |log2(f_prev / f_curr)|` between two voiced candidates; `voiced_unvoiced_cost` on a voicing toggle; 0 between two unvoiced candidates. Defaults: 0.35 / 0.14 (Praat defaults). Backtrack the min-cost path to recover per-frame picks.
+
+**Bug caught in development:** my first draft had the octave-cost sign backwards (`+ octave_cost · log2(min_pitch / f)`), which *penalised* higher frequencies and made the 220 Hz sustained-tone test halve to 110 Hz on the first run. Fixed by reading the test failure carefully — the sign is `-octave_cost · log2(min_pitch / f)` in the paper, equivalent to `+ octave_cost · log2(f / min_pitch)`.
+
+`PitchConfig` gained five `boersma_*` fields with Praat-faithful defaults (`max_candidates = 15`, `silence_threshold = 0.03`, `octave_cost = 0.01`, `octave_jump_cost = 0.35`, `voiced_unvoiced_cost = 0.14`). The non-Boersma trackers ignore them. Frame size is silently extended to `max(config.frame_size_seconds, 3.0 / min_freq_hz)` so Boersma always sees ≥ 3 periods of the lowest pitch, matching Praat's auto-derivation when `time_step = 0`.
+
+### Validation
+
+Praat golden + analytic synthetic, per the user's pick. The same Boersma defaults on both sides: a new `tests/dsp/praat/pitch_boersma.praat` script (Praat 6.2.09 on this box, `/usr/bin/praat`) runs `Sound: To Pitch (ac)…` against the existing `tests/clinical/fixtures/*.wav` corpus (clean 120 Hz; HNR-high/mid 120 Hz; jitter 150 Hz; shimmer 150 Hz; jitter+shimmer 200 Hz) and writes `tests/clinical/fixtures/pitch_boersma_golden.tsv` with the per-fixture voiced-frame count and median voiced f0. Committed so CI never needs Praat.
+
+`tests/pitch_boersma.rs` reads the TSV, runs our `boersma` over each WAV with the same config defaults, computes the median over voiced frames, and asserts within 1.5 Hz (clean / HNR) or 3 Hz (jitter / shimmer, where realised f0 is a function of the pseudo-random draws). Both tests pass. The 1.5 Hz tolerance is well inside the parabolic-refinement noise floor noted in the module docs.
+
+Five additional in-module unit tests cover: clean 220 Hz tone (mid-frame f0 within 1 Hz), silence (all voicing < 0.1), octave-halving resistance on a pulse train at 200 Hz (no steady-state frame halves to 100 Hz), Viterbi smoothing through a noise gap (median voiced f0 across the run stays within 5 Hz of 200 Hz; no voiced frame lands at the 100 Hz or 400 Hz octave), and audio shorter than the minimum-frame returning empty rather than panicking.
+
+### Three-surface coverage
+
+* **Engine**: `PitchMethod::Boersma` + `boersma(audio, config)` (this slice).
+* **Python**: `sadda.dsp.voiced_pitch(audio, method="boersma")` — the dispatcher's pre-existing `"boersma"` placeholder (previously aliased to `WindowedAutocorrelation`) now points at the real implementation. Docstring + type stubs regenerated. New `test_voiced_pitch_boersma_method_tracks_clean_tone` test.
+* **GUI**: deliberately not changed in this slice. The f0 lane stays on `WindowedAutocorrelation` for backwards compatibility with persisted configs; switching the default to `Boersma` waits for 0.4.x per the module-level recommendation note.
+
+### What's sub-deferred (orthogonal to this slice)
+
+The Boersma module docs call these out explicitly under "What `boersma` does not yet do":
+
+* `very_accurate = true`: Gaussian window over 6 periods instead of Hann over 3. Praat's accuracy-bumped variant; sub-slice.
+* Windowed-sinc + Brent's method peak refinement. Praat's paper rejects parabolic (caps peak heights at ~0.743, contributes to octave errors); we accept the gap for now. Sub-slice.
+* Anti-aliased upsample pre-step. Orthogonal to the Viterbi work; bumps accuracy further when wanted. Sub-slice.
+
+Module-level recommendation now reads "[`windowed_autocorrelation`] for the existing v1 default (kept for backwards compat); [`boersma`] when Praat-faithful behaviour or robustness on real speech is needed (recommend switching the default in 0.4.x once it has been exercised in anger)".
+
+### Gates
+
+Full local gate green on rust 1.95: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (engine 148→153 + new pitch_boersma integration crate with 2 tests; app unchanged at 58), stub regen + diff (just the docstring update), `pytest python/tests -q` → 149 passed / 6 skipped.
+
+---
+
 ## 2026-05-28 — GUI embedding-heatmap lane (E12 GUI follow-on)
 
 Finished the E12 surface set for the desktop app: `Project.extract_embeddings` has been landing wav2vec2 / Whisper-encoder outputs as B3 `continuous_vector` tiers for a few sessions; now there's a way to *see* them. New lane stacks at the top of the measure-track strip (directly under the spectrogram) and renders the embedding as a `(dim × time)` heatmap synced with the rest of the timeline.
