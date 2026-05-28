@@ -35,9 +35,10 @@ use crate::sadda_app::{
     with_snapshot_active,
 };
 use crate::state::{
-    ColormapKind, EnvelopeCache, MeasureTrackConfig, PersistedState, PlotPalette, RefdistOverlay,
-    SpectrogramConfig, ThemePref, TimelineState, build_envelope_for_range, colormap_bake,
-    format_reference_lane_caption, nearest_frame_index, power_to_db_normalized, truncate_label,
+    ColormapKind, EmbeddingHeatmapConfig, EnvelopeCache, MeasureTrackConfig, PersistedState,
+    PlotPalette, RefdistOverlay, SpectrogramConfig, ThemePref, TimelineState,
+    build_envelope_for_range, colormap_bake, format_reference_lane_caption, nearest_frame_index,
+    normalize_embedding, power_to_db_normalized, truncate_label,
 };
 
 /// Maximum characters drawn inside an interval rectangle or above a
@@ -259,6 +260,15 @@ struct SaddaApp {
     /// only — clears on bundle change. Reached by C5 (cursor sync)
     /// and D6/D7 (editing) when those slices land.
     selected_annotation: Option<AnnotationSelection>,
+    /// Cached embedding-heatmap render. `None` when the lane is hidden
+    /// (no tier selected) or no bundle is loaded. Rebuilt only when the
+    /// bundle, the selected tier, or the colormap/normalization changes.
+    active_embedding_heatmap: Option<EmbeddingHeatmapCache>,
+    /// Sticky error message from the last attempt to (re)build the
+    /// embedding-heatmap cache — e.g. the selected tier no longer exists,
+    /// the Parquet sidecar can't be read. Surfaced as a hint inside the
+    /// lane so the lane keeps drawing instead of blanking out silently.
+    embedding_heatmap_error: Option<String>,
     /// Shared timeline state — cursor, view window, duration —
     /// plumbed into every C5+ pane. Reset on bundle change.
     timeline: TimelineState,
@@ -632,6 +642,26 @@ struct SpectrogramCache {
     nyquist_hz: f32,
 }
 
+/// Cached embedding-heatmap render. Mirrors [`SpectrogramCache`]: a
+/// baked egui texture for the colormapped matrix plus the metadata the
+/// lane needs to lay it out (duration, dim count) and the config it was
+/// built from (so a colormap / normalization / tier-selection change
+/// invalidates the cache cheaply). The original matrix is *not* kept —
+/// re-reading the Parquet sidecar on a rebuild is cheap and saves the
+/// MB-scale memory cost.
+struct EmbeddingHeatmapCache {
+    bundle_id: i64,
+    config: EmbeddingHeatmapConfig,
+    /// GPU texture handle for the colormapped matrix.
+    texture: egui::TextureHandle,
+    /// Bundle duration in seconds (x-axis upper bound).
+    duration_seconds: f64,
+    /// Embedding dimensionality (y-axis upper bound — `[0, n_dims)`).
+    n_dims: usize,
+    /// User-facing tier name, surfaced in the lane caption.
+    tier_name: String,
+}
+
 /// D10: cached measure-track analysis for the selected bundle under
 /// the current [`MeasureTrackConfig`]. Mirrors [`SpectrogramCache`]:
 /// recomputed only when the bundle or the config changes (see
@@ -726,6 +756,8 @@ impl SaddaApp {
             overlays: OverlayCache::default(),
             reference: ReferenceView::default(),
             selected_annotation: None,
+            active_embedding_heatmap: None,
+            embedding_heatmap_error: None,
             timeline: TimelineState::default(),
             playback: None,
             draft_edit: DraftEdit::None,
@@ -934,6 +966,8 @@ impl SaddaApp {
                     self.selected_bundle_id = None;
                     self.active_envelope = None;
                     self.active_spectrogram = None;
+                    self.active_embedding_heatmap = None;
+                    self.embedding_heatmap_error = None;
                     self.selected_annotation = None;
                     self.timeline = TimelineState::default();
                     self.playback = None;
@@ -1522,6 +1556,8 @@ impl SaddaApp {
         });
         self.selected_bundle_id = Some(bundle_id);
         self.active_spectrogram = None;
+        self.active_embedding_heatmap = None;
+        self.embedding_heatmap_error = None;
         self.selected_annotation = None;
         self.playback = None;
         self.draft_edit = DraftEdit::None;
@@ -1534,6 +1570,8 @@ impl SaddaApp {
         self.selected_bundle_id = None;
         self.active_envelope = None;
         self.active_spectrogram = None;
+        self.active_embedding_heatmap = None;
+        self.embedding_heatmap_error = None;
         self.selected_annotation = None;
         self.playback = None;
         self.draft_edit = DraftEdit::None;
@@ -1718,6 +1756,45 @@ impl SaddaApp {
         }
     }
 
+    /// Rebuilds the embedding-heatmap cache if stale. Drops the cache
+    /// when no tier is selected (lane hidden) so the lane disappears
+    /// immediately. On rebuild failure (selected tier missing, sidecar
+    /// unreadable) sets `embedding_heatmap_error` for the lane to render
+    /// as an in-lane hint instead of crashing or blanking out.
+    fn rebuild_embedding_heatmap_if_stale(&mut self, ctx: &egui::Context) {
+        let Some(env) = &self.active_envelope else {
+            self.active_embedding_heatmap = None;
+            self.embedding_heatmap_error = None;
+            return;
+        };
+        let bundle_id = env.bundle_id;
+        let cfg = self.persisted.embedding.clone();
+        // No tier selected → lane hidden, drop any prior cache.
+        if cfg.selected_tier_id.is_none() {
+            self.active_embedding_heatmap = None;
+            self.embedding_heatmap_error = None;
+            return;
+        }
+        if let Some(c) = &self.active_embedding_heatmap {
+            if c.bundle_id == bundle_id && c.config == cfg {
+                return;
+            }
+        }
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        match build_embedding_heatmap_texture(ctx, project, env, cfg) {
+            Ok(c) => {
+                self.active_embedding_heatmap = Some(c);
+                self.embedding_heatmap_error = None;
+            }
+            Err(e) => {
+                self.active_embedding_heatmap = None;
+                self.embedding_heatmap_error = Some(e);
+            }
+        }
+    }
+
     /// D10: recompute the measure tracks if the cache is stale for the
     /// selected bundle + current [`MeasureTrackConfig`]. Pure CPU work
     /// (no GPU upload, unlike the spectrogram), so it takes no `ctx`.
@@ -1865,6 +1942,94 @@ fn build_spectrogram_texture(
         texture,
         duration_seconds: env.duration_seconds,
         nyquist_hz: sr / 2.0,
+    })
+}
+
+/// Reads the selected `continuous_vector` tier, normalises + bakes a
+/// `(n_dims × n_frames)` colormapped texture, and uploads it via egui.
+/// Returns a fresh [`EmbeddingHeatmapCache`] or an actionable error
+/// message (no selected tier → caller skips this entirely; tier missing
+/// / wrong type / sidecar unreadable → message shown inside the lane).
+fn build_embedding_heatmap_texture(
+    ctx: &egui::Context,
+    project: &Project,
+    env: &EnvelopeCache,
+    cfg: EmbeddingHeatmapConfig,
+) -> Result<EmbeddingHeatmapCache, String> {
+    let tier_id = cfg
+        .selected_tier_id
+        .ok_or_else(|| "no embedding tier selected".to_string())?;
+
+    let tier = project
+        .get_tier(tier_id)
+        .map_err(|e| format!("read tier {tier_id}: {e}"))?;
+    if tier.r#type != TierType::ContinuousVector {
+        return Err(format!(
+            "tier {tier_id} ({}) is not a continuous_vector tier",
+            tier.name,
+        ));
+    }
+    let matrix = project
+        .read_continuous_vector(tier_id)
+        .map_err(|e| format!("read embedding tier {tier_id}: {e}"))?;
+    let (n_frames, n_dims) = matrix.dim();
+    if n_frames == 0 || n_dims == 0 {
+        return Err(format!(
+            "tier {tier_id} ({}) is empty ({n_frames} frames × {n_dims} dims)",
+            tier.name,
+        ));
+    }
+
+    // The engine returns `Array2<f64>` shaped `[n_frames, n_dims]`. We
+    // need a dim-major / frame-minor `[n_dims * n_frames]` `f32` buffer
+    // for `colormap_bake`. Transpose + downcast in one pass; small
+    // enough cost compared to the GPU upload.
+    let mut dim_major: Vec<f32> = vec![0.0; n_dims * n_frames];
+    for f in 0..n_frames {
+        for d in 0..n_dims {
+            dim_major[d * n_frames + f] = matrix[(f, d)] as f32;
+        }
+    }
+
+    // Bucket the time axis if the matrix has more frames than the
+    // colormap texture cap — same strategy as the spectrogram, so a
+    // very long file doesn't try to upload a 100k-wide texture.
+    let (display_width, display) = if n_frames > MAX_SPECTROGRAM_WIDTH {
+        let stride = n_frames.div_ceil(MAX_SPECTROGRAM_WIDTH);
+        let new_width = n_frames.div_ceil(stride);
+        let mut out = vec![0.0f32; n_dims * new_width];
+        for d in 0..n_dims {
+            for x in 0..new_width {
+                let start = x * stride;
+                let end = (start + stride).min(n_frames);
+                let mut acc = 0.0f32;
+                for f in start..end {
+                    acc += dim_major[d * n_frames + f];
+                }
+                out[d * new_width + x] = acc / (end - start) as f32;
+            }
+        }
+        (new_width, out)
+    } else {
+        (n_frames, dim_major)
+    };
+
+    let normalized = normalize_embedding(&display, n_dims, display_width, cfg.normalization);
+    let rgba = colormap_bake(&normalized, display_width, n_dims, cfg.colormap);
+    let image = egui::ColorImage::from_rgba_unmultiplied([display_width, n_dims], &rgba);
+    let texture = ctx.load_texture(
+        format!("embedding_heatmap_{tier_id}"),
+        image,
+        egui::TextureOptions::LINEAR,
+    );
+
+    Ok(EmbeddingHeatmapCache {
+        bundle_id: env.bundle_id,
+        config: cfg,
+        texture,
+        duration_seconds: env.duration_seconds,
+        n_dims,
+        tier_name: tier.name,
     })
 }
 
@@ -3359,6 +3524,12 @@ impl SaddaApp {
             ui.checkbox(&mut self.persisted.tracks.formants_visible, "Formants");
             ui.checkbox(&mut self.persisted.tracks.intensity_visible, "Intensity");
             ui.checkbox(&mut self.persisted.tracks.vad_visible, "VAD (speech)");
+            // E12: embedding-heatmap submenu — tier picker (lists the
+            // continuous_vector tiers of the active bundle) + colormap +
+            // normalization. Hidden when no project / bundle is loaded.
+            ui.menu_button("Embedding heatmap", |ui| {
+                self.embedding_heatmap_submenu(ui);
+            });
             // D10: reference-distribution overlay pickers, one per
             // band-capable lane. Each lists installed distributions whose
             // parameter matches the lane, narrowed by subgroup.
@@ -3392,6 +3563,95 @@ impl SaddaApp {
             // E8: script-panel toggle. Persists across launches.
             ui.checkbox(&mut self.persisted.script_panel_open, "Show Script Panel");
         });
+    }
+
+    /// E12 embedding-heatmap submenu: list the active bundle's
+    /// `continuous_vector` tiers (the natural output of
+    /// `Project.extract_embeddings`) as a one-shot radio selection, with
+    /// a "(None — hide lane)" entry first and colormap / normalization
+    /// sub-pickers afterwards. Renders a single "(no continuous_vector
+    /// tiers yet)" hint when nothing's extractable.
+    fn embedding_heatmap_submenu(&mut self, ui: &mut egui::Ui) {
+        let (Some(env), AppState::ProjectLoaded { project, .. }) =
+            (&self.active_envelope, &self.app_state)
+        else {
+            ui.label(egui::RichText::new("(no bundle loaded)").weak());
+            return;
+        };
+
+        // Tier picker first — most-used control.
+        let tiers = match project.tiers(Some(env.bundle_id)) {
+            Ok(t) => t,
+            Err(e) => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 80, 80),
+                    format!("Couldn't list tiers: {e}"),
+                );
+                return;
+            }
+        };
+        let vector_tiers: Vec<_> = tiers
+            .into_iter()
+            .filter(|t| t.r#type == TierType::ContinuousVector)
+            .collect();
+
+        if ui
+            .radio(
+                self.persisted.embedding.selected_tier_id.is_none(),
+                "None (hide lane)",
+            )
+            .clicked()
+        {
+            self.persisted.embedding.selected_tier_id = None;
+        }
+        if vector_tiers.is_empty() {
+            ui.separator();
+            ui.label(
+                egui::RichText::new(
+                    "(no continuous_vector tiers yet — run Project.extract_embeddings)",
+                )
+                .weak()
+                .italics(),
+            );
+        } else {
+            ui.separator();
+            for t in &vector_tiers {
+                let selected = self.persisted.embedding.selected_tier_id == Some(t.id);
+                if ui.radio(selected, &t.name).clicked() {
+                    self.persisted.embedding.selected_tier_id = Some(t.id);
+                }
+            }
+        }
+
+        ui.separator();
+        ui.label("Colormap");
+        for &(cm, label) in &[
+            (ColormapKind::Cividis, "Cividis (CVD-safe)"),
+            (ColormapKind::Viridis, "Viridis"),
+            (ColormapKind::Magma, "Magma"),
+            (ColormapKind::Greyscale, "Greyscale"),
+        ] {
+            ui.radio_value(&mut self.persisted.embedding.colormap, cm, label);
+        }
+
+        ui.separator();
+        ui.label("Normalization");
+        for &(mode, label) in &[
+            (
+                crate::state::EmbeddingNormalization::PerDimZScore,
+                "Per-dim z-score (default)",
+            ),
+            (
+                crate::state::EmbeddingNormalization::GlobalZScore,
+                "Global z-score",
+            ),
+            (
+                crate::state::EmbeddingNormalization::GlobalMinMax,
+                "Global min–max",
+            ),
+        ] {
+            ui.radio_value(&mut self.persisted.embedding.normalization, mode, label);
+        }
     }
 
     fn help_menu(&mut self, ui: &mut egui::Ui) {
@@ -3542,6 +3802,7 @@ impl SaddaApp {
         // enabled in View → Measure Tracks.
         self.rebuild_tracks_if_stale();
         self.rebuild_overlays_if_stale();
+        self.rebuild_embedding_heatmap_if_stale(ui.ctx());
         if self.active_envelope.is_some() {
             let tracks = self.persisted.tracks;
             // Registered first → bottommost lane (just above the tiers).
@@ -3576,6 +3837,21 @@ impl SaddaApp {
                     .min_size(48.0)
                     .frame(egui::Frame::NONE)
                     .show_inside(ui, |ui| self.f0_lane_pane(ui));
+            }
+            // Embedding heatmap lane — registered LAST so it sits at the
+            // top of the lane stack, directly under the spectrogram. The
+            // taller default reflects that it's a 2D view (dim × time);
+            // a 768-dim wav2vec2 embedding wants more vertical real
+            // estate than a 1-D contour.
+            if self.persisted.embedding.selected_tier_id.is_some()
+                || self.embedding_heatmap_error.is_some()
+            {
+                egui::Panel::bottom("embedding_heatmap_lane")
+                    .resizable(true)
+                    .default_size(MEASURE_LANE_HEIGHT * 2.0)
+                    .min_size(64.0)
+                    .frame(egui::Frame::NONE)
+                    .show_inside(ui, |ui| self.embedding_heatmap_lane_pane(ui));
             }
         }
 
@@ -4023,6 +4299,96 @@ impl SaddaApp {
                 }
             },
         );
+    }
+
+    /// E12 embedding-heatmap lane. Draws the cached texture as a
+    /// `PlotImage` spanning `[0, duration] × [0, n_dims]`, cropped to
+    /// the current x-view (matching the spectrogram + measure-track
+    /// lanes for cursor alignment). Hover surfaces (time, dim, raw
+    /// value) for inspection. When the cache failed to build (selected
+    /// tier missing, sidecar unreadable) the error message renders
+    /// centred in the lane rather than blanking it out.
+    fn embedding_heatmap_lane_pane(&mut self, ui: &mut egui::Ui) {
+        // Sticky build error → render as centred hint and bail. The lane
+        // stays visible so the user sees the explanation without having
+        // to chase a missing-tier message into the bottom banner.
+        if let Some(msg) = self.embedding_heatmap_error.clone() {
+            ui.centered_and_justified(|ui| {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 80, 80),
+                    format!("Embedding heatmap: {msg}"),
+                );
+            });
+            return;
+        }
+        let Some(cache) = &self.active_embedding_heatmap else {
+            ui.centered_and_justified(|ui| {
+                ui.label(
+                    egui::RichText::new("(building embedding heatmap…)")
+                        .weak()
+                        .italics(),
+                );
+            });
+            return;
+        };
+
+        // Lane caption: tier name + dim count, weak so it doesn't
+        // compete with the heatmap colours.
+        ui.horizontal(|ui| {
+            ui.add_space(SIGNAL_LEFT_GUTTER + 4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "Embedding · {} · {} dim{}",
+                    cache.tier_name,
+                    cache.n_dims,
+                    if cache.n_dims == 1 { "" } else { "s" },
+                ))
+                .weak(),
+            );
+        });
+
+        let duration = cache.duration_seconds;
+        let n_dims = cache.n_dims as f64;
+        let centre = egui_plot::PlotPoint::new(duration / 2.0, n_dims / 2.0);
+        let size = egui::Vec2::new(duration as f32, n_dims as f32);
+        let texture_id = cache.texture.id();
+        let cursor = self.timeline.cursor;
+        let view_start = self.timeline.view_start;
+        let view_end = self.timeline.view_end;
+        let mut clicked_time: Option<f64> = None;
+
+        let plot_response = Plot::new("embedding_heatmap_plot")
+            .show_axes([true, true])
+            .y_axis_label("dim")
+            .x_axis_label("seconds")
+            .y_axis_min_width(SIGNAL_LEFT_GUTTER)
+            .allow_drag(false)
+            .allow_zoom(false)
+            .allow_scroll(false)
+            .show(ui, |plot_ui| {
+                plot_ui.set_plot_bounds_x(view_start..=view_end);
+                plot_ui.set_plot_bounds_y(0.0..=n_dims);
+                plot_ui.image(egui_plot::PlotImage::new(
+                    "embedding_heatmap_img",
+                    texture_id,
+                    centre,
+                    size,
+                ));
+                draw_cursor_line(plot_ui, cursor, 0.0, n_dims);
+
+                let resp = plot_ui.response();
+                if resp.clicked() {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        clicked_time = Some(plot_ui.plot_from_screen(pos).x);
+                    }
+                }
+            })
+            .response;
+
+        if let Some(t) = clicked_time {
+            self.timeline.set_cursor(t);
+        }
+        handle_zoom_and_scroll(&plot_response, &mut self.timeline);
     }
 
     fn tier_strip_pane(&mut self, ui: &mut egui::Ui) {

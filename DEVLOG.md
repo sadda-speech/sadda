@@ -6,6 +6,34 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-28 — GUI embedding-heatmap lane (E12 GUI follow-on)
+
+Finished the E12 surface set for the desktop app: `Project.extract_embeddings` has been landing wav2vec2 / Whisper-encoder outputs as B3 `continuous_vector` tiers for a few sessions; now there's a way to *see* them. New lane stacks at the top of the measure-track strip (directly under the spectrogram) and renders the embedding as a `(dim × time)` heatmap synced with the rest of the timeline.
+
+**Decisions (DEVLOG-style multi-option Qs with the user, all defaults accepted):** colormap = **Cividis** (consistency with the recent accessibility-default for spectrograms — CVD-safe + luminance-monotonic); normalization = **per-dim z-score** (the SSL-probing-paper convention; each row centered + scaled to unit variance with the z-scores clipped to `[-3, +3]` before mapping to `[0, 1]`, so one outlier neuron can't wash out finer structure across the matrix); tier-selection UX = **View menu submenu** (matches the existing pattern for the f0 / formants / intensity / VAD lane toggles + the refdist-overlay submenus).
+
+Why per-dim z-score matters here: SSL encoders very often have a handful of high-magnitude dims that sweep ±10 while most stay near 0. A global min–max colormap then paints the whole matrix a near-uniform mid-grey except for those outliers. Per-dim z-score equalizes the visual contribution of every dim — structure shows up; magnitude differences don't drown it out. Same convention the Pasad/Hsu/Mohamed SSL-probing papers use in their figures; expected by the speech-AI-engineer audience.
+
+### Implementation
+
+`crates/app/src/state.rs` (pure-data): new `EmbeddingHeatmapConfig { selected_tier_id, colormap, normalization }` field on `PersistedState`; `EmbeddingNormalization` enum (`PerDimZScore` | `GlobalZScore` | `GlobalMinMax`) with `PerDimZScore` as `Default`; new `normalize_embedding(matrix, n_dims, n_frames, mode)` that takes a `(n_dims × n_frames)` dim-major buffer and returns the normalized `[0, 1]` buffer ready for the existing `colormap_bake`. Degenerate row (`std == 0`) → midpoint `0.5` instead of NaN. Empty input → empty out. Five new unit tests cover (a) per-dim z-score erases magnitude differences when two rows have the same *shape* scaled 10×, (b) constant row → midpoint, (c) `[-3, +3]` clip really does clip (verified with a 1000× larger outlier still pegging at 1.0), (d) global min–max spans `0..1`, (e) all modes accept empty input.
+
+`crates/app/src/main.rs`: new `EmbeddingHeatmapCache { bundle_id, config, texture, duration_seconds, n_dims, tier_name }` mirrors `SpectrogramCache` — same egui `TextureHandle` story, same staleness key shape, same `build_*_texture` / `rebuild_*_if_stale` split. `build_embedding_heatmap_texture` reads the `continuous_vector` matrix from the engine (`Project::read_continuous_vector` returns `Array2<f64>` shaped `[n_frames, n_dims]`), transposes to dim-major `f32` in one pass (small enough cost vs. the GPU upload), buckets the time axis if `n_frames > MAX_SPECTROGRAM_WIDTH` using the same averaging logic as the spectrogram, normalizes, bakes RGBA via `colormap_bake`, and uploads. The matrix isn't kept — re-reading the Parquet sidecar on a rebuild is cheap and saves the MB-scale memory cost of holding a 768-dim embedding tier in app state.
+
+Rebuild surface: `rebuild_embedding_heatmap_if_stale(ctx)` runs alongside the existing `rebuild_tracks_if_stale` / `rebuild_overlays_if_stale`; no selected tier drops the cache (lane disappears immediately); a build error (selected tier missing across a project reopen, sidecar unreadable) is parked in `embedding_heatmap_error` so the lane renders the message centred instead of blanking out silently. Bundle change / delete clears both `active_embedding_heatmap` and `embedding_heatmap_error` from every relevant site.
+
+Render: `embedding_heatmap_lane_pane` mirrors `spectrogram_pane` exactly — `egui_plot::Plot` with `set_plot_bounds_x` cropped to the timeline view + `set_plot_bounds_y(0..n_dims)` + a `PlotImage` centred at `(duration/2, n_dims/2)`. Cursor line + click-to-seek + zoom/scroll handler come from the same shared helpers. Lane caption shows tier name + dim count. The lane is registered LAST in the measure-track stack so it sits directly under the spectrogram (matches the visual story: two 2D views stacked). Default height is `MEASURE_LANE_HEIGHT × 2` because a 768-dim heatmap wants more vertical real estate than a 1-D contour.
+
+View menu: a new "Embedding heatmap" submenu under View. Lists the active bundle's `continuous_vector` tiers as a one-shot radio with a "(None — hide lane)" entry first, plus colormap (Cividis / Viridis / Magma / Greyscale) + normalization (PerDimZScore / GlobalZScore / GlobalMinMax) sub-pickers. Empty case ("no continuous_vector tiers yet — run Project.extract_embeddings") gets a weak italic hint, so users see the obvious next step.
+
+### Gates + deferred
+
+Full local gate green on rust 1.95: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (58 app tests now, +5 from the new normalizer suite; everything else unchanged), `pytest python/tests -q` → 148 passed / 6 skipped. The texture-build side isn't unit-tested (mirrors the spectrogram pattern — egui-dependent assembly is exercised by manual run + the pattern is well-trodden across the existing measure-track lanes).
+
+**Deferred:** (a) hover tooltip showing `(time, dim, raw_value)` — would need access to the un-normalized matrix at render time, easy to add by holding `Vec<f32>` next to the texture if asked; (b) dim sorting (by variance, or by clustering) for finding structure faster in a high-dim model; (c) layer-comparison view stacking N heatmaps for different layers of the same SSL model — the registry-side change to store layer-indexed embedding tiers is a separate slice; (d) a colorbar legend in the lane gutter — `egui_plot` doesn't have a built-in for this, would be drawn manually. None blocking; all reasonable follow-ons if the feature gets used.
+
+---
+
 ## 2026-05-28 — ORT-sidecar packaging: ML "just works" for `pip install sadda[ml]` + app release bundles ship libonnxruntime
 
 Picked up the explicit release-engineering follow-on the previous 2026-05-28 entry deferred: making ONNX Runtime *available* to the wheel and the app binary without any manual `ORT_DYLIB_PATH` setup, so VAD / embeddings work out-of-the-box for users on the supported install paths. Two distribution channels, two sourcing strategies, one shared mental model — both end up at "the engine probe accepts whatever path we land on, or you get the same clean error you got before."

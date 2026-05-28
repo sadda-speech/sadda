@@ -79,6 +79,11 @@ pub struct PersistedState {
     /// native; the Appearance menu exposes ~0.8–2.0.
     #[serde(default = "default_ui_scale")]
     pub ui_scale: f32,
+    /// Embedding-heatmap lane state: which `continuous_vector` tier is
+    /// selected, plus colormap + normalization knobs. Default leaves the
+    /// lane hidden (no selected tier).
+    #[serde(default)]
+    pub embedding: EmbeddingHeatmapConfig,
 }
 
 /// Default UI zoom factor (native size). A free fn because `serde`'s
@@ -505,6 +510,162 @@ impl Default for MeasureTrackConfig {
             formant_max_hz: 5500.0,
             intensity_floor_db: -80.0,
             vad_threshold: 0.5,
+        }
+    }
+}
+
+/// Embedding-heatmap configuration — which `continuous_vector` tier the
+/// lane is rendering, plus colormap + normalization. Lives in
+/// [`PersistedState`] so the user's last view survives a relaunch.
+///
+/// Default leaves `selected_tier_id` as `None`, which hides the lane.
+/// Colormap defaults to [`ColormapKind::Cividis`] for consistency with the
+/// accessibility-default spectrogram colormap (CVD-safe, luminance-
+/// monotonic). Normalization defaults to per-dim z-score, matching the
+/// SSL-probing-paper convention so one high-magnitude dim can't wash out
+/// the rest of the heatmap.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EmbeddingHeatmapConfig {
+    /// Tier id of the displayed `continuous_vector` tier, or `None` when
+    /// the lane is hidden. Persisted across launches; tier ids are
+    /// project-scoped, so a stale id from a different project clears
+    /// itself silently on the next refresh (the rebuild can't find it).
+    #[serde(default)]
+    pub selected_tier_id: Option<i64>,
+    /// Colormap applied to the normalized values. Defaults to Cividis.
+    #[serde(default = "default_embedding_colormap")]
+    pub colormap: ColormapKind,
+    /// Normalization applied before the colormap. Defaults to per-dim
+    /// z-score.
+    #[serde(default)]
+    pub normalization: EmbeddingNormalization,
+}
+
+fn default_embedding_colormap() -> ColormapKind {
+    ColormapKind::Cividis
+}
+
+impl Default for EmbeddingHeatmapConfig {
+    fn default() -> Self {
+        Self {
+            selected_tier_id: None,
+            colormap: ColormapKind::Cividis,
+            normalization: EmbeddingNormalization::default(),
+        }
+    }
+}
+
+/// Normalization strategies for the embedding heatmap. **Per-dim
+/// z-score** is the SSL-probing-paper standard — each row centered +
+/// scaled to unit variance so dim-magnitude differences (very common in
+/// SSL encoders, where a handful of neurons sweep ±10 while most stay
+/// near zero) don't wash out finer structure. The other two are
+/// available for when raw cross-dim magnitudes matter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum EmbeddingNormalization {
+    /// Each row (one dim) is centered to its mean and scaled to its std.
+    /// Z-scores are clipped to `[-3, +3]` before mapping to `[0, 1]`.
+    #[default]
+    PerDimZScore,
+    /// One mean + one std computed across the whole matrix.
+    GlobalZScore,
+    /// Min and max computed across the whole matrix; map to `[0, 1]`.
+    GlobalMinMax,
+}
+
+/// Normalizes a `[n_dims × n_frames]` row-major matrix into a `[0, 1]`
+/// buffer ready for [`colormap_bake`]. Output has the same shape and
+/// memory layout as the input (`[dim * n_frames + frame]`).
+///
+/// Empty inputs return an empty vector. A degenerate row (constant
+/// values, so `std == 0`) maps to the midpoint `0.5` under z-score
+/// normalization rather than dividing by zero. Z-score outputs are
+/// clipped to `[-3, +3]` before scaling so a single outlier doesn't
+/// compress the rest of the dim into a sliver of the colour range.
+pub fn normalize_embedding(
+    matrix: &[f32],
+    n_dims: usize,
+    n_frames: usize,
+    mode: EmbeddingNormalization,
+) -> Vec<f32> {
+    debug_assert_eq!(
+        matrix.len(),
+        n_dims * n_frames,
+        "normalize_embedding: shape mismatch",
+    );
+    if matrix.is_empty() {
+        return Vec::new();
+    }
+    match mode {
+        EmbeddingNormalization::PerDimZScore => {
+            let mut out = vec![0.0f32; matrix.len()];
+            for d in 0..n_dims {
+                let row = &matrix[d * n_frames..(d + 1) * n_frames];
+                let mean = row.iter().copied().sum::<f32>() / row.len() as f32;
+                let var = row
+                    .iter()
+                    .map(|&x| {
+                        let dx = x - mean;
+                        dx * dx
+                    })
+                    .sum::<f32>()
+                    / row.len() as f32;
+                let std = var.sqrt();
+                let out_row = &mut out[d * n_frames..(d + 1) * n_frames];
+                if std == 0.0 {
+                    // Constant row → midpoint, not NaN.
+                    for cell in out_row.iter_mut() {
+                        *cell = 0.5;
+                    }
+                } else {
+                    for (i, &x) in row.iter().enumerate() {
+                        let z = ((x - mean) / std).clamp(-3.0, 3.0);
+                        // z ∈ [-3, +3] → [0, 1]
+                        out_row[i] = (z + 3.0) / 6.0;
+                    }
+                }
+            }
+            out
+        }
+        EmbeddingNormalization::GlobalZScore => {
+            let n = matrix.len() as f32;
+            let mean = matrix.iter().copied().sum::<f32>() / n;
+            let var = matrix
+                .iter()
+                .map(|&x| {
+                    let dx = x - mean;
+                    dx * dx
+                })
+                .sum::<f32>()
+                / n;
+            let std = var.sqrt();
+            if std == 0.0 {
+                return vec![0.5; matrix.len()];
+            }
+            matrix
+                .iter()
+                .map(|&x| {
+                    let z = ((x - mean) / std).clamp(-3.0, 3.0);
+                    (z + 3.0) / 6.0
+                })
+                .collect()
+        }
+        EmbeddingNormalization::GlobalMinMax => {
+            let mut lo = f32::INFINITY;
+            let mut hi = f32::NEG_INFINITY;
+            for &x in matrix {
+                if x < lo {
+                    lo = x;
+                }
+                if x > hi {
+                    hi = x;
+                }
+            }
+            let span = hi - lo;
+            if span == 0.0 {
+                return vec![0.5; matrix.len()];
+            }
+            matrix.iter().map(|&x| (x - lo) / span).collect()
         }
     }
 }
@@ -1066,5 +1227,92 @@ mod timeline_tests {
         assert!((env[0].0 - 4.0 / 16.0).abs() < 1e-6);
         assert!((env[0].1 - 5.0 / 16.0).abs() < 1e-6);
         assert!((env[3].1 - 11.0 / 16.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn embedding_per_dim_zscore_centers_each_row() {
+        // 2 dims × 4 frames. Both rows are arithmetic with the same
+        // *shape* (zero mean, identical relative spacing), just scaled
+        // 10× apart. Per-dim z-score should produce identical output
+        // rows — magnitude scaling washes out, structure stays.
+        let matrix = [-3.0_f32, -1.0, 1.0, 3.0, -30.0, -10.0, 10.0, 30.0];
+        let out = normalize_embedding(&matrix, 2, 4, EmbeddingNormalization::PerDimZScore);
+        assert_eq!(out.len(), 8);
+        for i in 0..4 {
+            assert!(
+                (out[i] - out[4 + i]).abs() < 1e-6,
+                "z-score should erase dim-magnitude differences: dim0[{i}]={} vs dim1[{i}]={}",
+                out[i],
+                out[4 + i],
+            );
+        }
+        // Symmetric input centres at 0.5.
+        let mid = (out[0] + out[3]) / 2.0;
+        assert!((mid - 0.5).abs() < 1e-3, "midpoint {mid}");
+    }
+
+    #[test]
+    fn embedding_per_dim_zscore_constant_row_returns_midpoint() {
+        // A constant row has std = 0; without a guard this divides by
+        // zero and produces NaN. Should map to the midpoint instead.
+        let matrix = [5.0_f32; 4];
+        let out = normalize_embedding(&matrix, 1, 4, EmbeddingNormalization::PerDimZScore);
+        for v in out {
+            assert!(
+                (v - 0.5).abs() < 1e-6,
+                "constant row not mapped to 0.5: {v}"
+            );
+        }
+    }
+
+    #[test]
+    fn embedding_per_dim_zscore_clips_outliers() {
+        // 1 dim × 10 frames: nine zeros + one 1000. With this shape the
+        // outlier z-score is exactly +3 (mean=100, std=300, z=900/300=3),
+        // so the [-3, +3] clip is just kissing it — the outlier pegs at
+        // 1.0 and the rest cluster well below the midpoint.
+        let mut matrix = vec![0.0_f32; 10];
+        matrix[9] = 1000.0;
+        let out = normalize_embedding(&matrix, 1, 10, EmbeddingNormalization::PerDimZScore);
+        assert!(
+            (out[9] - 1.0).abs() < 1e-3,
+            "outlier should peg at 1.0, got {}",
+            out[9],
+        );
+        // A far larger outlier would still clip at 1.0 — confirms the
+        // clip is doing its job rather than passing the raw z-score.
+        let mut matrix_huge = vec![0.0_f32; 10];
+        matrix_huge[9] = 1_000_000.0;
+        let out_huge =
+            normalize_embedding(&matrix_huge, 1, 10, EmbeddingNormalization::PerDimZScore);
+        assert!(
+            (out_huge[9] - 1.0).abs() < 1e-3,
+            "huge outlier should still clip at 1.0, got {}",
+            out_huge[9],
+        );
+        // Non-outliers all share the same raw value (0.0); should be
+        // well below the midpoint.
+        for &v in &out[..9] {
+            assert!(v < 0.5, "non-outlier should be below midpoint, got {v}");
+        }
+    }
+
+    #[test]
+    fn embedding_global_min_max_spans_zero_to_one() {
+        let matrix = [-1.0_f32, 0.0, 1.0, 2.0];
+        let out = normalize_embedding(&matrix, 1, 4, EmbeddingNormalization::GlobalMinMax);
+        assert!((out[0] - 0.0).abs() < 1e-6);
+        assert!((out[3] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn embedding_empty_matrix_returns_empty() {
+        for mode in [
+            EmbeddingNormalization::PerDimZScore,
+            EmbeddingNormalization::GlobalZScore,
+            EmbeddingNormalization::GlobalMinMax,
+        ] {
+            assert!(normalize_embedding(&[], 0, 0, mode).is_empty());
+        }
     }
 }
