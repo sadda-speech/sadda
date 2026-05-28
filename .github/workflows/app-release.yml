@@ -1,9 +1,19 @@
 name: App Release
 
 # Phase 2 G11 — builds the sadda-app desktop binary on three OS
-# matrix runners and uploads the binaries as GitHub Release
-# artifacts. Tag scheme is `v*.*.*-app` to avoid colliding with the
-# Python wheel release workflow's `v*.*.*` tags.
+# matrix runners and uploads them as GitHub Release artifacts. Tag
+# scheme is `v*.*.*-app` to avoid colliding with the Python wheel
+# release workflow's `v*.*.*` tags.
+#
+# Phase 3 ORT-sidecar: each release artifact is an archive (tar.gz /
+# zip) that contains the app binary plus an `onnxruntime/`
+# subdirectory holding the platform-appropriate libonnxruntime + its
+# upstream LICENSE, so ML features (VAD lane, embeddings) work
+# out-of-the-box without a separate ONNX Runtime install. The app's
+# `discover_ort_sidecar()` picks the sidecar up at startup. Pinned to
+# ONNX Runtime 1.22.0 (matches the API version the `ort` 2.0.0-rc.10
+# crate was built against; newer runtimes also work via the ORT C
+# API's backward-compatibility, but we pin for reproducible builds).
 
 on:
   push:
@@ -16,6 +26,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  ORT_VERSION: "1.22.0"
 
 jobs:
   build:
@@ -29,14 +40,26 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary_name: sadda-app
             asset_name: sadda-app-linux-x86_64
+            archive_ext: tar.gz
+            ort_archive: onnxruntime-linux-x64-1.22.0.tgz
+            ort_sha: 8344d55f93d5bc5021ce342db50f62079daf39aaafb5d311a451846228be49b3
+            ort_lib_relpath: lib/libonnxruntime.so.1.22.0
           - os: macos-14
             target: aarch64-apple-darwin
             binary_name: sadda-app
             asset_name: sadda-app-macos-arm64
+            archive_ext: tar.gz
+            ort_archive: onnxruntime-osx-arm64-1.22.0.tgz
+            ort_sha: cab6dcbd77e7ec775390e7b73a8939d45fec3379b017c7cb74f5b204c1a1cc07
+            ort_lib_relpath: lib/libonnxruntime.1.22.0.dylib
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary_name: sadda-app.exe
-            asset_name: sadda-app-windows-x86_64.exe
+            asset_name: sadda-app-windows-x86_64
+            archive_ext: zip
+            ort_archive: onnxruntime-win-x64-1.22.0.zip
+            ort_sha: 174c616efc0271194488642a72f1a514e01487da4dfe84c49296d66e40ebe0da
+            ort_lib_relpath: lib/onnxruntime.dll
     steps:
       - uses: actions/checkout@v5
 
@@ -53,18 +76,62 @@ jobs:
       - name: Build
         run: cargo build --release --bin sadda-app --target ${{ matrix.target }}
 
-      - name: Stage artifact
+      - name: Download + verify ONNX Runtime
         shell: bash
         run: |
-          mkdir -p staged
-          cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" \
-             "staged/${{ matrix.asset_name }}"
+          set -euo pipefail
+          archive="${{ matrix.ort_archive }}"
+          expected="${{ matrix.ort_sha }}"
+          url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/$archive"
+          curl -fL -o "$archive" "$url"
+          actual="$(python -c "import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())" "$archive")"
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::SHA256 mismatch for $archive: got $actual, expected $expected"
+            exit 1
+          fi
+          echo "Verified $archive (sha256 $actual)"
 
-      - name: Upload binary artifact
+      - name: Stage release bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "extracted" "bundle/${{ matrix.asset_name }}/onnxruntime"
+          case "${{ matrix.ort_archive }}" in
+            *.tgz) tar -xzf "${{ matrix.ort_archive }}" -C extracted ;;
+            *.zip) unzip -q "${{ matrix.ort_archive }}" -d extracted ;;
+          esac
+          # ORT archives extract into a single top-level directory.
+          top="$(ls extracted | head -n 1)"
+          cp "extracted/${top}/${{ matrix.ort_lib_relpath }}" \
+             "bundle/${{ matrix.asset_name }}/onnxruntime/"
+          cp "extracted/${top}/LICENSE" \
+             "bundle/${{ matrix.asset_name }}/onnxruntime/LICENSE"
+          # App binary + our notices alongside.
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" \
+             "bundle/${{ matrix.asset_name }}/"
+          cp THIRD_PARTY_NOTICES.md "bundle/${{ matrix.asset_name }}/"
+          cp README.md             "bundle/${{ matrix.asset_name }}/"
+          cp LICENSE-APACHE        "bundle/${{ matrix.asset_name }}/"
+          cp LICENSE-MIT           "bundle/${{ matrix.asset_name }}/"
+
+      - name: Pack archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p staged
+          asset="${{ matrix.asset_name }}.${{ matrix.archive_ext }}"
+          cd bundle
+          case "${{ matrix.archive_ext }}" in
+            tar.gz) tar -czf "../staged/$asset" "${{ matrix.asset_name }}" ;;
+            zip)    python -c "import shutil; shutil.make_archive(r'../staged/${{ matrix.asset_name }}', 'zip', '.', r'${{ matrix.asset_name }}')" ;;
+          esac
+          ls -lh "../staged/$asset"
+
+      - name: Upload bundle artifact
         uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.asset_name }}
-          path: staged/${{ matrix.asset_name }}
+          path: staged/${{ matrix.asset_name }}.${{ matrix.archive_ext }}
           if-no-files-found: error
 
   publish:

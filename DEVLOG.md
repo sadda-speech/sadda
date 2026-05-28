@@ -6,7 +6,56 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
-## 2026-05-28 — ML: harden the ONNX Runtime probe — reject a valid-but-wrong `.so` (the provider shim) with a clear error
+## 2026-05-28 — ORT-sidecar packaging: ML "just works" for `pip install sadda[ml]` + app release bundles ship libonnxruntime
+
+Picked up the explicit release-engineering follow-on the previous 2026-05-28 entry deferred: making ONNX Runtime *available* to the wheel and the app binary without any manual `ORT_DYLIB_PATH` setup, so VAD / embeddings work out-of-the-box for users on the supported install paths. Two distribution channels, two sourcing strategies, one shared mental model — both end up at "the engine probe accepts whatever path we land on, or you get the same clean error you got before."
+
+**Decisions made first (DEVLOG-style multi-option Qs with the user):** ORT source = **Microsoft's GitHub releases** (canonical, SHA-pinned, MIT-redistributable); wheel approach = **`[ml]` extra dep on `onnxruntime`** (leverages PyPI's existing per-platform wheels — no bundling matrix on our side, base install stays lean); app platform scope = **Linux x64 + macOS arm64 + Win x64** (the three the existing app-release matrix already runs); bundle layout next to the exe = **`<exe-dir>/onnxruntime/`** (named subdir, matches Microsoft's tarball layout, leaves room for future bundled libs).
+
+### Python wheel — auto-discovery (`python/sadda/ml/__init__.py`)
+
+`pyproject.toml` gets `[project.optional-dependencies] ml = ["onnxruntime>=1.22"]` — `pip install sadda[ml]` pulls the matching ORT wheel for the user's platform. At first import of `sadda.ml` the new `_discover_ort_dylib()` looks at `Path(onnxruntime.__file__).parent / "capi"`, globs the platform-appropriate name (`libonnxruntime.so*` Linux / `libonnxruntime*.dylib` macOS / `onnxruntime*.dll` Windows), excludes any `providers_shared` filename (the engine's probe rejects it anyway with a pointed error, but skipping the round trip is cheap), and prefers the longest filename — so a versioned `libonnxruntime.so.1.26.0` beats a bare symlink in mixed layouts. If `ORT_DYLIB_PATH` is already set we never override; if `onnxruntime` isn't importable the discovery is silent and `vad()`/`embeddings()` raise the same clean "set `ORT_DYLIB_PATH`" error as before. Lower bound `>=1.22` matches the API version `ort` 2.0.0-rc.10 was built against (the C API is backward-compatible, so newer ORT also works).
+
+The discovery lives in the `sadda.ml` module rather than top-level `sadda/__init__.py` so it sits next to the code that consumes it — but since the package's `__init__` imports `sadda.ml`, both placements end up triggering at the same time anyway.
+
+### App binary — sibling-sidecar discovery (`crates/app/src/main.rs`)
+
+Release bundles place the runtime under `<exe-dir>/onnxruntime/`; the new `discover_ort_sidecar()` runs at the top of `main()` (next to `force_x11_under_wsl()`), reads `current_exe()`, walks `parent()/onnxruntime/`, applies the same platform-specific filename match + providers-shim exclusion + longest-name preference, **and validates each candidate with the engine's probe** before setting the env var — so a wrong file at the right location is filtered out at startup rather than blowing up at first VAD call.
+
+`engine::ml::probe_ort_dylib` was already doing the `OrtGetApiBase` symbol-verify added yesterday; it just had to flip from crate-private to `pub` and re-export through `sadda_engine::probe_ort_dylib` (behind the `ml` feature). Factored the directory-scan half into `find_ort_in_dir(&Path) -> Option<PathBuf>` (pure, deterministic) so it's unit-testable without touching the process environment: two new tests confirm a missing dir returns `None` and a zero-byte file with a runtime-shaped name is rejected by the probe and discovery returns `None`. The env-mutation wrapper stays `unsafe { set_var }` and is exercised only via the app's startup path.
+
+### Release workflow — download + verify + bundle (`.github/workflows/app-release.yml`)
+
+ONNX Runtime pinned to **1.22.0** (`ORT_VERSION` env var at the workflow level). Per-platform matrix entries carry the archive filename, **SHA-256** (verified locally against the upstream `microsoft/onnxruntime` v1.22.0 release: `8344d55f…` linux-x64 / `cab6dcbd…` osx-arm64 / `174c616e…` win-x64), and the relative path inside the archive to the one runtime library we ship (the providers shim, debug `.pdb`/`.dSYM`, cmake files, etc. are dropped — Windows in particular has a 357 MB `.pdb` we definitely don't want). New steps:
+
+1. **Download + verify** — `curl -fL` the archive, sha256 via Python's `hashlib` (portable across `runner.os` without bringing in `shasum`/`sha256sum`/`Get-FileHash` divergences), fail with `::error::` on mismatch.
+2. **Stage release bundle** — extract with `tar -xzf` (Unix) or `unzip -q` (Windows, also via `shell: bash` on the Win runner), copy *only* the one runtime library into `bundle/<asset>/onnxruntime/` along with the upstream `LICENSE`, then drop the app exe + `THIRD_PARTY_NOTICES.md` + `README.md` + `LICENSE-APACHE` + `LICENSE-MIT` alongside the binary.
+3. **Pack archive** — `tar -czf` for Unix targets, `shutil.make_archive` (Python) for Windows so the script is identical across runners. Asset name extension becomes `.tar.gz` / `.zip` — the release artifact shape changes from a bare executable to a directory archive, which is fine for the 0.3.2 binary cut (no users on the old format yet).
+
+`if-no-files-found: error` on the upload + `fail_on_unmatched_files` on the release step both still hold; the publish job is unchanged.
+
+### `THIRD_PARTY_NOTICES.md`
+
+New repo-root file listing ONNX Runtime (MIT, v1.22.0, upstream URL, in-place location in the bundle) and Silero VAD (MIT, v6.2.1, bundled under `models-bundled/silero-vad/`). License texts reproduced verbatim from the canonical upstream sources (diffed against `models-bundled/silero-vad/LICENSE` and the extracted ORT `LICENSE` — matches modulo a trailing newline). Per the canonical-sources principle ([[feedback-canonical-sources]]).
+
+### CI gates
+
+Full local gate on rust 1.95: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings` (also `-p sadda-engine --features download` so the network-feature path stays clippy-clean), `cargo test --workspace` green (engine 148, app 53 incl. the two new sidecar tests; ORT-gated suites pass with `ORT_DYLIB_PATH` set to the conda runtime), `pytest python/tests -q` → 148 passed / 6 skipped (the new `test_ort_dylib_autodiscovery` skips cleanly when `onnxruntime` isn't installed in the .venv, identical pattern to the existing ml-suite skips).
+
+Also fixed an unrelated stale assertion in `release.yml`: the wheel's `CIBW_TEST_COMMAND` was still asserting `sadda.version().startswith('0.1')` from the 0.1 cut. Relaxed to `'0.'` so it tracks the broader 0.x line and doesn't fail on every release bump.
+
+### What this slice deliberately doesn't do
+
+- No source-build of ORT in CI; we use Microsoft's prebuilt binaries (the spike entry from 2026-05-26 already settled this).
+- No bundling of ORT inside the wheel itself (rejected option in the design Q: `[ml]` extra dep is leaner, leverages PyPI's existing per-platform wheels, and lets users skip the ~25 MB if they're not using VAD/embeddings).
+- No platform expansion beyond the existing matrix; Linux-arm64 / Win-arm64 / macOS-x64 wait until there's user demand.
+- No ORT-sidecar packaging *inside* the Python wheel beyond the `[ml]` extra — if a user wants `pip install sadda` without internet they can still set `ORT_DYLIB_PATH` manually, same as before.
+
+The two earlier deferred items (auto-discovery + sidecar packaging) collapse into this one slice, both now closed.
+
+---
+
+
 
 With the GUI "hang" resolved (entry below), turned to the ONNX Runtime issue surfaced during that same session: the user's `ORT_DYLIB_PATH` had been pointed at `libonnxruntime_providers_shared.so` — the small ORT **provider shim**, not the runtime.
 

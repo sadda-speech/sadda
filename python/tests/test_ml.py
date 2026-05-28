@@ -131,6 +131,25 @@ def test_extract_embeddings_writes_tier(tmp_path) -> None:
     assert df.height > 0  # one row per embedding frame
 
 
+def test_ort_dylib_autodiscovery() -> None:
+    """The ``sadda.ml`` import hook sets ``ORT_DYLIB_PATH`` from a
+    pip/conda ``onnxruntime`` install when the user hasn't already pointed
+    it elsewhere. Skips if ``onnxruntime`` isn't installed in this env.
+    """
+    pytest.importorskip("onnxruntime")
+    from pathlib import Path
+
+    from sadda.ml import _discover_ort_dylib
+
+    found = _discover_ort_dylib()
+    assert found is not None, "onnxruntime is importable but no library was located"
+    p = Path(found)
+    assert p.exists(), f"discovered path does not exist: {p}"
+    assert "providers_shared" not in p.name, (
+        f"discovery picked up the provider shim: {p.name}"
+    )
+
+
 def test_model_vad_matches_free_vad(tmp_path) -> None:
     wav = tmp_path / "silence.wav"
     _silence_wav(wav)

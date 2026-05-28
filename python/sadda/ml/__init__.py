@@ -5,10 +5,12 @@ ONNX-model inference over audio. The first model is a bundled
 detection); :func:`vad` returns a speech probability per ~32 ms window and
 :func:`speech_segments` merges those into speech regions.
 
-ONNX Runtime is loaded at runtime (not bundled): if it isn't found, these
-functions raise a clear error rather than crashing. Point ``ORT_DYLIB_PATH``
-at a ``libonnxruntime`` shared library (the desktop app ships one). See the
-2026-05-26 E11 DEVLOG entry.
+ONNX Runtime is loaded at runtime (not linked into the wheel). To make
+this transparent for ``pip install sadda[ml]`` users, this module
+auto-discovers a pip- or conda-installed ``onnxruntime`` at import time
+and sets ``ORT_DYLIB_PATH`` to its bundled library. A user-set
+``ORT_DYLIB_PATH`` is never overridden. If neither is available, the
+inference functions raise a clear error rather than crashing.
 
 Typical usage::
 
@@ -28,10 +30,60 @@ Stability tier: PROVISIONAL.
 
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
 from typing import Optional
 
 from sadda import _native
 from sadda._stability import provisional
+
+
+def _discover_ort_dylib() -> Optional[str]:
+    """Locate ``libonnxruntime`` shipped inside a pip- or conda-installed
+    ``onnxruntime`` package. Returns the absolute path, or ``None`` if the
+    package isn't importable or no library is found.
+
+    The PyPI/conda ``onnxruntime`` wheel ships its runtime under
+    ``<site-packages>/onnxruntime/capi/`` — ``libonnxruntime.so.<ver>`` on
+    Linux, ``libonnxruntime.dylib`` on macOS, ``onnxruntime.dll`` on
+    Windows — alongside the ``libonnxruntime_providers_shared`` shim, which
+    we deliberately exclude (the engine's probe rejects the shim with a
+    pointed error, but skipping it here saves the round trip).
+    """
+    try:
+        import onnxruntime  # type: ignore[import-untyped]
+    except ImportError:
+        return None
+    init = getattr(onnxruntime, "__file__", None)
+    if not init:
+        return None
+    capi = Path(init).parent / "capi"
+    if not capi.is_dir():
+        return None
+    if sys.platform == "win32":
+        candidates = list(capi.glob("onnxruntime*.dll"))
+    elif sys.platform == "darwin":
+        candidates = list(capi.glob("libonnxruntime*.dylib"))
+    else:
+        candidates = list(capi.glob("libonnxruntime.so*"))
+    candidates = [p for p in candidates if "providers_shared" not in p.name]
+    if not candidates:
+        return None
+    # The wheel ships exactly one runtime library; prefer the longest
+    # filename (a versioned name like libonnxruntime.so.1.26.0 over a
+    # plain libonnxruntime.so) for stability across symlink layouts.
+    candidates.sort(key=lambda p: len(p.name), reverse=True)
+    return str(candidates[0])
+
+
+# Set ORT_DYLIB_PATH from the installed onnxruntime, but never override
+# a user-set value. Failure is silent — the engine raises a clean
+# "set ORT_DYLIB_PATH" error at vad-call time if neither path resolves.
+if "ORT_DYLIB_PATH" not in os.environ:
+    _found = _discover_ort_dylib()
+    if _found is not None:
+        os.environ["ORT_DYLIB_PATH"] = _found
 
 __all__ = [
     "Model",

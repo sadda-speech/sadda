@@ -61,7 +61,11 @@ fn default_ort_name() -> &'static str {
 ///   which opens cleanly yet has none of the ORT symbols — a bare
 ///   `dlopen` check would wave it through and `ort` would then fail
 ///   opaquely downstream.
-fn probe_ort_dylib(path: &str) -> Result<()> {
+///
+/// Public so the app shell can validate a sidecar dylib before setting
+/// `ORT_DYLIB_PATH` from it at startup (avoiding a startup-time discovery
+/// that points the runtime at a bogus file).
+pub fn probe_ort_dylib(path: &str) -> Result<()> {
     // SAFETY: opening a shared library for a load check; the handle is
     // dropped at function end (dlopen is ref-counted, so `ort`'s later
     // load is unaffected). No symbols from it are ever called.
