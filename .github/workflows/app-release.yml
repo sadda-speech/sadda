@@ -84,6 +84,14 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          # The default cache key keys on runner.os (Linux/macOS/Windows)
+          # but NOT the runner *image*; ubuntu-22.04 and ubuntu-latest
+          # (now 24.04) both look like "Linux" and share a cache. A
+          # cached build-script binary linked against the newer runner's
+          # glibc (2.39) then fails to load on the older runner. Scope
+          # the key by the matrix `os` to keep their caches separate.
+          key: ${{ matrix.os }}
 
       - name: Build
         run: cargo build --release --bin sadda-app --target ${{ matrix.target }}
