@@ -4,6 +4,192 @@ All notable changes to sadda are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-05-28
+
+Closes Phase 3 of the project plan: clinical voice-quality measures,
+reference distributions, ML inference, calibration, and provenance.
+The Python wheel jumps from `0.1.1` and adds four new submodules
+(`sadda.clinical`, `sadda.refdist`, `sadda.ml`, plus expanded
+`sadda.dsp.ltas`). The desktop app jumps from `0.2.0`-app and gains
+measure-track lanes, reference-distribution overlays, a Reference
+panel (vowel-space scatter + parameter histogram), a VAD lane, a
+provenance / citations modal, and a bundled-ONNX-Runtime sidecar so
+ML features work out-of-the-box. Tagged both `v0.3.0` (Python wheel)
+and `v0.3.0-app` (desktop binaries) — the first release to ship both
+tracks at the same version.
+
+### Added
+
+#### Clinical substrate (Cluster A)
+
+- **Provenance + citations** (`A1`): every analysis records a
+  `processing_run` row; `Project.processing_runs(bundle_id)` and
+  `Project.citations(bundle_id)` return them. The GUI has a
+  read-only "Provenance & citations…" modal with clipboard-copy.
+- **Typed units + clinical discipline** (`A2`): engine-side
+  `Hertz` / `Decibels` / `Ratio` / `Seconds` newtypes (frequency and
+  level only; time stays bare `f64` at the NumPy boundary). New
+  `stable_clinical` stability tier — same API commitment as Stable,
+  with a distinct tier name flagging the research-use caveat. A
+  status-bar "research use only" notice in the GUI.
+- **Instrument calibration** (`A3`): `Instrument` + `Calibration`
+  data types with reference-pair single-offset SPL model;
+  `Project.add_instrument` / `instruments` / `get_instrument` /
+  `bundle_calibration`. Calibration is stored as JSON in the
+  existing `instrument.calibration` column — no migration needed.
+
+#### Clinical measures (Cluster B)
+
+- **Jitter + shimmer** (`B4`): `sadda.clinical.perturbation(audio)`
+  computes pitch-synchronous jitter (local / RAP / PPQ5) and shimmer
+  (local / dB / APQ3 / APQ5) and returns a `PerturbationReport`.
+  Praat-validated within tolerance via a committed golden-fixture
+  validation harness (so CI needs no Praat install).
+- **Harmonics-to-noise + cepstral measures** (`B5`):
+  `sadda.clinical.hnr` (Praat cross-correlation HNR; Praat-validated)
+  and `sadda.clinical.cpps` (cepstral peak prominence, smoothed;
+  offset-invariant peak − robust tilt line; Praat-validated).
+- **LTAS as a first-class feature**: `sadda.dsp.ltas` returns long-term
+  average spectrum levels with `.slope` (band-energy ratio) and
+  `.tilt` (regression dB / kHz) and `.alpha_ratio` helpers.
+- **Composite dysphonia indices + components** (`B6`):
+  `sadda.clinical.avqi` (Acoustic Voice Quality Index, v03.01) and
+  `sadda.clinical.abi` (Acoustic Breathiness Index, v01) — both
+  **provisional** pending byte-level confirmation against the
+  authors' artifact. Component measures `h1_h2`, `gne`
+  (Glottal-to-Noise Excitation Ratio), `hfno`, and `hnr_d`
+  (Dejonckere–Lebacq HNR) also exposed as standalone functions.
+- **Clean-room provenance**: clinical/proprietary-origin measures
+  (AVQI / ABI / MDVP) are clean-room reproductions from
+  publications; proprietary scripts (e.g. Phonanium) are confirmation
+  oracles only, never models.
+
+#### Reference distributions (Cluster C)
+
+- **Resolver + manifest + per-user store** (`C7`): `sadda.refdist`
+  exposes `query`, `get`, `list_all`, `install`, `store_root`
+  (default `~/.local/share/sadda/refdist/`). Distributions carry a
+  `refdist.toml` manifest with `MeasureKind` (observed_distribution
+  | summary_normative_range | target_zone) — encoded distinctly in
+  the GUI so observed / normative / target never visually collide.
+- **Project-level pinning**: `Project.pin_refdist` / `refdist_pins`
+  / `remove_refdist_pin` persist a pin in `project.toml`.
+- **Registry repo + CI** (`C8`): an in-repo
+  [`refdist-registry/`](https://github.com/sadda-speech/sadda/tree/main/refdist-registry)
+  with tier2/tier3 directories, a self-contained `validate.py` CI
+  gate (license check, min-n, distinct-speaker k-anon proxy), and
+  `build_index.py` emitting `index.json`. End-to-end-validated with
+  a synthetic placeholder distribution set.
+- **Bundled distribution + first-run seeding** (`C8`/`D10`):
+  `refdist-bundled/placeholder-amE-vowels` ships with the wheel; the
+  desktop app has a View → "Install bundled reference data" command
+  that seeds the per-user cache.
+- **In-app publishing scaffold** (`C9`): `sadda.refdist.scaffold`
+  writes a registry-ready directory (refdist.toml + data.parquet +
+  provenance + LICENSE stub) from a Polars DataFrame — round-trips
+  through the C8 validator.
+
+#### Desktop GUI (Cluster D / `D10`)
+
+- **Measure-track lanes**: stacked f0 / formants / intensity / VAD
+  lanes below the spectrogram, sharing the time-axis gutter and
+  playback cursor. View-menu visibility toggles; per-lane configs
+  persist across sessions.
+- **Reference-distribution overlays**: timeline bands drawn on the
+  f0 and intensity lanes, with kind-distinct encoding —
+  observed = neutral; normative = green; target = amber + dashed +
+  "TARGET" tag — enforcing the design rule that the GUI must never
+  conflate "what people do" with "what to aim for".
+- **Right-side Reference panel**: vowel-space scatter (F1 × F2 with
+  phonetic axis orientation, optional phone filter, live "measured
+  vowel" diamond at the cursor) + 1-D parameter histogram with
+  p5 / p95 / median markers and a red "you" line.
+
+#### ML inference (Cluster E)
+
+- **Bundled Silero VAD** (`E11`): `sadda.ml.vad(audio)` returns
+  per-window speech probabilities; `sadda.ml.speech_segments(audio,
+  threshold)` merges those into speech regions. The model is bundled
+  under `models-bundled/silero-vad/`. The desktop app gains a "VAD
+  (speech)" measure-track lane (speech-probability contour, dashed
+  threshold, green shading above threshold).
+- **Model registry + resolver**: `sadda.ml.load_model(id)` resolves
+  `sadda/<name>[@version]` (curated set) or `local://<path>` (a
+  directory with `model.toml`, or a bare ONNX file). Parallel
+  registry-repo pattern to refdist: `model-registry/` carries the
+  registry CI; bundled VAD lives under `models-bundled/silero-vad/`
+  with a `model.toml` for tier-1 proof. `sadda.ml.install_model` /
+  `get_model` mirror `sadda.refdist`.
+- **HF passthrough + checksum verification** (`E12`): in
+  `download`-enabled engine builds, `sadda.ml.load_model("hf://<repo>/<file>[@rev]")`
+  fetches an ONNX model from HuggingFace into a per-user cache
+  (default-off cargo feature `download` keeps the base engine
+  network-free per the local-first principle). `verify_checksum`
+  helper for `sha256:…` digests.
+- **Embedding-extraction harness**: `Model.embeddings(audio)`
+  returns a `(frames, dims)` NumPy array for any wav2vec2-style
+  (waveform input) or Whisper-style (log-mel input, optional
+  fixed-frame padding) ONNX model. The manifest's `[input]` section
+  picks the representation, and the harness reads the model's own
+  input/output tensor names so it's model-agnostic.
+- **Embedding tiers**: `Project.extract_embeddings(bundle_id,
+  model_id, tier_name)` runs an embedding model and persists the
+  result as a B3 `continuous_vector` tier with the ml-model
+  `processing_run` recorded inline.
+
+#### ORT-sidecar packaging (0.3.x polish)
+
+- **Wheel `[ml]` extra**: `pip install "sadda[ml]"` pulls
+  `onnxruntime`; the wheel auto-discovers it at import (no manual
+  `ORT_DYLIB_PATH` setup), so `sadda.ml.vad(...)` just works.
+- **Desktop bundle includes libonnxruntime**: each release archive
+  carries an `onnxruntime/` subdirectory with the platform's ORT
+  1.22.0 binary + its upstream LICENSE. The app probes
+  `<exe-dir>/onnxruntime/` at startup and validates each candidate
+  with the engine's `OrtGetApiBase` symbol probe before pointing the
+  runtime at it.
+- **THIRD_PARTY_NOTICES.md**: new repo-root file with verbatim
+  ONNX Runtime + Silero VAD MIT texts.
+- **App release artefact shape changes**: from a bare binary to a
+  `.tar.gz` (Unix) / `.zip` (Windows) archive containing the app +
+  `onnxruntime/` + `THIRD_PARTY_NOTICES.md` + project licenses.
+
+### Fixed
+
+- **ONNX Runtime probe rejects the provider shim**: pointing
+  `ORT_DYLIB_PATH` at `libonnxruntime_providers_shared.so` (a valid
+  but wrong shared object) now produces a distinct, actionable error
+  pre-empting `ort`'s lazy-loader panic. The probe resolves the
+  `OrtGetApiBase` symbol after `dlopen` instead of waving any
+  shared-object through.
+- **WSLg "hang" → window-geometry persistence under WSL**: a
+  restored maximized-at-`(-32768, -32768)` window broke winit's
+  pointer-coordinate mapping, making clicks land offset from the
+  cursor and the window feel frozen. The desktop app now disables
+  window-geometry persistence under WSL (`persist_window:
+  !is_wsl()`); app state (recent projects, prefs) is unaffected.
+- **Engine refdist Parquet reads**: Polars' `write_parquet` defaults
+  to zstd + LargeUtf8, but the engine's `parquet` feature was on the
+  snap-only path — so the engine couldn't read any refdist data
+  file. Added `zstd` to the engine's parquet features and a
+  `LargeStringArray` path.
+
+### Notes
+
+- The 0.2.0 release (app-only) doesn't have a matching PyPI wheel —
+  it bumped `v*.*.*-app` but the wheel surface didn't change. 0.3.0
+  reunifies the version numbers across both tracks.
+- Real-voice clinical validation datasets remain a known gap; v1
+  carries on synthetic + Praat-anchored fixtures, with SVD
+  (CC-BY-4.0) earmarked as the redistributable real-voice option
+  when the validation work lands.
+- AVQI and ABI absolute values remain **provisional** until
+  byte-level confirmation against the authors' artifact lands; the
+  components (jitter, shimmer, HNR, CPPS, LTAS slope, …) are
+  Praat-validated where a Praat oracle exists.
+
+[0.3.0]: https://github.com/sadda-speech/sadda/releases/tag/v0.3.0
+
 ## [0.2.0] — 2026-05-25
 
 First desktop-GUI release. Closes Phase 2 of the project plan: an

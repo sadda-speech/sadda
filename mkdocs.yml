@@ -86,5 +86,8 @@ nav:
   - API reference:
       - sadda.corpus: api/corpus.md
       - sadda.dsp: api/dsp.md
+      - sadda.clinical: api/clinical.md
+      - sadda.refdist: api/refdist.md
+      - sadda.ml: api/ml.md
       - sadda.live: api/live.md
       - sadda.recipe: api/recipe.md

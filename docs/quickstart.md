@@ -7,7 +7,8 @@ pitch and formants, and query the results.
 ## Install
 
 ```bash
-pip install sadda
+pip install sadda           # core
+pip install "sadda[ml]"     # adds onnxruntime — needed for VAD + embeddings
 ```
 
 ## Create a project
@@ -64,27 +65,72 @@ bundle_id = proj.add_bundle(
 ## Run pitch and formants
 
 The DSP surface (`sadda.dsp.*`) is functional — every function takes
-NumPy `float32` arrays and a sample rate, and returns NumPy or
-dataclass results. No corpus dependency:
+an `Audio` (or, for some, NumPy `float32` arrays plus a sample rate)
+and returns NumPy or dataclass results. No corpus dependency:
 
 ```python
 audio = proj.load_audio(bundle_id)
 
-pitch = sadda.dsp.voiced_pitch(
-    audio.samples.astype("float32"),
-    audio.sample_rate,
+times, freqs, voicing = sadda.dsp.voiced_pitch(
+    audio,
     frame_size_seconds=0.030,
     hop_size_seconds=0.010,
     min_freq_hz=75.0,
     max_freq_hz=500.0,
 )
 
-formants = sadda.dsp.formants(
-    audio.samples.astype("float32"),
-    audio.sample_rate,
-    n_formants=4,
-)
+formants = sadda.dsp.formants(audio, n_formants=4)
 ```
+
+## Clinical measures
+
+`sadda.clinical.*` adds voice-quality measures — jitter, shimmer,
+HNR, CPP / CPPS, H1–H2, GNE, and the AVQI / ABI composite indices.
+Every measure is a pure function over an `Audio`:
+
+```python
+perturbation = sadda.clinical.perturbation(audio)
+print(f"jitter local: {perturbation.jitter_local:.4f}")
+print(f"shimmer local dB: {perturbation.shimmer_local_db:.3f}")
+
+hnr_db  = sadda.clinical.hnr(audio)
+cpps_db = sadda.clinical.cpps(audio)
+```
+
+All clinical measures are research-use only. They live in their own
+`stable_clinical` tier — the API commitment is the same as Stable,
+but the tier name flags the clinical-research caveat (see the
+[stability tiers](index.md#stability-tiers) table).
+
+## Reference distributions
+
+`sadda.refdist.*` lets you compare a measurement against normative
+ranges, target zones, or observed corpora. The bundled set ships with
+the wheel; the desktop app's View menu has an "Install bundled
+reference data" command that seeds the per-user cache, and the same
+distributions are available from Python:
+
+```python
+sadda.refdist.install("refdist-bundled/placeholder-amE-vowels")
+vowels = sadda.refdist.get("placeholder-amE-vowels", "0.1.0")
+print(vowels.summary("F1").mean, vowels.summary("F1").sd)
+```
+
+## ML inference (voice activity, embeddings)
+
+With `sadda[ml]` installed, `sadda.ml.vad` runs the bundled Silero
+VAD over an `Audio` and returns per-window speech probabilities:
+
+```python
+times, probs = sadda.ml.vad(audio)
+for start, end in sadda.ml.speech_segments(audio, threshold=0.5):
+    print(f"speech {start:.2f}–{end:.2f}s")
+```
+
+`sadda.ml.load_model("hf://<org>/<repo>/<file>")` (download-enabled
+builds only) lets you pull wav2vec2 / Whisper-style ONNX models and
+extract embeddings as a B3 continuous-vector tier — see
+[`sadda.ml`](api/ml.md) for the full surface.
 
 ## Import existing annotations
 
@@ -100,19 +146,22 @@ under [Round-trip lossiness](lossiness/textgrid.md).
 
 ## Query annotations as a DataFrame
 
-Every tier can be pulled into a Polars DataFrame:
+Every tier can be pulled into a Polars DataFrame. `proj.query` takes
+the integer tier id returned by `add_tier(...)` or `import_textgrid(...)`:
 
 ```python
 import polars as pl
 
-df = proj.query(tier_id="phones")
-print(df)
-# ┌─────┬──────────┬──────────┬───────┐
-# │ id  ┆ start_s  ┆ end_s    ┆ label │
-# ├─────┼──────────┼──────────┼───────┤
-# │ 1   ┆ 0.0      ┆ 0.12     ┆ h     │
-# │ 2   ┆ 0.12     ┆ 0.27     ┆ ɛ     │
-# └─────┴──────────┴──────────┴───────┘
+[phones_tier] = proj.import_textgrid(Path("phones.TextGrid"), bundle_id)
+df = proj.query(phones_tier)
+print(df.head())
+# shape: (2, 8)
+# ┌─────┬─────────┬───────────────┬─────────────┬──────────────────┬───────┬──────────────────────┬───────┐
+# │ id  ┆ tier_id ┆ start_seconds ┆ end_seconds ┆ duration_seconds ┆ label ┆ parent_annotation_id ┆ extra │
+# ├─────┼─────────┼───────────────┼─────────────┼──────────────────┼───────┼──────────────────────┼───────┤
+# │ 1   ┆ 1       ┆ 0.0           ┆ 0.12        ┆ 0.12             ┆ h     ┆ null                 ┆ null  │
+# │ 2   ┆ 1       ┆ 0.12          ┆ 0.27        ┆ 0.15             ┆ ɛ     ┆ null                 ┆ null  │
+# └─────┴─────────┴───────────────┴─────────────┴──────────────────┴───────┴──────────────────────┴───────┘
 ```
 
 ## Record an analysis recipe

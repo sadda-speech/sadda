@@ -23,7 +23,19 @@ Project loaders live at the top of the `sadda` package:
         - name
         - add_bundle
         - bundles
+        - rename_bundle
+        - delete_bundle
         - load_audio
+        - add_speaker
+        - speakers
+        - get_speaker
+        - add_session
+        - sessions
+        - get_session
+        - add_instrument
+        - instruments
+        - get_instrument
+        - bundle_calibration
         - add_tier
         - tiers
         - get_tier
@@ -33,19 +45,28 @@ Project loaders live at the top of the `sadda` package:
         - points
         - add_reference
         - references_for
-        - tier_rows
         - query
         - write_continuous_numeric
         - write_continuous_vector
         - write_categorical_sampled
-        - load_continuous_numeric
-        - load_continuous_vector
-        - load_categorical_sampled
+        - read_continuous_numeric
+        - read_continuous_vector
+        - read_categorical_sampled
+        - dense_path
+        - derived_signal
         - import_textgrid
         - export_textgrid
         - import_eaf
         - export_eaf
-        - commit_recording
+        - record_processing_run
+        - processing_runs
+        - citations
+        - extract_embeddings
+        - pin_refdist
+        - refdist_pins
+        - remove_refdist_pin
+        - audit_user
+        - set_audit_user
 
 ## Data types
 
@@ -66,3 +87,11 @@ Project loaders live at the top of the `sadda` package:
 ::: sadda.Speaker
 
 ::: sadda.Session
+
+::: sadda.Instrument
+
+::: sadda.Calibration
+
+::: sadda.ProcessingRun
+
+::: sadda.Citation
