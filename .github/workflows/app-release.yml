@@ -40,7 +40,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # ubuntu-22.04 (not ubuntu-latest, which is now 24.04 / glibc
+          # 2.39) so the shipped binary's GLIBC NEEDED stays at 2.35.
+          # Covers Ubuntu 22.04 LTS (EOL April 2027), Debian 12+, RHEL 9+,
+          # Fedora 36+ — the realistic 2026-cohort install base. The
+          # Python-wheel side takes the manylinux2014 path via
+          # cibuildwheel for an even lower glibc baseline; the app
+          # binary's user-facing distribution is narrower so we don't
+          # mirror that here.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             binary_name: sadda-app
             asset_name: sadda-app-linux-x86_64
