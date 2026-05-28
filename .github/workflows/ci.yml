@@ -13,6 +13,11 @@ env:
   # needs a Python with a shared libpython. ubuntu-latest's /usr/bin/python3
   # qualifies. See crates/script-engine/README.md for details.
   PYO3_PYTHON: "/usr/bin/python3"
+  # Opt JS actions into Node.js 24 ahead of the 2026-06-02 forced switch
+  # so we silence the deprecation warning + catch any incompatibility
+  # before the runner flips by itself. Covers every JS action without
+  # chasing each maintainer's release cadence.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   test:

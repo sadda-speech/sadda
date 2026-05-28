@@ -7,13 +7,22 @@ name: Release
 on:
   push:
     tags:
+      # `v*.*.*` is glob-permissive — its trailing `*` swallows arbitrary
+      # suffix chars, so a tag like `v0.3.0-app` would match too and fire
+      # this wheel-Release workflow alongside `app-release.yml`'s. The
+      # `!v*-app` exclusion keeps app tags on the app workflow alone.
       - "v*.*.*"
+      - "!v*-app"
   # Allow a manual dispatch for dry-runs (builds wheels, uploads to
   # GitHub Actions artefacts but does NOT publish to PyPI).
   workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+  # Opt JS actions into Node.js 24 ahead of the 2026-06-02 forced switch
+  # (silences the deprecation warning and catches any incompatibility
+  # early; covers every JS action without per-pin maintenance).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-wheels:
