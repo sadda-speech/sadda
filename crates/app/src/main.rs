@@ -92,6 +92,19 @@ fn main() -> eframe::Result<()> {
     }
     let options = eframe::NativeOptions {
         viewport,
+        // Under WSLg/Xwayland, a saved window geometry comes back maximized
+        // at the INT16 position sentinel (-32768,-32768); winit then maps
+        // pointer coordinates against that bogus origin, so hover/clicks
+        // land offset from the cursor and the window feels frozen. Worse,
+        // the bad position is re-saved every run, so it compounds. Disable
+        // window-geometry persistence under WSL: eframe never *writes* the
+        // "window" key, so once it's absent the app always opens at the
+        // ViewportBuilder size below. (eframe restores an existing key
+        // unconditionally — `persist_window` only gates saving — but with
+        // saving off there's nothing to restore.) App state (recent
+        // projects, prefs) is unaffected; it rides the Storage trait, not
+        // this flag. No-op off WSL, where geometry restore is desirable.
+        persist_window: !is_wsl(),
         ..Default::default()
     };
     eframe::run_native(
@@ -106,15 +119,23 @@ fn main() -> eframe::Result<()> {
 /// (which fails on event-loop init — see the `main` preamble). Must
 /// run before `eframe::run_native` builds the event loop.
 fn force_x11_under_wsl() {
-    let is_wsl = std::env::var_os("WSL_INTEROP").is_some()
-        || std::fs::read_to_string("/proc/sys/kernel/osrelease")
-            .map(|s| s.to_ascii_lowercase().contains("microsoft"))
-            .unwrap_or(false);
-    if is_wsl && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+    if is_wsl() && std::env::var_os("WAYLAND_DISPLAY").is_some() {
         // SAFETY: called at the top of `main` before any thread is
         // spawned, so there is no concurrent access to the environment.
         unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
     }
+}
+
+/// True when running under WSL (WSLg). Gates the WSL-specific GUI
+/// workarounds: forcing XWayland over the broken Wayland backend
+/// (`force_x11_under_wsl`) and disabling window-geometry persistence
+/// (which otherwise restores a maximized window parked at the off-screen
+/// position sentinel and breaks pointer-coordinate mapping).
+fn is_wsl() -> bool {
+    std::env::var_os("WSL_INTEROP").is_some()
+        || std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|s| s.to_ascii_lowercase().contains("microsoft"))
+            .unwrap_or(false)
 }
 
 // `append_to_inittab!` registers under the wrapper function's name,
