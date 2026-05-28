@@ -6,7 +6,25 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
-## 2026-05-27 — GUI: keyboard scrubbing + accessibility (palette / colormap / UI scale); WSLg renderer note
+## 2026-05-27 — WSLg GUI "hang" — *actual* root cause: restored window geometry, not GL (fixes the entry below)
+
+The "WSLg GL hang" diagnosis in the entry below was **wrong on every count**. Ran it to ground this session with the user at the machine; the real story:
+
+**Symptom (refined by the user, twice).** The window *does* open and *does* paint the welcome screen — it isn't off-screen and isn't a GL stall. First report was "totally dead to clicks"; the decisive follow-up was that hover highlights fire but **offset from the cursor** — you must hover *above* a Recent-projects row to light it up. That's a pointer-coordinate mismatch, not a freeze.
+
+**Root cause.** eframe's `persistence` feature restores a saved window geometry, and the saved value was `maximized:true` at the INT16 position sentinel `(-32768,-32768)` (confirmed in `~/.local/share/sadda/app.ron`). Under WSLg/Weston the maximized window is shown filling the screen, but **winit believes the window origin is at `-32768,-32768`**, so it translates incoming pointer coordinates against that bogus origin — hit-testing lands offset from where widgets are drawn, so clicks miss and it feels frozen. It **compounds**: the bad position is re-saved every run.
+
+**Why the earlier guesses were wrong.** (a) Renderer is **wgpu → D3D12** (`libd3d12core.so`, `swrast_dri` fallback in the lldb backtrace), *not* glow — the Cargo.toml description was right; the old entry's "glow" claim was unchecked. (b) `Dropped Escape call … 0x03007703` is a benign WSLg GL-virtualisation log line, not the hang. (c) Not ORT (lazy; never at startup). (d) Not conda-lib shadowing: proved with `LD_DEBUG` that the alias loads conda's `libX11/libxcb/libEGL` vs system, isolated libpython to force the WSLg libs — **still froze**, ruling it out. (e) `wsl --shutdown` couldn't have helped: nothing to do with the GPU session.
+
+**How it was actually found.** `rust-lldb` (had to *launch* the app — `ptrace_scope=1` blocks attach) caught the main thread blocked in `winit::Window::is_minimized()` → a synchronous X11 `GetProperty` round-trip via `eframe::is_invisible_or_minimized` (called every paint). That X stall is the *same* Xwayland flakiness the bogus window state induces. `xwininfo`/`xprop` then showed the maximized `-32768` geometry, and `app.ron` confirmed the persisted source.
+
+**Fix (shipped).** `crates/app/src/main.rs`: extracted `is_wsl()` (shared with `force_x11_under_wsl`) and set `NativeOptions { persist_window: !is_wsl(), .. }`. eframe's `persist_window` gates **saving only** — it restores an existing key unconditionally (`create_window` → `load_window_settings`/`apply_window_settings`, `wgpu_integration.rs:997/1007`) — so the flag alone stops the compounding re-saves, and clearing the stale key once leaves nothing to restore. App state (recent projects, prefs) is untouched; it rides the Storage trait, not this flag. Verified by injecting the pathological geometry (still applied → confirms load isn't gated), then clearing + running: window opens windowed on-screen, `_NET_WM_STATE` empty, and **no `"window"` key is written back**. Off-WSL behaviour unchanged.
+
+**Deferred.** eframe restoring geometry unconditionally is a latent footgun if a stale key ever reappears (old build, restored backup). A belt-and-suspenders startup-strip of the `"window"` key under WSL (`eframe::storage_dir(APP_TITLE).join("app.ron")`) was considered and **not** done — it means hand-editing eframe's RON storage from `main()`, fragile for an edge case that `persist_window:false` already prevents in normal use.
+
+---
+
+## 2026-05-27 — GUI: keyboard scrubbing + accessibility (palette / colormap / UI scale); ~~WSLg renderer note~~ (§3 superseded — see entry above)
 
 Three user asks from a session of hands-on testing. Two shipped; one is a host-environment diagnosis pending the user's confirmation.
 
@@ -24,7 +42,9 @@ The user asked for accessible plot palettes + font-size control; chose **CVD-saf
 
 `state.rs` stays egui-free (the enum + serde defaults live there; colour resolution stays in `main.rs`). Tests: palette schemes non-aliasing + internally distinct; Cividis sampling distinct; appearance defaults deserialise to native scale (guarding the serde default against f32's `0.0`, which would shrink the UI to nothing). Deferred (logged): per-element colour pickers if fine control is wanted later; recolouring the single-series lanes for full scheme coherence.
 
-### 3. WSLg GL hang (diagnosis, pending user confirmation)
+### 3. WSLg GL hang (diagnosis, pending user confirmation) — ❌ SUPERSEDED
+
+> **Correction (later same day):** this diagnosis was wrong — see the top-of-log entry "WSLg GUI 'hang' — *actual* root cause: restored window geometry, not GL". The renderer is wgpu/D3D12 (not glow), the `Dropped Escape call` line is benign, and the real cause was a restored maximized/off-screen window geometry breaking winit's pointer mapping. Left below as a record of the wrong turn.
 
 User reported the app hanging at launch after `Dropped Escape call with ulEscapeCode : 0x03007703`. Diagnosis: that line is a WSLg DirectX/GL-virtualisation message emitted during GL context creation; the app renders via **glow (OpenGL)** (eframe with only the `persistence` feature → default renderer). It is **not** ORT (load-dynamic, loaded lazily on first VAD/embedding call, never at startup — and the user's `ORT_DYLIB_PATH` pointed at `libonnxruntime_providers_shared.so`, the tiny provider shim, not `libonnxruntime.so.1.26.0`) and **not** the new window icon (decoded pre-`run_native`, before the GL message). Mitigations offered, in order: `wsl --shutdown` then relaunch; `LIBGL_ALWAYS_SOFTWARE=1` to isolate the hardware-GL path; if persistent, switch the app to the **wgpu** renderer (the original stack plan) or make the renderer env-selectable. Awaiting which one yields a window before hardening.
 
