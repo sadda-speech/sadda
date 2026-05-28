@@ -6,6 +6,26 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-28 — ML: harden the ONNX Runtime probe — reject a valid-but-wrong `.so` (the provider shim) with a clear error
+
+With the GUI "hang" resolved (entry below), turned to the ONNX Runtime issue surfaced during that same session: the user's `ORT_DYLIB_PATH` had been pointed at `libonnxruntime_providers_shared.so` — the small ORT **provider shim**, not the runtime.
+
+**The trap.** `ensure_ort_available()` (the no-panic guard that runs before any `ort` call, since `ort` *aborts* in its lazy loader on a bad runtime) only checked that the path `dlopen`s. But the provider shim is a perfectly valid shared object — it opens cleanly — it just contains none of the ORT C API. So the probe gave a **green light**, then `ort` failed downstream with an opaque error. The probe was testing the wrong thing: "is this *a* library?" instead of "is this *the runtime*?"
+
+Confirmed on the machine with `nm -D`: the real `libonnxruntime.so.1.26.0` exports `OrtGetApiBase` (the ORT C API entry point); the provider shim does not. (Also noted: conda ships only the versioned `libonnxruntime.so.1.26.0`, no unversioned symlink, so the unset-path fallback `"libonnxruntime.so"` can't resolve there either — but that's an env-setup matter the error message now addresses, not a code bug.)
+
+**Fix (`crates/engine/src/ml.rs`).** Extracted `probe_ort_dylib(path)` from the env-reading `ensure_ort_available()` (so it's testable without touching the process environment). After `dlopen` succeeds it now resolves the `OrtGetApiBase` symbol; if absent, it returns a distinct, actionable `EngineError::Ml` — names the likely cause (the provider shim) and says to point `ORT_DYLIB_PATH` at the runtime itself, noting a versioned filename like `libonnxruntime.so.1.26.0` is fine. Two failure modes → two messages ("not loadable" vs. "loads but isn't the runtime"). The symbol is only *resolved*, never called.
+
+This is a shared engine path, so the better error reaches all three surfaces at once — engine VAD/embeddings, Python `sadda.ml`, and the GUI VAD lane — no per-surface change needed.
+
+**Tests** (`ml::tests`, both pure / ORT-free, run under the standard `cargo test --workspace` gate): a missing path → the "not loadable" error; a guaranteed-present system C library (`libc.so.6` / `libSystem.B.dylib` / `kernel32.dll`) → the `OrtGetApiBase` rejection — a portable stand-in for "wrong `.so`" needing no ONNX Runtime (the test executable can't be used: Linux refuses to `dlopen` a PIE). Verified the happy path is untouched: with `ORT_DYLIB_PATH` set to the real runtime, the ORT-gated `vad_bundled_runs_on_silence` and the full ml suite pass — the real lib clears the new symbol check.
+
+Full gate green on 1.95: fmt, clippy (workspace `--all-targets` + `-p sadda-engine --features ml`, `-D warnings`), `cargo test --workspace` (all groups; the 148-test engine-lib group includes the two new probe tests). (The `sadda-app` test binary needs conda's `libpython3.12.so.1.0` on `LD_LIBRARY_PATH` to run in a bare shell — a pre-existing harness-env note, unrelated to this change.)
+
+**Deferred (unchanged).** Auto-discovering a pip/conda-installed `libonnxruntime.so.N` when `ORT_DYLIB_PATH` is unset, and the per-platform ORT-sidecar packaging for the 0.3.2 binaries, both remain open release-engineering items — the user scoped this slice to the probe.
+
+---
+
 ## 2026-05-27 — WSLg GUI "hang" — *actual* root cause: restored window geometry, not GL (fixes the entry below)
 
 The "WSLg GL hang" diagnosis in the entry below was **wrong on every count**. Ran it to ground this session with the user at the machine; the real story:

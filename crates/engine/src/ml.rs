@@ -47,24 +47,52 @@ fn default_ort_name() -> &'static str {
     }
 }
 
-/// Probes that the ONNX Runtime shared library is loadable *before*
-/// invoking `ort` — which otherwise `panic!`s in its lazy loader on a
-/// missing runtime (a library must not abort the process for an absent
-/// optional dependency). Resolves the same path `ort` will: the
-/// `ORT_DYLIB_PATH` env var, else the platform default name on the
-/// system search path.
-pub(crate) fn ensure_ort_available() -> Result<()> {
-    let path = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| default_ort_name().to_string());
+/// Probes that the ONNX Runtime shared library at `path` is both
+/// loadable *and* actually the runtime, *before* invoking `ort` — which
+/// otherwise `panic!`s in its lazy loader on a bad runtime (a library
+/// must not abort the process for an absent/misconfigured optional
+/// dependency). Two failure modes, two distinct errors:
+///
+/// * the library can't be `dlopen`ed at all (missing, wrong arch); or
+/// * it loads but doesn't export the ORT C API entry point
+///   `OrtGetApiBase`, so it is a valid shared object but *not* the
+///   runtime. The classic trip-up is pointing `ORT_DYLIB_PATH` at
+///   `libonnxruntime_providers_shared.so` (the small provider shim),
+///   which opens cleanly yet has none of the ORT symbols — a bare
+///   `dlopen` check would wave it through and `ort` would then fail
+///   opaquely downstream.
+fn probe_ort_dylib(path: &str) -> Result<()> {
     // SAFETY: opening a shared library for a load check; the handle is
-    // dropped immediately (dlopen is ref-counted, so `ort`'s later load
-    // is unaffected). No symbols from it are called here.
-    match unsafe { libloading::Library::new(&path) } {
-        Ok(_handle) => Ok(()),
-        Err(e) => Err(EngineError::Ml(format!(
+    // dropped at function end (dlopen is ref-counted, so `ort`'s later
+    // load is unaffected). No symbols from it are ever called.
+    let lib = unsafe { libloading::Library::new(path) }.map_err(|e| {
+        EngineError::Ml(format!(
             "ONNX Runtime not loadable ({path}): {e}. Set ORT_DYLIB_PATH to a \
              libonnxruntime shared library (see the 2026-05-26 E11 DEVLOG entry)."
-        ))),
+        ))
+    })?;
+    // SAFETY: resolving a symbol's address only; it is never called.
+    if unsafe { lib.get::<unsafe extern "C" fn() -> *const std::ffi::c_void>(b"OrtGetApiBase\0") }
+        .is_err()
+    {
+        return Err(EngineError::Ml(format!(
+            "the shared library at {path} loads but does not export `OrtGetApiBase`, \
+             so it is not the ONNX Runtime (the usual cause is pointing ORT_DYLIB_PATH \
+             at `libonnxruntime_providers_shared.so`, the provider shim). Set \
+             ORT_DYLIB_PATH to the runtime itself — `libonnxruntime.so` / `.dylib` / \
+             `onnxruntime.dll`; a versioned filename such as `libonnxruntime.so.1.26.0` \
+             is fine."
+        )));
     }
+    Ok(())
+}
+
+/// Resolves the ONNX Runtime path the same way `ort` will — the
+/// `ORT_DYLIB_PATH` env var, else the platform default name on the system
+/// search path — and [`probe_ort_dylib`]s it before any `ort` call.
+pub(crate) fn ensure_ort_available() -> Result<()> {
+    let path = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| default_ort_name().to_string());
+    probe_ort_dylib(&path)
 }
 
 /// One Silero-VAD window: its centre time (seconds) and the model's
@@ -223,5 +251,41 @@ mod tests {
             speech_prob: 0.1,
         }];
         assert!(speech_segments(&frames, 0.5).is_empty());
+    }
+
+    #[test]
+    fn probe_ort_rejects_missing_library() {
+        let err = probe_ort_dylib("/nonexistent/libonnxruntime.so.999")
+            .expect_err("a missing path must not pass the probe");
+        let EngineError::Ml(msg) = err else {
+            panic!("expected EngineError::Ml, got {err:?}");
+        };
+        assert!(msg.contains("not loadable"), "unexpected message: {msg}");
+    }
+
+    #[test]
+    fn probe_ort_rejects_non_ort_library() {
+        // A guaranteed-present system C library is a valid, loadable shared
+        // object that does not export `OrtGetApiBase` — a portable stand-in
+        // for a "wrong .so" (e.g. the provider shim), needing no ONNX
+        // Runtime. (Can't use the test executable: Linux refuses to dlopen
+        // a position-independent executable.)
+        #[cfg(target_os = "linux")]
+        let sys_lib = "libc.so.6";
+        #[cfg(target_os = "macos")]
+        let sys_lib = "libSystem.B.dylib";
+        #[cfg(target_os = "windows")]
+        let sys_lib = "kernel32.dll";
+
+        match probe_ort_dylib(sys_lib) {
+            Err(EngineError::Ml(msg)) if msg.contains("OrtGetApiBase") => {}
+            // An unusual libc layout (e.g. musl) may not load under this
+            // name; then the symbol branch isn't reached here, but the
+            // missing-library branch is covered by the test above.
+            Err(EngineError::Ml(msg)) if msg.contains("not loadable") => {
+                eprintln!("skipping: {sys_lib} not dlopen-able here: {msg}");
+            }
+            other => panic!("expected the OrtGetApiBase rejection, got {other:?}"),
+        }
     }
 }
