@@ -6,6 +6,16 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-30 — GUI debuggability: `SADDA_DEBUG` aids + headless layout regression tests
+
+Built after the tier-lane alignment bug, which cost two wrong fixes because I was debugging blind (couldn't see the GUI; the breakthrough only came from hand-added `eprintln!` coordinates the user had to transcribe off a terminal that wouldn't copy). The lesson: the highest-value debugging affordances are **artifacts I can read directly** — a *file*, not a console echo. Added (`crates/app/src/debug.rs`, all gated by the `SADDA_DEBUG` env var so normal runs pay one cached bool check):
+
+- **File-based debug log** — `debug::log` / the `dlog!` macro append to a log file (`<tmp>/sadda-debug.log`, override `SADDA_DEBUG_LOG`) *and* stderr. The file is the point: it survives terminal copy/scroll and can be read back without a human. The tier-lane + waveform geometry instrumentation is now permanent-but-gated (`[layout] …` lines) instead of hand-added each time.
+- **Screenshot to PNG** — F12 in debug mode requests an egui screenshot (`ViewportCommand::Screenshot`), saved to `<tmp>/sadda-shot-N.png` via the `image` crate (PNG-only feature). Lets me *see* visual/layout bugs directly. Encoding path unit-tested.
+- **egui hover-debug overlays** — `ctx.set_debug_on_hover(true)` under the flag (widget rects on hover) for interactive poking.
+
+**Decision — headless layout regression tests via egui's own harness, not `egui_kittest`.** The original bug was the *gutter allocation collapsing* (`allocate_ui_with_layout` shrinks to content), not bad width math — so it only reproduces in a real layout pass. I extracted the alignment-critical allocation into a shared free fn `allocate_tier_row` (used by both the live strip and the test, so the test guards the real code path) and assert the resulting rects through egui's built-in single-frame harness (`Context::run_ui` → root `Ui`) — **no new dependency**. Two tests: gutter reserves the full measured width + lane sits flush against it at the plot data-area width; and the pre-measurement fixed-gutter fallback. Chose this over `egui_kittest` because: (a) kittest's distinctive value is *pixel* snapshots, which need wgpu-in-tests + a fetch + a rasterizer — heavy, against the lean-deps ethos; (b) for an *alignment* bug a rect assertion is more precise than a pixel diff and runs anywhere in CI; (c) the F12 runtime screenshot already covers the viewable-image need for interactive debugging. Full `egui_kittest` pixel-snapshot tests remain an option if we later want automated visual-diffing in CI.
+
 ## 2026-05-30 — Design: annotation campaign management (the PI / annotator-team layer)
 
 Extends the annotation-workflow design (entry below) with the *roles + lifecycle* around a real study (logged-not-built). Full lifecycle (user's): a **PI** explores a target group of recordings → defines targets + criteria from the research questions, building the rubric as they work → **assigns subsets of targets to N annotators** → each annotator iterates over their assigned targets → all contribute files back to a central store / the PI → who **compiles** them into a complete set and **QAs** for completeness + accuracy → analysis.

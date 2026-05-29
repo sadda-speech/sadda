@@ -7,6 +7,7 @@
 //! (A1)" for the design rationale and the cut-list for what
 //! deliberately doesn't ship at A1.
 
+mod debug;
 mod playback;
 mod sadda_app;
 mod state;
@@ -3063,6 +3064,41 @@ const BOUNDARY_HIT_ZONE_PX: f32 = 6.0;
 /// Smaller drags are treated as plain clicks (no new interval).
 const MIN_DRAFT_CREATE_SECONDS: f64 = 0.005;
 
+/// Allocates one tier row's gutter + time-lane within `ui`, advancing the
+/// cursor left-to-right, and returns their rects and responses.
+///
+/// The gutter reserves the signal plots' y-axis width (from the measured
+/// `lane_geom = (gutter_width, data_area_width)`) via `allocate_exact_size`
+/// — **not** `allocate_ui_with_layout`, which shrinks to its content and was
+/// the cause of the tier-lane misalignment bug. With `item_spacing.x` zeroed,
+/// the lane's left edge lands exactly at `row_left + gutter_w`, so the lane's
+/// data area lines up with the egui_plot signal lanes that share the panel's
+/// left edge. Before the waveform is measured (`None`), the fixed
+/// `SIGNAL_LEFT_GUTTER` and remaining width are used.
+///
+/// Shared by the live tier strip and the `layout_tests` regression test so
+/// the alignment-critical allocation is exercised by exactly one code path.
+fn allocate_tier_row(
+    ui: &mut egui::Ui,
+    lane_geom: Option<(f32, f32)>,
+) -> (egui::Rect, egui::Response, egui::Rect, egui::Response) {
+    ui.spacing_mut().item_spacing.x = 0.0;
+    let gutter_w = lane_geom
+        .map(|(g, _)| g.max(40.0))
+        .unwrap_or(SIGNAL_LEFT_GUTTER);
+    let (gutter_rect, gutter_resp) = ui.allocate_exact_size(
+        egui::Vec2::new(gutter_w, TIER_LANE_HEIGHT),
+        egui::Sense::click(),
+    );
+    let avail = ui.available_size_before_wrap();
+    let lane_w = lane_geom.map(|(_, w)| w).unwrap_or(avail.x);
+    let (lane_rect, lane_resp) = ui.allocate_exact_size(
+        egui::Vec2::new(lane_w, TIER_LANE_HEIGHT),
+        egui::Sense::click_and_drag(),
+    );
+    (gutter_rect, gutter_resp, lane_rect, lane_resp)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_interval_lane(
     painter: &egui::Painter,
@@ -3532,6 +3568,31 @@ impl eframe::App for SaddaApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // `SADDA_DEBUG` aids: egui's hover-debug overlays (widget rects on
+        // hover) plus F12 screenshot capture to a PNG we can read back. All
+        // no-ops when the env var is unset. See `debug.rs`.
+        if debug::enabled() {
+            let ctx = ui.ctx();
+            ctx.set_debug_on_hover(true);
+            if ctx.input(|i| i.key_pressed(egui::Key::F12)) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+                debug::log("screenshot requested (F12)");
+            }
+            let shots: Vec<std::sync::Arc<egui::ColorImage>> = ctx.input(|i| {
+                i.raw
+                    .events
+                    .iter()
+                    .filter_map(|e| match e {
+                        egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            });
+            for img in &shots {
+                debug::save_screenshot(img);
+            }
+        }
+
         self.apply_theme(ui.ctx());
         // Accessibility: apply the persisted UI zoom factor. Idempotent
         // and cheap — egui only relays out when the value actually
@@ -4425,6 +4486,14 @@ impl SaddaApp {
             let frame = plot_response.transform.frame();
             let gutter_w = frame.left() - widget_left;
             self.lane_geom = Some((gutter_w, frame.width()));
+            dlog!(
+                "[layout] waveform widget_left={:.1} frame=[{:.1},{:.1}] gutter_w={:.1} data_w={:.1}",
+                widget_left,
+                frame.left(),
+                frame.right(),
+                gutter_w,
+                frame.width()
+            );
         }
 
         apply_lane_selection_drag(
@@ -4996,21 +5065,11 @@ impl SaddaApp {
                     // lane's left edge sits at exactly
                     // (row_left + SIGNAL_LEFT_GUTTER), matching where
                     // the plots' inner plot areas start.
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    // Gutter: reserve EXACTLY the signal plots' y-axis width
-                    // (measured from the waveform), applied from this panel's
-                    // own left so the lane's data area lines up with the
-                    // egui_plot lanes. `allocate_exact_size` is essential —
-                    // `allocate_ui_with_layout` shrinks to its content (the
-                    // short tier name), which left-shifted the lane. Falls
-                    // back to the fixed gutter until the waveform is measured.
-                    let gutter_w = lane_geom
-                        .map(|(g, _)| g.max(40.0))
-                        .unwrap_or(SIGNAL_LEFT_GUTTER);
-                    let (gutter_rect, gutter_resp) = ui.allocate_exact_size(
-                        egui::Vec2::new(gutter_w, TIER_LANE_HEIGHT),
-                        egui::Sense::click(),
-                    );
+                    // Reserve the gutter + time-lane via the shared helper so
+                    // the alignment-critical allocation is the same code the
+                    // `layout_tests` regression test exercises.
+                    let (gutter_rect, gutter_resp, rect, response) =
+                        allocate_tier_row(ui, lane_geom);
                     // Active tier (the span-selection target) is highlighted;
                     // the name is painted into the reserved gutter rect.
                     let name_color = if active_tier_id == Some(tier.id) {
@@ -5041,13 +5100,13 @@ impl SaddaApp {
                             ui.close();
                         }
                     });
-                    // Right: time-positioned lane — width matched to the
-                    // plot data area so the lane's right edge aligns too.
-                    let avail = ui.available_size_before_wrap();
-                    let lane_w = lane_geom.map(|(_, w)| w).unwrap_or(avail.x);
-                    let lane_size = egui::Vec2::new(lane_w, TIER_LANE_HEIGHT);
-                    let (rect, response) =
-                        ui.allocate_exact_size(lane_size, egui::Sense::click_and_drag());
+                    dlog!(
+                        "[layout] tier '{}' gutter_w={:.1} lane=[{:.1},{:.1}]",
+                        tier.name,
+                        gutter_rect.width(),
+                        rect.left(),
+                        rect.right()
+                    );
                     let painter = ui.painter_at(rect);
                     let visuals = ui.visuals();
 
@@ -6187,6 +6246,82 @@ fn python_layout_job(ui: &egui::Ui, text: &str) -> egui::text::LayoutJob {
         );
     }
     job
+}
+
+#[cfg(test)]
+mod layout_tests {
+    //! Headless regression tests for tier-lane horizontal alignment, run
+    //! through egui's built-in single-frame harness (`Context::run`) — no GUI,
+    //! no extra deps. These guard the bug we hit where the gutter, allocated
+    //! with `allocate_ui_with_layout`, collapsed to the tier-name width and
+    //! left-shifted the lane out of alignment with the signal plots.
+    use super::*;
+    use eframe::egui;
+
+    /// Runs `add` inside one egui frame on a `width`×200 screen, within a
+    /// horizontal layout off the root `Ui`. The alignment assertions are
+    /// relative (lane vs gutter), so the absolute origin is immaterial — what
+    /// matters is that the same allocation runs in a real egui layout pass.
+    fn run_one_frame<R>(width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width, 200.0),
+            )),
+            ..Default::default()
+        };
+        // `run_ui`'s closure is `FnMut`; move the one-shot `add` through an
+        // `Option` so it is consumed on the single invocation.
+        let mut add = Some(add);
+        let mut out = None;
+        let _ = ctx.run_ui(raw, |ui| {
+            if let Some(add) = add.take() {
+                out = Some(ui.horizontal(add).inner);
+            }
+        });
+        out.expect("run_ui invokes the ui closure once")
+    }
+
+    #[test]
+    fn tier_row_reserves_full_gutter_and_aligns_lane() {
+        // Simulate a measured signal plot: 120px y-axis gutter, 800px data.
+        let geom = Some((120.0_f32, 800.0_f32));
+        let (gutter, _g, lane, _l) = run_one_frame(1000.0, |ui| allocate_tier_row(ui, geom));
+        // The gutter must reserve the FULL measured width — the original bug
+        // collapsed it to the (much narrower) tier-name width.
+        assert!(
+            (gutter.width() - 120.0).abs() < 0.5,
+            "gutter width = {} (expected 120)",
+            gutter.width()
+        );
+        // The lane sits flush against the gutter — no gap, no overlap — so its
+        // left edge coincides with the signal plots' data-area left.
+        assert!(
+            (lane.left() - gutter.right()).abs() < 0.5,
+            "lane.left {} != gutter.right {}",
+            lane.left(),
+            gutter.right()
+        );
+        // And it spans exactly the plot data-area width, so the right edges
+        // line up too.
+        assert!(
+            (lane.width() - 800.0).abs() < 0.5,
+            "lane width = {} (expected 800)",
+            lane.width()
+        );
+    }
+
+    #[test]
+    fn tier_row_falls_back_to_fixed_gutter_before_measurement() {
+        // Before the waveform is measured the gutter uses the fixed default.
+        let (gutter, _g, _lane, _l) = run_one_frame(1000.0, |ui| allocate_tier_row(ui, None));
+        assert!(
+            (gutter.width() - SIGNAL_LEFT_GUTTER).abs() < 0.5,
+            "gutter width = {} (expected {SIGNAL_LEFT_GUTTER})",
+            gutter.width()
+        );
+    }
 }
 
 #[cfg(test)]
