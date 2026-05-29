@@ -6,6 +6,29 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-30 — Design: annotation campaign management (the PI / annotator-team layer)
+
+Extends the annotation-workflow design (entry below) with the *roles + lifecycle* around a real study (logged-not-built). Full lifecycle (user's): a **PI** explores a target group of recordings → defines targets + criteria from the research questions, building the rubric as they work → **assigns subsets of targets to N annotators** → each annotator iterates over their assigned targets → all contribute files back to a central store / the PI → who **compiles** them into a complete set and **QAs** for completeness + accuracy → analysis.
+
+So Sadda isn't just an annotator's editor; it's a **research annotation *campaign* manager**. Prior art that does the team layer: **INCEpTION** (project + per-document assignment + a *curator* role + a monitoring page + agreement — the research analog), **Label Studio / SageMaker Ground Truth** (task queue + overlap + review/QA). All are **cloud/server**; Sadda's distinctive constraint is **local-first / no server**, so distribution is **package hand-off**, not a shared web app — and because assignments are **disjoint**, compiling is a mostly conflict-free *union* (only intentionally-overlapped targets need adjudication, handled by the one agreement engine).
+
+**Converged decisions:**
+- **Targets are the first-class unit of work** — `target = (file, RoI, target-type, status)`, produced by the **criteria engine's RoI queries** (or hand-marked); status ∈ unassigned / assigned / in-progress / done / flagged. "Assign a whole file" is the shortcut for "all its targets." This is the bridge: criteria *generate* targets, the assignment layer *distributes* them.
+- **Assignment is a dedicated first-class object** — `assignment(target_id, annotator, role[primary/secondary], status)`, **separate** from annotation data and the rubric (so roster churn never bumps the rubric version and the QA dashboard can query it; optionally visualised as a color overlay). **Editable throughout.** Supports **N annotators per target** (overlap → agreement), and **seeded random assignment + re-randomize-of-remaining** when the roster changes (the seed is stored for reproducibility, consistent with the no-`Math.random`-in-scripts ethos).
+- **Distribution = per-annotator export package + import/merge** (no server). The PI exports each annotator a self-contained **sub-project** (their assigned bundles + targets + the *frozen* rubric version); they work offline; the PI imports + merges back — disjoint assignments union cleanly, overlap targets go to adjudication. Leans on the corpus model (a project is dir+SQLite+audio, so a package is a project subset).
+- **PI exploratory phase = a lab-notebook that feeds the rubric.** Beyond corpus + signals + tier-editing + the criteria-iterate loop, a **per-target-type notebook** captures measurement actions + notes as the PI explores, with one-click **"promote to rubric rule / criterion."** The rubric is built by distilling exploration, so its *own creation* is provenance; ties to recipes (recording the measurement actions). Same iterate-loop as the criteria refinement, run earlier by the PI.
+- **Compile + QA dashboard** — completeness straight from the assignment table (every assigned target done?); accuracy from the agreement engine (overlap κ/boundary, out-of-vocab, missing labels, boundary sanity); per-annotator progress.
+
+**Integrated roadmap** (supersedes the slice list in the entry below; dependency-ordered):
+1. Rubric object + controlled vocab + manual labeling UX + first-class annotation **status** columns.
+2. Criteria engine v1 (cross-tier RoI selection + within-interval anchors/spans) → preview/`auto` tier → diff/accept/iterate; **formalise the `target` object here** (criteria emit targets).
+3. Signal-function criteria (declarative wrappers over the DSP/clinical measures).
+4. **Campaign layer:** assignment object (editable, role, status) + seeded random-assign / re-randomize-remaining + per-annotator export package + import/merge. (Depends on targets from S2.)
+5. Annotator throughput + QA core: flag/status UX + work queue (next-target / next-flagged + progress) + the comparison/**agreement engine** (κ, boundary agreement, A-vs-B adjudication).
+6. Compile + QA dashboard (completeness from assignments + accuracy from agreement) + rubric versioning + impact tracking.
+7. PI **lab-notebook** (measurement-actions + notes per target-type → promote to rubric) — can land alongside S2/S3.
+- Later: protocol registry (4th registry), Python-escape criteria, AI-agent criteria authoring, report/figure outputs.
+
 ## 2026-05-30 — Design: the annotation workflow (rubric-as-data + computational criteria)
 
 Planning session (logged-not-built, ~Phase 4+/v1.x — a multi-slice suite). Prompted by working with the new tier-editing GUI: what would make Sadda the *best* tool for the real annotation workflow? The reference workflow (user's): (1) load a corpus → (2) read guidelines → (3) find regions of interest across files → (4) add the specified annotations in each RoI → (5) flag tokens ambiguous vs the rubric → (6) discuss + refine the rubric with collaborators → (7) revisit flagged items under the updated rubric.
