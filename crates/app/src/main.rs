@@ -3139,11 +3139,24 @@ impl eframe::App for SaddaApp {
             ui.ctx().request_repaint();
         }
 
+        // When a text field (the script editor, an inline label edit,
+        // the command-palette query, or a dialog input) holds keyboard
+        // focus, bare single-key shortcuts must NOT fire — the keystroke
+        // belongs to the text field. Without this gate, typing in the
+        // script panel toggled transport on Space and deleted the
+        // selected annotation on Backspace/Delete instead of editing
+        // text. Modifier combos (Ctrl/Cmd+Enter to run, Ctrl/Cmd+P for
+        // the palette) are intentionally still allowed through so they
+        // work while the editor is focused.
+        let text_editing = ui.ctx().text_edit_focused();
+
         // Spacebar toggles transport. `consume_key` ensures the
-        // press doesn't fall through to any focused widget.
-        if ui
-            .ctx()
-            .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
+        // press doesn't fall through to any focused widget. Skipped
+        // while a text field is focused so Space reaches the editor.
+        if !text_editing
+            && ui
+                .ctx()
+                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
         {
             self.toggle_playback();
         }
@@ -3198,9 +3211,12 @@ impl eframe::App for SaddaApp {
         }
 
         // Delete / Backspace removes the selected interval. Skip
-        // when label editing is active — those keys need to reach
-        // the TextEdit instead.
-        if self.label_edit.is_none() {
+        // whenever a text field is focused (inline label edit, script
+        // editor, dialogs) — those keys need to reach the TextEdit
+        // instead. (`text_editing` already covers the inline label
+        // edit; the explicit `label_edit.is_none()` is kept as a
+        // belt-and-braces guard on that distinct editing mode.)
+        if self.label_edit.is_none() && !text_editing {
             let delete_pressed = ui.ctx().input_mut(|i| {
                 i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
                     || i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
@@ -4960,6 +4976,16 @@ impl SaddaApp {
         let code_h = (total_h * 0.6).max(60.0);
         let output_h = (total_h - code_h - 4.0).max(40.0);
 
+        // Python syntax highlighting via a custom layouter. The closure
+        // re-tokenizes the buffer each frame; layouts are cheap relative
+        // to a human-sized script, and egui caches the resulting galley
+        // keyed on the job, so an unchanged buffer re-lays out only when
+        // the font/theme changes.
+        let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+            let mut job = python_layout_job(ui, buf.as_str());
+            job.wrap.max_width = wrap_width;
+            ui.fonts_mut(|f| f.layout_job(job))
+        };
         egui::ScrollArea::vertical()
             .id_salt("script_code_scroll")
             .max_height(code_h)
@@ -4969,6 +4995,7 @@ impl SaddaApp {
                     egui::TextEdit::multiline(&mut self.persisted.script_buffer)
                         .desired_rows(8)
                         .code_editor()
+                        .layouter(&mut layouter)
                         .hint_text("# Python — pure stdlib only at E8.\n# `import sadda` lands in E9.\nprint('hello from sadda')\n"),
                 );
             });
@@ -4978,6 +5005,12 @@ impl SaddaApp {
         egui::ScrollArea::vertical()
             .id_salt("script_output_scroll")
             .max_height(output_h)
+            // Fill the full panel width so the scrollbar sits at the far
+            // right edge, not hugging the right of the output text. The
+            // default `auto_shrink` shrinks horizontally to content width;
+            // we keep vertical shrink so the area still collapses to the
+            // text height (bounded by `max_height`).
+            .auto_shrink([false, true])
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 if let Some(output) = &self.script_output {
@@ -5282,6 +5315,302 @@ impl SaddaApp {
         if let Some(p) = to_remove {
             self.persisted.remove_recent(&p);
         }
+    }
+}
+
+/// A coarse Python token class, enough to colour the script editor.
+/// Deliberately lexical-only (no parsing) — the goal is a readable
+/// editor, not a linter.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PyTok {
+    Keyword,
+    Builtin,
+    StringLit,
+    Comment,
+    Number,
+    Other,
+}
+
+/// Python keywords (3.12 `keyword.kwlist` plus the soft keywords
+/// `match`/`case`). Looked up by exact identifier match.
+const PY_KEYWORDS: &[&str] = &[
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue",
+    "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import",
+    "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while",
+    "with", "yield", "match", "case",
+];
+
+/// A pragmatic subset of common Python builtins worth tinting so they
+/// stand out from user names. Not exhaustive — `builtins.dir()` has ~150
+/// entries; these are the ones a phonetics script touches most.
+const PY_BUILTINS: &[&str] = &[
+    "abs",
+    "all",
+    "any",
+    "bool",
+    "bytes",
+    "dict",
+    "enumerate",
+    "filter",
+    "float",
+    "frozenset",
+    "getattr",
+    "hasattr",
+    "id",
+    "input",
+    "int",
+    "isinstance",
+    "issubclass",
+    "iter",
+    "len",
+    "list",
+    "map",
+    "max",
+    "min",
+    "next",
+    "object",
+    "open",
+    "ord",
+    "chr",
+    "print",
+    "range",
+    "repr",
+    "reversed",
+    "round",
+    "set",
+    "setattr",
+    "sorted",
+    "str",
+    "sum",
+    "super",
+    "tuple",
+    "type",
+    "zip",
+    "Exception",
+    "ValueError",
+    "TypeError",
+    "KeyError",
+    "IndexError",
+    "RuntimeError",
+    "self",
+    "cls",
+];
+
+/// Colours per token class, chosen per theme. Values follow the
+/// familiar VS Code light/dark editor palette so the highlighting reads
+/// as conventional rather than bespoke.
+struct SyntaxPalette {
+    keyword: egui::Color32,
+    builtin: egui::Color32,
+    string: egui::Color32,
+    comment: egui::Color32,
+    number: egui::Color32,
+    other: egui::Color32,
+}
+
+impl SyntaxPalette {
+    fn for_visuals(v: &egui::Visuals) -> Self {
+        use egui::Color32;
+        if v.dark_mode {
+            Self {
+                keyword: Color32::from_rgb(86, 156, 214),
+                builtin: Color32::from_rgb(78, 201, 176),
+                string: Color32::from_rgb(206, 145, 120),
+                comment: Color32::from_rgb(106, 153, 85),
+                number: Color32::from_rgb(181, 206, 168),
+                other: v.text_color(),
+            }
+        } else {
+            Self {
+                keyword: Color32::from_rgb(0, 0, 200),
+                builtin: Color32::from_rgb(38, 127, 153),
+                string: Color32::from_rgb(163, 21, 21),
+                comment: Color32::from_rgb(0, 128, 0),
+                number: Color32::from_rgb(9, 134, 88),
+                other: v.text_color(),
+            }
+        }
+    }
+
+    fn color(&self, tok: PyTok) -> egui::Color32 {
+        match tok {
+            PyTok::Keyword => self.keyword,
+            PyTok::Builtin => self.builtin,
+            PyTok::StringLit => self.string,
+            PyTok::Comment => self.comment,
+            PyTok::Number => self.number,
+            PyTok::Other => self.other,
+        }
+    }
+}
+
+/// Lexes Python source into `(run, class)` pairs. The concatenation of
+/// every run is byte-for-byte the input — this is load-bearing: the
+/// editor's galley text must equal the buffer or cursor positioning and
+/// selection break. Whitespace and newlines ride along in `Other` runs.
+fn tokenize_python(text: &str) -> Vec<(String, PyTok)> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut out: Vec<(String, PyTok)> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        if c == '#' {
+            // Comment: to end of line.
+            let start = i;
+            while i < n && chars[i] != '\n' {
+                i += 1;
+            }
+            out.push((chars[start..i].iter().collect(), PyTok::Comment));
+        } else if c == '"' || c == '\'' {
+            // String literal: triple- or single-quoted, escape-aware.
+            let quote = c;
+            let triple = i + 2 < n && chars[i + 1] == quote && chars[i + 2] == quote;
+            let start = i;
+            if triple {
+                i += 3;
+                while i < n {
+                    if chars[i] == '\\' && i + 1 < n {
+                        i += 2;
+                        continue;
+                    }
+                    if chars[i] == quote
+                        && i + 2 < n
+                        && chars[i + 1] == quote
+                        && chars[i + 2] == quote
+                    {
+                        i += 3;
+                        break;
+                    }
+                    i += 1;
+                }
+            } else {
+                i += 1; // opening quote
+                while i < n {
+                    if chars[i] == '\\' && i + 1 < n {
+                        i += 2;
+                        continue;
+                    }
+                    if chars[i] == quote {
+                        i += 1;
+                        break;
+                    }
+                    if chars[i] == '\n' {
+                        break; // unterminated single-line string
+                    }
+                    i += 1;
+                }
+            }
+            out.push((chars[start..i].iter().collect(), PyTok::StringLit));
+        } else if c.is_ascii_digit() {
+            // Number: consume a maximal alnum/./_ run (covers 0x1F, 1_000, 3.14).
+            let start = i;
+            while i < n && (chars[i].is_alphanumeric() || chars[i] == '.' || chars[i] == '_') {
+                i += 1;
+            }
+            out.push((chars[start..i].iter().collect(), PyTok::Number));
+        } else if c.is_alphabetic() || c == '_' {
+            // Identifier: classify against keyword / builtin tables.
+            let start = i;
+            while i < n && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            let tok = if PY_KEYWORDS.contains(&word.as_str()) {
+                PyTok::Keyword
+            } else if PY_BUILTINS.contains(&word.as_str()) {
+                PyTok::Builtin
+            } else {
+                PyTok::Other
+            };
+            out.push((word, tok));
+        } else {
+            // Everything else (operators, punctuation, whitespace,
+            // newlines): a maximal run that doesn't start another token.
+            let start = i;
+            i += 1;
+            while i < n {
+                let d = chars[i];
+                if d == '#'
+                    || d == '"'
+                    || d == '\''
+                    || d.is_ascii_digit()
+                    || d.is_alphabetic()
+                    || d == '_'
+                {
+                    break;
+                }
+                i += 1;
+            }
+            out.push((chars[start..i].iter().collect(), PyTok::Other));
+        }
+    }
+    out
+}
+
+/// Builds a syntax-highlighted `LayoutJob` for the script editor's
+/// `TextEdit::layouter`. Monospace font from the active style; colours
+/// from the active theme.
+fn python_layout_job(ui: &egui::Ui, text: &str) -> egui::text::LayoutJob {
+    let palette = SyntaxPalette::for_visuals(ui.visuals());
+    let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+    let mut job = egui::text::LayoutJob::default();
+    for (run, tok) in tokenize_python(text) {
+        job.append(
+            &run,
+            0.0,
+            egui::TextFormat {
+                font_id: font_id.clone(),
+                color: palette.color(tok),
+                ..Default::default()
+            },
+        );
+    }
+    job
+}
+
+#[cfg(test)]
+mod python_highlight_tests {
+    use super::*;
+
+    /// The lexer must be lossless: concatenating every run reproduces
+    /// the input exactly, or the editor galley desyncs from the buffer.
+    #[test]
+    fn tokenize_preserves_text_exactly() {
+        let src = "def f(x):  # comment\n    s = 'hi\\n'\n    t = \"\"\"multi\nline\"\"\"\n    return 42 + x_2\n";
+        let toks = tokenize_python(src);
+        let rebuilt: String = toks.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(rebuilt, src);
+    }
+
+    fn class_of(toks: &[(String, PyTok)], run: &str) -> Option<PyTok> {
+        toks.iter().find(|(s, _)| s == run).map(|(_, t)| *t)
+    }
+
+    #[test]
+    fn classifies_common_tokens() {
+        let src = "def go():\n    print('hi')  # note\n    return 0xFF\n";
+        let toks = tokenize_python(src);
+        assert_eq!(class_of(&toks, "def"), Some(PyTok::Keyword));
+        assert_eq!(class_of(&toks, "return"), Some(PyTok::Keyword));
+        assert_eq!(class_of(&toks, "print"), Some(PyTok::Builtin));
+        assert_eq!(class_of(&toks, "go"), Some(PyTok::Other)); // user name
+        assert_eq!(class_of(&toks, "'hi'"), Some(PyTok::StringLit));
+        assert_eq!(class_of(&toks, "0xFF"), Some(PyTok::Number));
+        // The comment run stops before the newline; the `\n` rides in the
+        // following `Other` run.
+        assert_eq!(class_of(&toks, "# note"), Some(PyTok::Comment));
+    }
+
+    #[test]
+    fn unterminated_string_stops_at_newline() {
+        let src = "x = 'oops\ny = 1\n";
+        let toks = tokenize_python(src);
+        // The unterminated literal must not swallow the rest of the file.
+        assert_eq!(class_of(&toks, "'oops"), Some(PyTok::StringLit));
+        assert_eq!(class_of(&toks, "y"), Some(PyTok::Other));
+        let rebuilt: String = toks.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(rebuilt, src);
     }
 }
 
