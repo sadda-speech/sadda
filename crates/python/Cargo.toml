@@ -23,7 +23,12 @@ path = "src/bin/stub_gen.rs"
 # E11: `ml` on by default for the shipped wheel — exposes `sadda.ml`.
 # load-dynamic keeps the wheel lean (ONNX Runtime is an optional runtime
 # sidecar); `sadda.ml.vad` returns a clean error if ORT isn't present.
-sadda-engine = { path = "../engine", features = ["ml"] }
+# `download` (implies `ml`) compiles the on-demand `hf://` model fetch into
+# the wheel — but it never touches the network unless the user opts in via
+# SADDA_ALLOW_NETWORK (gated in engine::models), so the default install
+# stays network-free. The desktop app deliberately does NOT enable this
+# (see crates/app/Cargo.toml): the GUI stays network-free by construction.
+sadda-engine = { path = "../engine", features = ["download"] }
 # NOTE: extension-module is enabled via pyproject.toml's [tool.maturin]
 # section when building the wheel; keeping it off here avoids unifying it
 # across the workspace (which would break crates/script-engine's

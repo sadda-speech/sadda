@@ -53,6 +53,13 @@ classifiers = [
 # don't need VAD / embeddings. Lower bound matches ort 2.0.0-rc.10's
 # expected ORT C API version (22 = ONNX Runtime 1.22).
 ml = ["onnxruntime>=1.22"]
+# `pip install sadda[download]` is for fetching + running models over the
+# network (`load_model("hf://…")`). The fetch is compiled into every wheel
+# but stays dormant until you set SADDA_ALLOW_NETWORK=1 — so this extra
+# doesn't *enable* the network; it just pulls ONNX Runtime (you download
+# models in order to run them), so a freshly downloaded model is
+# immediately usable. Same deps as [ml] by design.
+download = ["sadda[ml]"]
 
 [project.urls]
 Homepage = "https://sadda-speech.github.io/sadda/"

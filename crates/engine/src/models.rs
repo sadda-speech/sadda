@@ -523,11 +523,49 @@ fn hf_resolve_url(repo: &str, rev: &str, file: &str) -> String {
     format!("https://huggingface.co/{repo}/resolve/{rev}/{file}")
 }
 
+/// `SADDA_ALLOW_NETWORK` reads as "on" for any value except the obvious
+/// negatives, so `1` / `true` / `yes` enable it and `0` / `false` / `no` /
+/// `off` / empty don't.
+#[cfg(feature = "download")]
+fn env_is_truthy(val: &str) -> bool {
+    !matches!(
+        val.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "no" | "off"
+    )
+}
+
+/// Whether the user has opted into network access via `SADDA_ALLOW_NETWORK`.
+#[cfg(feature = "download")]
+fn network_opt_in_enabled() -> bool {
+    std::env::var("SADDA_ALLOW_NETWORK")
+        .ok()
+        .is_some_and(|v| env_is_truthy(&v))
+}
+
+/// Gate on the network boundary. The shipped wheel compiles the `download`
+/// capability in, but sadda never actually fetches unless the user sets
+/// `SADDA_ALLOW_NETWORK` (architectural principle #10 — explicit opt-in for
+/// any network access). Cached models and `local://` / `sadda/…` ids work
+/// offline regardless, since they never reach this boundary.
+#[cfg(feature = "download")]
+fn ensure_network_allowed() -> Result<()> {
+    if network_opt_in_enabled() {
+        Ok(())
+    } else {
+        Err(model_err(
+            "network access is disabled; set SADDA_ALLOW_NETWORK=1 to let sadda download \
+             models over the network (it never fetches without this opt-in). Cached models \
+             and `local://` / `sadda/…` ids work offline.",
+        ))
+    }
+}
+
 /// Downloads `url` to `dest` (atomically, via a `.part` temp), sending an
 /// `Authorization: Bearer` header when `token` is given. Streams — no
-/// whole-file buffering.
+/// whole-file buffering. Refuses unless network access is opted in.
 #[cfg(feature = "download")]
 fn download_file(url: &str, dest: &Path, token: Option<&str>) -> Result<u64> {
+    ensure_network_allowed()?;
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -837,8 +875,7 @@ tier_kind = "interval"
     #[cfg(feature = "download")]
     #[test]
     fn fetch_hf_downloads_and_runs() {
-        if std::env::var("SADDA_NET_TESTS").is_err() {
-            eprintln!("fetch_hf_downloads_and_runs skipped (set SADDA_NET_TESTS=1)");
+        if !net_test_ready("fetch_hf_downloads_and_runs") {
             return;
         }
         let m = load_model("hf://onnx-community/silero-vad/onnx/model.onnx").unwrap();
@@ -862,7 +899,43 @@ tier_kind = "interval"
             eprintln!("{name} skipped (set SADDA_NET_TESTS=1)");
             return false;
         }
+        if !network_opt_in_enabled() {
+            eprintln!("{name} skipped (set SADDA_ALLOW_NETWORK=1)");
+            return false;
+        }
         true
+    }
+
+    #[cfg(feature = "download")]
+    #[test]
+    fn env_is_truthy_cases() {
+        for on in ["1", "true", "YES", "on", " 1 "] {
+            assert!(env_is_truthy(on), "{on:?} should enable");
+        }
+        for off in ["", "0", "false", "no", "off"] {
+            assert!(!env_is_truthy(off), "{off:?} should not enable");
+        }
+    }
+
+    // Runs in CI (no network needed): without the opt-in, an hf:// cache
+    // miss must fail with a clear, network-free error naming the env var.
+    #[cfg(feature = "download")]
+    #[test]
+    fn hf_fetch_refused_without_network_opt_in() {
+        if network_opt_in_enabled() {
+            eprintln!("hf_fetch_refused_without_network_opt_in skipped (SADDA_ALLOW_NETWORK set)");
+            return;
+        }
+        let err = load_model("hf://sadda-test/does-not-exist-xyz/model.onnx").unwrap_err();
+        match err {
+            EngineError::Ml(msg) => {
+                assert!(
+                    msg.contains("SADDA_ALLOW_NETWORK"),
+                    "expected opt-in hint, got: {msg}"
+                )
+            }
+            e => panic!("unexpected error: {e}"),
+        }
     }
 
     // Real waveform model — wav2vec2-base-960h via hf:// (~378 MB). The
