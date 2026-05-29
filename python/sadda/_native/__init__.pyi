@@ -711,6 +711,18 @@ class Project:
         r"""
         Fetches a single tier by id.
         """
+    def rename_tier(self, tier_id: builtins.int, new_name: builtins.str) -> None:
+        r"""
+        Renames a tier's display name. Raises if `tier_id` does not exist
+        or the new name is empty / whitespace-only.
+        """
+    def delete_tier(self, tier_id: builtins.int) -> None:
+        r"""
+        Deletes a tier and all of its annotations (intervals / points /
+        references) and any dense derived-signal sidecar. Raises if the
+        tier has child tiers (delete those first) or if `tier_id` does
+        not exist.
+        """
     def add_interval(self, tier_id: builtins.int, start_seconds: builtins.float, end_seconds: builtins.float, *, label: typing.Optional[builtins.str] = None, parent_annotation_id: typing.Optional[builtins.int] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
         r"""
         Inserts an interval annotation. Enforces parent-child cardinality at

@@ -1231,6 +1231,22 @@ impl PyProject {
             .map_err(engine_err_to_py)
     }
 
+    /// Renames a tier's display name. Raises if `tier_id` does not exist
+    /// or the new name is empty / whitespace-only.
+    fn rename_tier(&self, tier_id: i64, new_name: &str) -> PyResult<()> {
+        self.inner
+            .rename_tier(tier_id, new_name)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Deletes a tier and all of its annotations (intervals / points /
+    /// references) and any dense derived-signal sidecar. Raises if the
+    /// tier has child tiers (delete those first) or if `tier_id` does
+    /// not exist.
+    fn delete_tier(&self, tier_id: i64) -> PyResult<()> {
+        self.inner.delete_tier(tier_id).map_err(engine_err_to_py)
+    }
+
     /// Inserts an interval annotation. Enforces parent-child cardinality at
     /// insert time; raises `ValueError` on cardinality violation.
     #[pyo3(signature = (

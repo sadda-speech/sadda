@@ -6,6 +6,18 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-30 — Tier lifecycle: create / rename / delete across all three surfaces
+
+The GUI could edit annotations *within* tiers but couldn't create, rename, or delete tiers — and `delete_tier`/`rename_tier` didn't exist at the engine/Python layer at all (only `add_tier` + bundle-level rename/delete). Closes that gap end to end.
+
+- **Engine** (`corpus.rs`): `rename_tier(id, name)` (trim + non-empty + unknown-id error, mirrors `rename_bundle`); `delete_tier(id)` (topological cascade like `delete_bundle` but scoped to one tier: `derived_signal` → `annotation_{interval,point,reference}` → `tier`, in a transaction, best-effort Parquet-sidecar removal after commit). `delete_tier` **refuses if the tier has child tiers** (`parent_id` points at it) to avoid dangling parents — delete children first. Tests: rename trims/validates/errors; delete cascades annotations + errors on repeat; child-refusal + delete-child-then-parent.
+- **Python**: `proj.rename_tier(id, name)`, `proj.delete_tier(id)` (+ test); `add_tier` already existed. Documented in `docs/api/corpus.md` (so source-linked).
+- **GUI** (`crates/app`): a "➕ New tier…" toolbar button in the tier strip → modal with a name field + type picker (Interval / Point / Reference); **right-click any tier name** → context menu with "Rename tier…" / "Delete tier" → the rename modal / a delete-confirm modal. Mirrors the existing bundle rename/delete modal pattern. Tier-lifecycle requests are collected into a `TierOp` local and applied after the `&project` borrow ends (same snapshot discipline as the selection state), so the borrow checker stays happy. Deleting clears any selection/draft that referenced the gone tier. (Drive-by: the new context-menu code used the now-deprecated `ui.close_menu()`; switched to `ui.close()`, which the rest of the app already uses.)
+
+Three surfaces with tests for each (engine unit + Python + the app builds/clippy-clean; the modal logic mirrors the verified bundle modals — the GUI interaction itself isn't auto-tested, consistent with the rest of the app). Gates green: fmt/clippy `--workspace --all-targets -D warnings`/`test --workspace`, stubs regenerated (+`rename_tier`/`delete_tier`), 183 pytest + 27 `tools/docs`, source-link gate 273/0, `mkdocs build --strict` clean.
+
+Still to come (same request): a cross-lane time-span **selection** on the waveform/spectrogram that extends through the tier lanes, for placing annotation boundaries/points.
+
 ## 2026-05-30 — SWIPE' pitch tracker (follow-up 3/3, SWIPE' half)
 
 Adds **SWIPE'** (Camacho & Harris 2008, prime variant) as `engine::pitch::swipe` / `PitchMethod::Swipe` / `voiced_pitch(method="swipe")` — a **third algorithmic family** (spectral) alongside the autocorrelation (autocorr/windowed/Boersma) and CMNDF (YIN/pYIN) trackers, so disagreement across families is a confidence signal. CREPE (the neural sub-item) stays a separate future slice (needs a bundled ONNX + license check).
