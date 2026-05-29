@@ -6,6 +6,12 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-30 — Fix: align tier lanes' time axis to the plot data area
+
+The painter-based tier lanes positioned their time axis with a **fixed** `SIGNAL_LEFT_GUTTER` (120 px), but `egui_plot`'s y-axis width is **dynamic** (tick + axis-label widths) and includes internal padding, so the spectrogram/waveform data area didn't start at exactly +120 px — the tier lanes drifted left of the signal lanes. Latent, but obvious once you could create empty tiers (reported: a new tier's start didn't line up with the spectrogram).
+
+Fix: measure the real data area. The waveform pane now keeps its full `PlotResponse` and stores `transform.frame()` (the data-area screen rect) in `self.lane_frame` each frame. The tier strip lays each lane out to that exact rect — gutter width = `frame.left() − row_left`, lane width = `frame.width()` — so the lane's left **and** right edges match the plot's time axis bin-for-bin. The waveform renders before the tier strip in the same frame (top panel before bottom panel), so there's no lag; falls back to the fixed gutter only if unmeasured. All `egui_plot` lanes share the same `y_axis_min_width`, so aligning to the waveform aligns to the spectrogram + measure lanes too. Build + clippy clean; 65 app tests pass. (Layout — eyeball-verify in a running window.)
+
 ## 2026-05-30 — Cross-lane span selection → annotation on a chosen tier (GUI)
 
 Second half of the annotation request: a time-span selection you drag on the waveform/spectrogram that extends through every lane, used to place boundaries/points on a **chosen** tier.
