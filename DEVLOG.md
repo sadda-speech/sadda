@@ -6,6 +6,45 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-30 — Design: the annotation workflow (rubric-as-data + computational criteria)
+
+Planning session (logged-not-built, ~Phase 4+/v1.x — a multi-slice suite). Prompted by working with the new tier-editing GUI: what would make Sadda the *best* tool for the real annotation workflow? The reference workflow (user's): (1) load a corpus → (2) read guidelines → (3) find regions of interest across files → (4) add the specified annotations in each RoI → (5) flag tokens ambiguous vs the rubric → (6) discuss + refine the rubric with collaborators → (7) revisit flagged items under the updated rubric.
+
+**Framing insight.** Steps 5→6→7 are a *loop* (flag → refine → revisit), and every speech tool (Praat, ELAN) treats the **rubric as an external PDF** and an **annotation as just a label** — so the loop lives in people's heads. Sadda already has the substrate to make it *data*: the `audit_log` (+ `_audit_context` user) records who/when/what; tiers carry `parent_id` + a `schema` JSON column; provenance (`ProcessingRun`/citations) is first-class; SQLite makes cross-tier temporal joins tractable; and the registry pattern (refdist/model/script) is established. **Differentiator: the rubric and each annotation's status/provenance are first-class, versioned, queryable objects.**
+
+**Prior art:** ELAN (per-tier controlled vocabularies, tier templates — best for *structure*, nothing for versioned-rubric/status); EMU-SDMS (DB-backed annotations + the EQL query language — the cross-tier-query model); INCEpTION/WebAnno (text NLP — the gold standard for steps 5–7: *recommenders* = pre-annotation, *curation/adjudication* view, built-in inter-annotator agreement; no speech tool has these); Label Studio/Prodigy (the *throughput* UX — work queue, keyboard-first, "next item"). Praat/TextGrid stays the interop floor.
+
+### Converged decisions
+- **Rubric/protocol = a first-class, versioned, structured object** (loved by the user; this is where they were already heading). Holds: the tiers it defines, controlled vocabularies (allowed labels per tier), prose decision-rules + worked examples, **and computational criteria** (below). The Slice-1 schema is designed up front to *hold* criteria so the spine isn't re-cut. A shareable **protocol registry** (4th registry) is a later option — and would force the deferred parallel-vs-shared registry-core reassessment.
+- **Annotation status = first-class columns** (migration): `status` (draft / confirmed / flagged / disputed) + `note` + `annotator` + `rubric_version`. Queryable ("all flagged under v1"); built on the existing audit log.
+- **Collaboration = solo-strong, async-merge** (fits local-first / no-server): nail single-annotator throughput first; multi-annotator via comparing *independent project copies offline* → inter-annotator agreement + an A-vs-B adjudication view; discussion via the planned link-out community surface (no 24/7 chat, per the 2026-05-27 decision).
+
+### The headline: computational annotation criteria
+A criterion is a **declarative pipeline**: **select** RoIs (cross-tier query) → **derive** anchors/spans within them → **measure** signals → **emit** annotations, optionally **filtered** by a condition. The three primitives the user specified:
+1. **Cross-tier RoI selection** — temporal/relational predicates over tiers (containment, overlap, sequence, hierarchy via `parent_id`) + label-set predicates from the rubric's CVs. E.g. *"vowels (phone tier) within function words (word tier)"*. (EMU EQL is the prior art; it's SQL-able over `corpus.db`.)
+2. **Within-interval anchors & spans** — interval arithmetic: `start + 10ms`, `start + 30%·dur`, `[start, start+20%]`, `[end−5ms, end]`.
+3. **Signal functions** — **thin declarative wrappers over the existing DSP/clinical measures** (`argmax(intensity)→point`, `mean(f0) over span`, above-mean pitch, threshold crossings); a criterion *references* a measure, never reimplements one.
+
+**Expression surface: structured TOML/JSON + a Python escape hatch** (layered) — common cases stay declarative (GUI-buildable, diffable, shareable); the long tail (`python = "mod:fn"`) covers the rest.
+
+**Each criterion declares a mode — auto / assisted / manual** — so the system spans the spectrum gracefully (vowel-onset+10ms is auto; "perceptually creaky" stays manual-with-guidance + the RoI query that takes you there). The user's "stretch for some, doable for others" instinct, made first-class.
+
+**Deploy → inspect → iterate = proposals on a preview tier.** A criterion run writes to its own `auto` tier (annotations tagged `status = auto` + criterion id + `rubric_version` + a `ProcessingRun` of a new `auto_annotation` kind); you preview it side-by-side, diff against a manual/gold tier, accept/reject/promote per-token or wholesale; re-run → re-diff. So "which annotations came from criterion C under rubric v2" is a query, and refining is a tracked loop.
+
+**Two elegances on the existing substrate:**
+- **Provenance falls out for free** from `status=auto` + criterion id + `ProcessingRun` — no new bookkeeping.
+- **One comparison/agreement engine, three uses:** inter-annotator κ + boundary agreement (collaboration), auto-criteria-vs-human-gold (the refine loop), and rubric-version impact (step 7) are all "compare two annotation sets over the same audio." Build once.
+
+**Threads into logged roadmap items:** the automated-labeling intake (#5, 2026-05-27) is the *model-based* cousin of rule-based criteria; the AI-agent surface could *author* criteria; recipes replay a criteria run; report/figure-IR consumes the results; the protocol registry is the 4th registry.
+
+### Sliced roadmap
+1. **Slice 1 (first):** rubric/protocol object (schema built to hold criteria) + per-tier controlled vocabularies + manual labeling UX (label dropdown / hotkeys / out-of-vocab flag) + the first-class annotation **status** columns (same migration). [steps 1,2,4 + foundation for 5/7]
+2. **Slice 2 (next milestone):** criteria engine v1 — declarative **cross-tier RoI selection + within-interval anchors/spans** → emit to a preview/`auto` tier → diff-vs-manual + accept/reject/promote + re-run loop. (No signal functions yet; already enables "mid-point of every vowel in a function word" and proves the loop.) [steps 3,4]
+3. **Slice 3:** signal-function criteria — declarative wrappers over the DSP/clinical measures over RoIs. [the acoustic heart]
+4. **Slice 4:** flagging/status UX + work queue (next-RoI / next-flagged + progress) + the comparison/agreement engine (κ, boundary agreement, A-vs-B adjudication). [steps 5,6,7]
+5. **Slice 5:** async-merge collaboration (compare independent copies + adjudicate) + rubric versioning + impact tracking; optional protocol registry. [steps 6,7]
+6. Later: Python-escape criteria, AI-agent criteria authoring, report/figure outputs.
+
 ## 2026-05-30 — Fix: align tier lanes' time axis to the plot data area
 
 The painter-based tier lanes positioned their time axis with a **fixed** `SIGNAL_LEFT_GUTTER` (120 px), but `egui_plot`'s y-axis width is **dynamic** (tick + axis-label widths) and includes internal padding, so the spectrogram/waveform data area didn't start at exactly +120 px — the tier lanes drifted left of the signal lanes. Latent, but obvious once you could create empty tiers (reported: a new tier's start didn't line up with the spectrogram).
