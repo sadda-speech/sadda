@@ -318,6 +318,11 @@ struct SaddaApp {
     /// Target tier for span-selection commits (boundaries / points). Set by
     /// clicking a tier's gutter name; highlighted in the strip.
     active_tier_id: Option<i64>,
+    /// Screen rect of the waveform plot's data area (between the axes),
+    /// captured each frame. The painter-based tier lanes lay out to this
+    /// exact x-range so their time axis aligns with the egui_plot lanes
+    /// (whose y-axis width is dynamic, not a fixed gutter).
+    lane_frame: Option<egui::Rect>,
     /// A1: open provenance/citations modal. `Some` holds the snapshot
     /// of the bundle's processing runs + citations, loaded once when
     /// the modal opens.
@@ -812,6 +817,7 @@ impl SaddaApp {
             pending_tier_rename: None,
             pending_tier_delete: None,
             active_tier_id: None,
+            lane_frame: None,
             provenance: None,
         }
     }
@@ -4403,8 +4409,12 @@ impl SaddaApp {
                         .interact_pointer_pos()
                         .map(|p| plot_ui.plot_from_screen(p).x);
                 }
-            })
-            .response;
+            });
+
+        // Capture the data-area screen rect so the painter-based tier
+        // lanes can align their time axis to it exactly (the egui_plot
+        // y-axis width is dynamic, so a fixed gutter would drift).
+        self.lane_frame = Some(*plot_response.transform.frame());
 
         apply_lane_selection_drag(
             &mut self.timeline,
@@ -4413,7 +4423,7 @@ impl SaddaApp {
             drag_ended,
             clicked_time,
         );
-        handle_zoom_and_scroll(&plot_response, &mut self.timeline);
+        handle_zoom_and_scroll(&plot_response.response, &mut self.timeline);
     }
 
     fn spectrogram_pane(&mut self, ui: &mut egui::Ui) {
@@ -4893,6 +4903,7 @@ impl SaddaApp {
         let cursor = self.timeline.cursor;
         let selection = self.timeline.selection;
         let active_tier_id = self.active_tier_id;
+        let lane_frame = self.lane_frame;
         let tiers = match project.tiers(Some(bundle_id)) {
             Ok(t) => t,
             Err(e) => {
@@ -4976,9 +4987,17 @@ impl SaddaApp {
                     // (row_left + SIGNAL_LEFT_GUTTER), matching where
                     // the plots' inner plot areas start.
                     ui.spacing_mut().item_spacing.x = 0.0;
+                    // Size the gutter so the lane's left edge lands exactly
+                    // on the egui_plot data area (whose y-axis width is
+                    // dynamic). Falls back to the fixed gutter until the
+                    // waveform frame has been measured (first frame).
+                    let row_left = ui.cursor().left();
+                    let gutter_w = lane_frame
+                        .map(|f| (f.left() - row_left).max(40.0))
+                        .unwrap_or(SIGNAL_LEFT_GUTTER);
                     // Left gutter: tier name + type hint.
                     ui.allocate_ui_with_layout(
-                        egui::Vec2::new(SIGNAL_LEFT_GUTTER, TIER_LANE_HEIGHT),
+                        egui::Vec2::new(gutter_w, TIER_LANE_HEIGHT),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
                             // Active tier (the span-selection target) is
@@ -5008,9 +5027,11 @@ impl SaddaApp {
                             });
                         },
                     );
-                    // Right: time-positioned lane.
+                    // Right: time-positioned lane — width matched to the
+                    // plot data area so the lane's right edge aligns too.
                     let avail = ui.available_size_before_wrap();
-                    let lane_size = egui::Vec2::new(avail.x, TIER_LANE_HEIGHT);
+                    let lane_w = lane_frame.map(|f| f.width()).unwrap_or(avail.x);
+                    let lane_size = egui::Vec2::new(lane_w, TIER_LANE_HEIGHT);
                     let (rect, response) =
                         ui.allocate_exact_size(lane_size, egui::Sense::click_and_drag());
                     let painter = ui.painter_at(rect);
