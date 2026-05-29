@@ -6,6 +6,20 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-30 — Annotation workflow S2: the criteria engine (rules → proposals → accept)
+
+Second implementation slice, across all three surfaces. A **criterion** is a re-runnable rule that selects regions of interest and emits them as **proposals** onto a preview "auto" tier for review; accepted proposals promote to the target tier. This is the bridge that turns "find the regions of interest" from manual labor into declarative, shareable, re-runnable data — and (later) the generator of the campaign layer's work units.
+
+**S2 decisions (AskUserQuestion round):** **both** representations in v1 (structured rules + a Python escape); RoI scope = **cross-tier interval predicates + within-interval anchors/spans** (signal-function predicates deferred to S3); proposals on a **preview "auto" tier that promote on accept** (not a separate target table — proposals are ordinary annotations, reusing the V8 status/audit infra).
+
+**Engine** (`criteria.rs` + migration V9 + `Project`): the rule model (`Selector` / `Emit` / `CriterionRule`, serde JSON) + a pure `evaluate()` over pre-fetched intervals — cross-tier predicates (label set / `label_regex` via the `regex` crate; `within` / `overlaps` a relation tier) and within-interval emit (a sub-span `[from,to]` or a point at a proportion). `criterion` table (kind ∈ structured|python; body; target tier; audited). `run_criterion` (structured: evaluate → `set_proposals`), `accept_proposals` (promote, validated against the target tier's rubric, then clear), `clear_proposals` (reject). `set_proposals` is the shared materialization step (infers preview-tier type from the proposals).
+
+**Python** (`PyCriterion` + methods + `sadda.criteria`): the criterion CRUD/run/accept bindings, plus the **python-escape executor** `sadda.criteria.run_criterion` — delegates structured criteria to the engine and, for `kind='python'`, `exec`s the body's `criterion(proj, bundle_id)` function and materializes its `(start, end_or_None, label)` proposals via `set_proposals`. The engine stays pure Rust; Python runs in the layer that already embeds CPython — that's how "both representations" lands cleanly. `Criterion` at the provisional tier.
+
+**GUI** (Annotate → Criteria…): a criteria editor — browse/create criteria, edit name/kind/target-tier/body (JSON or Python), Save/Delete, **Run** (structured; python criteria point the user to the script panel + `sadda.criteria.run_criterion`), and **Accept / Reject proposals**. The preview tier `"<target> (auto)"` renders distinctly (amber spans / violet points) so proposals read as not-yet-accepted; `is_preview_tier` mirrors the engine's suffix and is unit-tested.
+
+**Tests:** engine pure-evaluator unit tests + a run→propose→re-run-replaces→accept→reject integration test; pytest `test_criteria.py` (structured, python-escape, executor dispatch, provisional surface); app helper tests (`is_preview_tier`, plus the existing `is_out_of_vocab`/`status_tint`). All gates green; GUI window interaction still needs the user's visual pass. **Next: S3 (signal-function criteria) — or the modal-free annotation-flow UX the user flagged.** Commits: `231ec87` (engine), `473e8cf` (python), GUI in this slice's final commit.
+
 ## 2026-05-30 — Annotation workflow S1: rubric-as-data, controlled vocabulary, annotation status
 
 First *implementation* slice of the annotation suite (design entries below). Ships across all three surfaces (engine + Python + GUI), per the three-surface rule. Makes the annotation **rubric** and each annotation's **status/note** first-class, queryable data instead of prose in an external guidelines document — the concrete down payment on the "rubric-as-data → publication + repeatability" thesis.

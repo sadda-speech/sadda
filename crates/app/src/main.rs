@@ -285,6 +285,8 @@ struct SaddaApp {
     label_edit: Option<LabelEdit>,
     /// Open rubric-editor window (slice S1), or `None` when closed.
     rubric_editor: Option<RubricEditor>,
+    /// Open criteria-editor window (slice S2), or `None` when closed.
+    criteria_editor: Option<CriteriaEditor>,
     /// E8: most recent `script-engine` output (stdout + stderr).
     /// `None` until the user clicks Run for the first time this
     /// session. Not persisted across launches — regenerable cheaply.
@@ -487,6 +489,41 @@ struct RubricEditor {
     /// Editable controlled-vocabulary rows for the selected tier:
     /// (value, description).
     vocab: Vec<(String, String)>,
+}
+
+/// State for the criteria-editor window (slice S2): browse/edit criteria and
+/// run them to produce proposals on a preview tier, then accept or reject.
+#[derive(Default)]
+struct CriteriaEditor {
+    /// Guards the one-time load of the criteria list.
+    loaded: bool,
+    /// Existing criteria as (id, name) for the list.
+    list: Vec<(i64, String)>,
+    /// Id of the criterion being edited; `None` while drafting a new one.
+    selected: Option<i64>,
+    /// Working-copy fields.
+    name: String,
+    /// `"structured"` or `"python"`.
+    kind: String,
+    body: String,
+    target_tier: String,
+    description: String,
+    /// Last run/accept/reject result, shown in the window.
+    status_msg: Option<String>,
+}
+
+impl CriteriaEditor {
+    /// Resets the working-copy fields to a blank new criterion.
+    fn reset_to_new(&mut self) {
+        self.selected = None;
+        self.name = String::new();
+        self.kind = "structured".into();
+        self.body =
+            "{\n  \"select\": {\"tier\": \"\"},\n  \"emit\": {\"kind\": \"span\"}\n}".into();
+        self.target_tier = String::new();
+        self.description = String::new();
+        self.status_msg = None;
+    }
 }
 
 /// H1: live-recording modal. State machine: Idle (configuring the
@@ -851,6 +888,7 @@ impl SaddaApp {
             draft_edit: DraftEdit::None,
             label_edit: None,
             rubric_editor: None,
+            criteria_editor: None,
             script_output: None,
             script_error: None,
             registered_commands: Vec::new(),
@@ -2243,6 +2281,298 @@ impl SaddaApp {
         }
     }
 
+    /// The criteria-editor window (slice S2): browse/edit criteria, run a
+    /// structured criterion to produce proposals on its preview tier, and
+    /// accept/reject them.
+    fn criteria_editor_window(&mut self, ctx: &egui::Context) {
+        if self.criteria_editor.is_none() {
+            return;
+        }
+        // One-time load of the criteria list.
+        if !self
+            .criteria_editor
+            .as_ref()
+            .map(|e| e.loaded)
+            .unwrap_or(true)
+        {
+            let list = match &self.app_state {
+                AppState::ProjectLoaded { project, .. } => project
+                    .criteria()
+                    .map(|cs| cs.into_iter().map(|c| (c.id, c.name)).collect())
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let ed = self.criteria_editor.as_mut().unwrap();
+            ed.list = list;
+            ed.loaded = true;
+        }
+
+        let bundle_id = self.selected_bundle_id;
+        let mut close = false;
+        let mut load_criterion: Option<i64> = None;
+        let mut save = false;
+        let mut delete_id: Option<i64> = None;
+        let mut run = false;
+        let mut accept = false;
+        let mut reject = false;
+        let mut keep_open = true;
+
+        egui::Window::new("Criteria")
+            .open(&mut keep_open)
+            .resizable(true)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                let ed = self.criteria_editor.as_mut().expect("checked above");
+                ui.horizontal_top(|ui| {
+                    // Left: the criteria list.
+                    ui.vertical(|ui| {
+                        ui.set_min_width(150.0);
+                        if ui.button("➕ New criterion").clicked() {
+                            ed.reset_to_new();
+                        }
+                        ui.separator();
+                        for (id, name) in &ed.list {
+                            if ui
+                                .selectable_label(ed.selected == Some(*id), name)
+                                .clicked()
+                            {
+                                load_criterion = Some(*id);
+                            }
+                        }
+                    });
+                    ui.separator();
+                    // Right: the editor for the selected/new criterion.
+                    ui.vertical(|ui| {
+                        egui::Grid::new("criterion_fields")
+                            .num_columns(2)
+                            .spacing([8.0, 6.0])
+                            .show(ui, |ui| {
+                                ui.label("Name");
+                                ui.text_edit_singleline(&mut ed.name);
+                                ui.end_row();
+                                ui.label("Kind");
+                                egui::ComboBox::from_id_salt("criterion_kind")
+                                    .selected_text(&ed.kind)
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut ed.kind,
+                                            "structured".to_string(),
+                                            "structured",
+                                        );
+                                        ui.selectable_value(
+                                            &mut ed.kind,
+                                            "python".to_string(),
+                                            "python",
+                                        );
+                                    });
+                                ui.end_row();
+                                ui.label("Target tier");
+                                ui.text_edit_singleline(&mut ed.target_tier);
+                                ui.end_row();
+                            });
+                        ui.label(
+                            egui::RichText::new(if ed.kind == "structured" {
+                                "Rule (JSON)"
+                            } else {
+                                "Python body — define criterion(proj, bundle_id)"
+                            })
+                            .small(),
+                        );
+                        ui.add(
+                            egui::TextEdit::multiline(&mut ed.body)
+                                .code_editor()
+                                .desired_rows(8)
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.horizontal(|ui| {
+                            if ui.button("Save").clicked() {
+                                save = true;
+                            }
+                            if let Some(id) = ed.selected {
+                                if ui.button("Delete").clicked() {
+                                    delete_id = Some(id);
+                                }
+                            }
+                        });
+                        ui.separator();
+                        // Run + review (needs a selected criterion + bundle).
+                        let has_target = !ed.target_tier.trim().is_empty();
+                        let run_enabled =
+                            bundle_id.is_some() && ed.selected.is_some() && ed.kind == "structured";
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(run_enabled, egui::Button::new("Run"))
+                                .on_disabled_hover_text(if ed.kind == "python" {
+                                    "Run python criteria from the script panel: \
+                                     sadda.criteria.run_criterion(proj, id, bundle)"
+                                } else {
+                                    "Select a saved criterion and a bundle first"
+                                })
+                                .clicked()
+                            {
+                                run = true;
+                            }
+                            if ui
+                                .add_enabled(
+                                    bundle_id.is_some() && has_target,
+                                    egui::Button::new("Accept proposals"),
+                                )
+                                .clicked()
+                            {
+                                accept = true;
+                            }
+                            if ui
+                                .add_enabled(
+                                    bundle_id.is_some() && has_target,
+                                    egui::Button::new("Reject proposals"),
+                                )
+                                .clicked()
+                            {
+                                reject = true;
+                            }
+                        });
+                        if let Some(msg) = &ed.status_msg {
+                            ui.label(egui::RichText::new(msg).weak());
+                        }
+                    });
+                });
+                ui.separator();
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+
+        if !keep_open || close {
+            self.criteria_editor = None;
+            return;
+        }
+
+        // ---- Apply requests after the window's &mut self borrow ----
+        if let Some(id) = load_criterion {
+            if let AppState::ProjectLoaded { project, .. } = &self.app_state {
+                if let Ok(Some(c)) = project.get_criterion(id) {
+                    let ed = self.criteria_editor.as_mut().unwrap();
+                    ed.selected = Some(c.id);
+                    ed.name = c.name;
+                    ed.kind = c.kind;
+                    ed.body = c.body;
+                    ed.target_tier = c.target_tier;
+                    ed.description = c.description.unwrap_or_default();
+                    ed.status_msg = None;
+                }
+            }
+        }
+        if save {
+            self.criteria_save();
+        }
+        if let Some(id) = delete_id {
+            if let AppState::ProjectLoaded { project, .. } = &self.app_state {
+                let _ = project.delete_criterion(id);
+            }
+            self.criteria_refresh_list();
+            if let Some(ed) = self.criteria_editor.as_mut() {
+                if ed.selected == Some(id) {
+                    ed.reset_to_new();
+                }
+                ed.status_msg = Some("Deleted.".into());
+            }
+        }
+        if run {
+            let sel = self.criteria_editor.as_ref().and_then(|e| e.selected);
+            let msg = match (sel, bundle_id, &self.app_state) {
+                (Some(id), Some(bid), AppState::ProjectLoaded { project, .. }) => {
+                    match project.run_criterion(id, bid) {
+                        Ok(n) => format!("Ran — {n} proposal(s) on the preview tier."),
+                        Err(e) => format!("Run failed: {e}"),
+                    }
+                }
+                _ => "Select a saved criterion and a bundle.".into(),
+            };
+            if let Some(ed) = self.criteria_editor.as_mut() {
+                ed.status_msg = Some(msg);
+            }
+        }
+        if accept || reject {
+            let target = self
+                .criteria_editor
+                .as_ref()
+                .map(|e| e.target_tier.trim().to_string())
+                .unwrap_or_default();
+            let msg = match (bundle_id, &self.app_state) {
+                (Some(bid), AppState::ProjectLoaded { project, .. }) if !target.is_empty() => {
+                    let res = if accept {
+                        project
+                            .accept_proposals(bid, &target)
+                            .map(|n| format!("Accepted {n}."))
+                    } else {
+                        project
+                            .clear_proposals(bid, &target)
+                            .map(|n| format!("Rejected {n}."))
+                    };
+                    res.unwrap_or_else(|e| format!("Failed: {e}"))
+                }
+                _ => "Select a bundle and set a target tier.".into(),
+            };
+            if let Some(ed) = self.criteria_editor.as_mut() {
+                ed.status_msg = Some(msg);
+            }
+        }
+    }
+
+    /// Saves the criteria-editor working copy via the engine, then refreshes
+    /// the list and selection.
+    fn criteria_save(&mut self) {
+        let Some(ed) = self.criteria_editor.as_ref() else {
+            return;
+        };
+        let name = ed.name.trim().to_string();
+        let kind = ed.kind.clone();
+        let body = ed.body.clone();
+        let target_tier = ed.target_tier.trim().to_string();
+        let description = ed.description.clone();
+        let result: Result<i64, String> = if name.is_empty() {
+            Err("Name cannot be empty.".into())
+        } else if target_tier.is_empty() {
+            Err("Target tier cannot be empty.".into())
+        } else if let AppState::ProjectLoaded { project, .. } = &self.app_state {
+            let desc = (!description.trim().is_empty()).then_some(description.as_str());
+            project
+                .set_criterion(&name, desc, &kind, &body, &target_tier)
+                .map(|c| c.id)
+                .map_err(|e| format!("Save failed: {e}"))
+        } else {
+            Err("No project open.".into())
+        };
+        match result {
+            Ok(id) => {
+                self.criteria_refresh_list();
+                if let Some(ed) = self.criteria_editor.as_mut() {
+                    ed.selected = Some(id);
+                    ed.status_msg = Some("Saved.".into());
+                }
+            }
+            Err(msg) => {
+                if let Some(ed) = self.criteria_editor.as_mut() {
+                    ed.status_msg = Some(msg);
+                }
+            }
+        }
+    }
+
+    /// Reloads the criteria list into the editor from the project.
+    fn criteria_refresh_list(&mut self) {
+        let list = match &self.app_state {
+            AppState::ProjectLoaded { project, .. } => project
+                .criteria()
+                .map(|cs| cs.into_iter().map(|c| (c.id, c.name)).collect())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        if let Some(ed) = self.criteria_editor.as_mut() {
+            ed.list = list;
+        }
+    }
+
     fn label_edit_window(&mut self, ctx: &egui::Context) {
         if self.label_edit.is_none() {
             return;
@@ -3534,6 +3864,15 @@ fn allocate_tier_row(
     (gutter_rect, gutter_resp, lane_rect, lane_resp)
 }
 
+/// The suffix the criteria engine appends to a target tier name for its
+/// preview ("auto") tier — must match the engine's `preview_tier_name`.
+const PREVIEW_TIER_SUFFIX: &str = " (auto)";
+
+/// Whether a tier name is a criteria-engine preview tier (holds proposals).
+fn is_preview_tier(name: &str) -> bool {
+    name.ends_with(PREVIEW_TIER_SUFFIX)
+}
+
 /// Whether `label` is out of the controlled `vocab`: non-empty and absent.
 /// An empty label, or an empty vocabulary, is never "out of vocab".
 fn is_out_of_vocab(vocab: &[String], label: &str) -> bool {
@@ -3567,6 +3906,7 @@ fn render_interval_lane(
     tier_id: i64,
     rows: &[sadda_engine::Interval],
     status_palette: &[String],
+    is_preview: bool,
     selection: Option<AnnotationSelection>,
     response: &egui::Response,
     draft: &DraftEdit,
@@ -3579,7 +3919,13 @@ fn render_interval_lane(
     let view_range = (view_end - view_start).max(1e-6);
     let lane_width = rect.width() as f64;
     let x_per_second = lane_width / view_range;
-    let base_fill = egui::Color32::from_rgb(82, 138, 198);
+    // Proposals on a criteria preview ("auto") tier render in a distinct
+    // amber so they read as not-yet-accepted.
+    let base_fill = if is_preview {
+        egui::Color32::from_rgb(190, 150, 70)
+    } else {
+        egui::Color32::from_rgb(82, 138, 198)
+    };
     let selected_fill = egui::Color32::from_rgb(160, 200, 250);
     let draft_fill = egui::Color32::from_rgba_premultiplied(60, 180, 120, 160);
     let text_color = egui::Color32::WHITE;
@@ -3927,6 +4273,7 @@ fn render_point_lane(
     tier_id: i64,
     rows: &[sadda_engine::Point],
     status_palette: &[String],
+    is_preview: bool,
     selection: Option<AnnotationSelection>,
     response: &egui::Response,
     draft: &DraftEdit,
@@ -3939,7 +4286,13 @@ fn render_point_lane(
     let view_range = (view_end - view_start).max(1e-6);
     let lane_width = rect.width() as f64;
     let x_per_second = lane_width / view_range;
-    let base_color = egui::Color32::from_rgb(230, 180, 70);
+    // Proposals on a criteria preview ("auto") tier render in a distinct
+    // violet so they read as not-yet-accepted.
+    let base_color = if is_preview {
+        egui::Color32::from_rgb(175, 120, 205)
+    } else {
+        egui::Color32::from_rgb(230, 180, 70)
+    };
     let selected_color = egui::Color32::from_rgb(255, 220, 120);
     let draft_color = egui::Color32::from_rgb(60, 200, 130);
 
@@ -4313,6 +4666,7 @@ impl eframe::App for SaddaApp {
         // overlays everything; commit / cancel logic lives inside.
         self.label_edit_window(ui.ctx());
         self.rubric_editor_window(ui.ctx());
+        self.criteria_editor_window(ui.ctx());
 
         // E9 command palette. Same overlay pattern.
         self.command_palette_window(ui.ctx());
@@ -4453,6 +4807,21 @@ impl SaddaApp {
                 ui.close();
                 if self.rubric_editor.is_none() {
                     self.rubric_editor = Some(RubricEditor::default());
+                }
+            }
+            if ui
+                .add_enabled(project_open, egui::Button::new("Criteria…"))
+                .on_disabled_hover_text("Open or create a project first")
+                .on_hover_text(
+                    "Define re-runnable rules that propose annotations on a preview tier",
+                )
+                .clicked()
+            {
+                ui.close();
+                if self.criteria_editor.is_none() {
+                    let mut ed = CriteriaEditor::default();
+                    ed.reset_to_new();
+                    self.criteria_editor = Some(ed);
                 }
             }
         });
@@ -5773,6 +6142,7 @@ impl SaddaApp {
                                 tier.id,
                                 &rows,
                                 &status_palette,
+                                is_preview_tier(&tier.name),
                                 self.selected_annotation,
                                 &response,
                                 &self.draft_edit,
@@ -5798,6 +6168,7 @@ impl SaddaApp {
                                 tier.id,
                                 &rows,
                                 &status_palette,
+                                is_preview_tier(&tier.name),
                                 self.selected_annotation,
                                 &response,
                                 &self.draft_edit,
@@ -6994,6 +7365,15 @@ mod rubric_ui_tests {
         assert!(!is_out_of_vocab(&[], "anything"));
         // A non-empty label absent from a non-empty vocabulary is OOV.
         assert!(is_out_of_vocab(&vocab, "zzz"));
+    }
+
+    #[test]
+    fn preview_tier_detection_matches_the_engine_suffix() {
+        // Must match the engine's `preview_tier_name` = "<target> (auto)".
+        assert!(is_preview_tier("vowels (auto)"));
+        assert!(is_preview_tier(&format!("landmarks{PREVIEW_TIER_SUFFIX}")));
+        assert!(!is_preview_tier("vowels"));
+        assert!(!is_preview_tier("(auto) prefix"));
     }
 
     #[test]
