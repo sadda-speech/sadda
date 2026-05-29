@@ -315,6 +315,9 @@ struct SaddaApp {
     pending_new_tier: Option<NewTierDraft>,
     pending_tier_rename: Option<PendingTierRename>,
     pending_tier_delete: Option<PendingTierDelete>,
+    /// Target tier for span-selection commits (boundaries / points). Set by
+    /// clicking a tier's gutter name; highlighted in the strip.
+    active_tier_id: Option<i64>,
     /// A1: open provenance/citations modal. `Some` holds the snapshot
     /// of the bundle's processing runs + citations, loaded once when
     /// the modal opens.
@@ -808,6 +811,7 @@ impl SaddaApp {
             pending_new_tier: None,
             pending_tier_rename: None,
             pending_tier_delete: None,
+            active_tier_id: None,
             provenance: None,
         }
     }
@@ -1338,9 +1342,13 @@ impl SaddaApp {
                     match project.delete_tier(id) {
                         Ok(()) => {
                             self.error = None;
-                            // Clear any selection/draft that referenced the gone tier.
+                            // Clear any selection/draft/active-tier that
+                            // referenced the gone tier.
                             self.selected_annotation = None;
                             self.draft_edit = DraftEdit::None;
+                            if self.active_tier_id == Some(id) {
+                                self.active_tier_id = None;
+                            }
                             self.set_info(format!("Deleted tier “{name}”."));
                         }
                         Err(e) => self.set_error(format!("Delete tier failed: {e}")),
@@ -1350,6 +1358,54 @@ impl SaddaApp {
             }
             Some(false) => self.pending_tier_delete = None,
             None => {}
+        }
+    }
+
+    /// Commits the current time-span selection to the active tier: an
+    /// interval `[lo, hi]` (interval tier) or two boundary points at the
+    /// edges (point tier). Keeps the selection so it can be placed on
+    /// several tiers in turn.
+    fn commit_selection_to_tier(&mut self, tier_id: i64, tier_type: TierType, lo: f64, hi: f64) {
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        let result = match tier_type {
+            TierType::Interval => project
+                .add_interval(&sadda_engine::IntervalSpec {
+                    tier_id,
+                    start_seconds: lo,
+                    end_seconds: hi,
+                    label: None,
+                    parent_annotation_id: None,
+                    extra: None,
+                })
+                .map(|_| ()),
+            TierType::Point => project
+                .add_point(&sadda_engine::PointSpec {
+                    tier_id,
+                    time_seconds: lo,
+                    label: None,
+                    parent_annotation_id: None,
+                    extra: None,
+                })
+                .and_then(|_| {
+                    project.add_point(&sadda_engine::PointSpec {
+                        tier_id,
+                        time_seconds: hi,
+                        label: None,
+                        parent_annotation_id: None,
+                        extra: None,
+                    })
+                })
+                .map(|_| ()),
+            _ => return,
+        };
+        match result {
+            Ok(()) => {
+                self.error = None;
+                self.set_info("Added annotation from selection.".to_string());
+            }
+            Err(e) => self.set_error(format!("Add from selection failed: {e}")),
         }
     }
 
@@ -2768,6 +2824,67 @@ fn draw_cursor_line(plot_ui: &mut egui_plot::PlotUi<'_>, cursor: f64, y_min: f64
     );
 }
 
+/// Selection band fill + edge colours, shared by the plot-lane and
+/// tier-lane (painter) renderers so the band reads identically everywhere.
+const SELECTION_FILL: egui::Color32 = egui::Color32::from_rgba_premultiplied(40, 62, 102, 70);
+const SELECTION_EDGE: egui::Color32 = egui::Color32::from_rgb(96, 150, 235);
+
+/// Draws the time-span selection as a translucent band + edge lines in an
+/// `egui_plot` lane (waveform / spectrogram / measure tracks).
+fn draw_selection_band(
+    plot_ui: &mut egui_plot::PlotUi<'_>,
+    selection: Option<(f64, f64)>,
+    y_min: f64,
+    y_max: f64,
+) {
+    let Some((lo, hi)) = selection else {
+        return;
+    };
+    plot_ui.polygon(
+        egui_plot::Polygon::new(
+            "selection",
+            PlotPoints::from(vec![[lo, y_min], [hi, y_min], [hi, y_max], [lo, y_max]]),
+        )
+        .fill_color(SELECTION_FILL)
+        .stroke(egui::Stroke::NONE),
+    );
+    for x in [lo, hi] {
+        plot_ui.line(
+            Line::new("sel_edge", PlotPoints::from(vec![[x, y_min], [x, y_max]]))
+                .color(SELECTION_EDGE)
+                .width(1.0),
+        );
+    }
+}
+
+/// Draws the selection band into a painter-based lane (tier lanes), mapping
+/// time → x the same way the interval/point renderers do.
+fn draw_selection_band_rect(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    view_start: f64,
+    view_end: f64,
+    selection: Option<(f64, f64)>,
+) {
+    let Some((lo, hi)) = selection else {
+        return;
+    };
+    let x_per_second = rect.width() as f64 / (view_end - view_start).max(1e-6);
+    let x0 = (rect.left() + ((lo - view_start) * x_per_second) as f32).max(rect.left());
+    let x1 = (rect.left() + ((hi - view_start) * x_per_second) as f32).min(rect.right());
+    if x1 <= x0 {
+        return;
+    }
+    let band = egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(x1, rect.bottom()));
+    painter.rect_filled(band, 0.0, SELECTION_FILL);
+    for x in [x0, x1] {
+        painter.line_segment(
+            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            egui::Stroke::new(1.0, SELECTION_EDGE),
+        );
+    }
+}
+
 /// D10: per-formant dot colour (F1, F2, F3, …). The formants share one
 /// lane, so this is the main place colour has to be *discriminated* —
 /// hence the colourblind-safe alternate. Wraps for slots beyond the set.
@@ -2814,8 +2931,12 @@ fn measure_lane(
     let view_start = timeline.view_start;
     let view_end = timeline.view_end;
     let cursor = timeline.cursor;
+    let selection = timeline.selection;
     let (y_min, y_max) = y_range;
     let mut clicked_time: Option<f64> = None;
+    let mut drag_start: Option<f64> = None;
+    let mut drag_to: Option<f64> = None;
+    let mut drag_ended = false;
 
     let plot_response = Plot::new(plot_id)
         .show_axes([false, true])
@@ -2832,20 +2953,31 @@ fn measure_lane(
             plot_ui.set_plot_bounds_y(y_min..=y_max);
             draw(plot_ui);
             draw_cursor_line(plot_ui, cursor, y_min, y_max);
+            draw_selection_band(plot_ui, selection, y_min, y_max);
 
             let resp = plot_ui.response();
+            if resp.drag_started() {
+                drag_start = resp
+                    .interact_pointer_pos()
+                    .map(|p| plot_ui.plot_from_screen(p).x);
+            }
+            if resp.dragged() {
+                drag_to = resp
+                    .interact_pointer_pos()
+                    .map(|p| plot_ui.plot_from_screen(p).x);
+            }
+            if resp.drag_stopped() {
+                drag_ended = true;
+            }
             if resp.clicked() {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    let tx = plot_ui.plot_from_screen(pos);
-                    clicked_time = Some(tx.x);
-                }
+                clicked_time = resp
+                    .interact_pointer_pos()
+                    .map(|p| plot_ui.plot_from_screen(p).x);
             }
         })
         .response;
 
-    if let Some(t) = clicked_time {
-        timeline.set_cursor(t);
-    }
+    apply_lane_selection_drag(timeline, drag_start, drag_to, drag_ended, clicked_time);
     handle_zoom_and_scroll(&plot_response, timeline);
 }
 
@@ -2885,6 +3017,31 @@ fn handle_zoom_and_scroll(response: &egui::Response, timeline: &mut TimelineStat
         // (wheel up) zooms in; negative zooms out.
         let factor = if dy > 0.0 { 1.0 / 1.2 } else { 1.2 };
         timeline.zoom_at(pointer_time, factor);
+    }
+}
+
+/// Applies a signal lane's drag/click outcome to the timeline: a drag
+/// draws a span selection; a plain click clears any selection and moves
+/// the cursor. Shared by the waveform + spectrogram panes.
+fn apply_lane_selection_drag(
+    timeline: &mut TimelineState,
+    drag_start: Option<f64>,
+    drag_to: Option<f64>,
+    drag_ended: bool,
+    clicked_time: Option<f64>,
+) {
+    if let Some(t) = drag_start {
+        timeline.begin_selection(t);
+    }
+    if let Some(t) = drag_to {
+        timeline.update_selection(t);
+    }
+    if drag_ended {
+        timeline.end_selection();
+    }
+    if let Some(t) = clicked_time {
+        timeline.set_cursor(t);
+        timeline.clear_selection();
     }
 }
 
@@ -4189,7 +4346,11 @@ impl SaddaApp {
         let view_start = self.timeline.view_start;
         let view_end = self.timeline.view_end;
         let cursor = self.timeline.cursor;
+        let selection = self.timeline.selection;
         let mut clicked_time: Option<f64> = None;
+        let mut drag_start: Option<f64> = None;
+        let mut drag_to: Option<f64> = None;
+        let mut drag_ended = false;
 
         let plot_response = Plot::new("waveform")
             .show_axes([true, true])
@@ -4218,22 +4379,40 @@ impl SaddaApp {
                     }
                 }
                 draw_cursor_line(plot_ui, cursor, -1.0, 1.0);
+                draw_selection_band(plot_ui, selection, -1.0, 1.0);
 
-                // Click in the plot positions the cursor; map the
-                // pointer-coord (in plot space) directly.
+                // Drag draws a time-span selection; a plain click clears
+                // it and positions the cursor. Times come from the
+                // pointer-coord in plot space.
                 let resp = plot_ui.response();
+                if resp.drag_started() {
+                    drag_start = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
+                }
+                if resp.dragged() {
+                    drag_to = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
+                }
+                if resp.drag_stopped() {
+                    drag_ended = true;
+                }
                 if resp.clicked() {
-                    if let Some(pos) = resp.interact_pointer_pos() {
-                        let tx = plot_ui.plot_from_screen(pos);
-                        clicked_time = Some(tx.x);
-                    }
+                    clicked_time = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
                 }
             })
             .response;
 
-        if let Some(t) = clicked_time {
-            self.timeline.set_cursor(t);
-        }
+        apply_lane_selection_drag(
+            &mut self.timeline,
+            drag_start,
+            drag_to,
+            drag_ended,
+            clicked_time,
+        );
         handle_zoom_and_scroll(&plot_response, &mut self.timeline);
     }
 
@@ -4269,7 +4448,11 @@ impl SaddaApp {
         let cursor = self.timeline.cursor;
         let view_start = self.timeline.view_start;
         let view_end = self.timeline.view_end;
+        let selection = self.timeline.selection;
         let mut clicked_time: Option<f64> = None;
+        let mut drag_start: Option<f64> = None;
+        let mut drag_to: Option<f64> = None;
+        let mut drag_ended = false;
 
         let plot_response = Plot::new("spectrogram")
             .show_axes([true, true])
@@ -4293,20 +4476,37 @@ impl SaddaApp {
                     size,
                 ));
                 draw_cursor_line(plot_ui, cursor, 0.0, nyquist);
+                draw_selection_band(plot_ui, selection, 0.0, nyquist);
 
                 let resp = plot_ui.response();
+                if resp.drag_started() {
+                    drag_start = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
+                }
+                if resp.dragged() {
+                    drag_to = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
+                }
+                if resp.drag_stopped() {
+                    drag_ended = true;
+                }
                 if resp.clicked() {
-                    if let Some(pos) = resp.interact_pointer_pos() {
-                        let tx = plot_ui.plot_from_screen(pos);
-                        clicked_time = Some(tx.x);
-                    }
+                    clicked_time = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
                 }
             })
             .response;
 
-        if let Some(t) = clicked_time {
-            self.timeline.set_cursor(t);
-        }
+        apply_lane_selection_drag(
+            &mut self.timeline,
+            drag_start,
+            drag_to,
+            drag_ended,
+            clicked_time,
+        );
         handle_zoom_and_scroll(&plot_response, &mut self.timeline);
     }
 
@@ -4620,7 +4820,11 @@ impl SaddaApp {
         let cursor = self.timeline.cursor;
         let view_start = self.timeline.view_start;
         let view_end = self.timeline.view_end;
+        let selection = self.timeline.selection;
         let mut clicked_time: Option<f64> = None;
+        let mut drag_start: Option<f64> = None;
+        let mut drag_to: Option<f64> = None;
+        let mut drag_ended = false;
 
         let plot_response = Plot::new("embedding_heatmap_plot")
             .show_axes([true, true])
@@ -4640,19 +4844,37 @@ impl SaddaApp {
                     size,
                 ));
                 draw_cursor_line(plot_ui, cursor, 0.0, n_dims);
+                draw_selection_band(plot_ui, selection, 0.0, n_dims);
 
                 let resp = plot_ui.response();
+                if resp.drag_started() {
+                    drag_start = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
+                }
+                if resp.dragged() {
+                    drag_to = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
+                }
+                if resp.drag_stopped() {
+                    drag_ended = true;
+                }
                 if resp.clicked() {
-                    if let Some(pos) = resp.interact_pointer_pos() {
-                        clicked_time = Some(plot_ui.plot_from_screen(pos).x);
-                    }
+                    clicked_time = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
                 }
             })
             .response;
 
-        if let Some(t) = clicked_time {
-            self.timeline.set_cursor(t);
-        }
+        apply_lane_selection_drag(
+            &mut self.timeline,
+            drag_start,
+            drag_to,
+            drag_ended,
+            clicked_time,
+        );
         handle_zoom_and_scroll(&plot_response, &mut self.timeline);
     }
 
@@ -4669,6 +4891,8 @@ impl SaddaApp {
         let view_start = self.timeline.view_start;
         let view_end = self.timeline.view_end;
         let cursor = self.timeline.cursor;
+        let selection = self.timeline.selection;
+        let active_tier_id = self.active_tier_id;
         let tiers = match project.tiers(Some(bundle_id)) {
             Ok(t) => t,
             Err(e) => {
@@ -4679,19 +4903,51 @@ impl SaddaApp {
                 return;
             }
         };
-        // Tier-lifecycle requests (create / rename / delete) raised below
-        // are applied after the `&project` borrow ends — same snapshot
+        // Tier-lifecycle + selection-commit requests raised below are
+        // applied after the `&project` borrow ends — same snapshot
         // discipline as the selection state.
         let mut tier_op: Option<TierOp> = None;
+        let mut clicked_active: Option<i64> = None;
+        let mut selection_commit: Option<(i64, TierType, f64, f64)> = None;
+        let mut clear_selection = false;
+        let active = active_tier_id.and_then(|aid| tiers.iter().find(|t| t.id == aid));
         ui.horizontal(|ui| {
             if ui.button("➕ New tier…").clicked() {
                 tier_op = Some(TierOp::New);
             }
-            ui.label(
-                egui::RichText::new("right-click a tier name to rename or delete")
-                    .weak()
-                    .small(),
-            );
+            ui.separator();
+            match active {
+                Some(t) => {
+                    ui.label(format!("Active tier: {}", truncate_label(&t.name, 16)));
+                }
+                None => {
+                    ui.label(egui::RichText::new("Active tier: none — click a tier name").weak());
+                }
+            }
+            if let Some((lo, hi)) = selection {
+                ui.separator();
+                ui.label(egui::RichText::new(format!("selection {lo:.3}–{hi:.3}s")).small());
+                let can_commit = active
+                    .map(|t| matches!(t.r#type, TierType::Interval | TierType::Point))
+                    .unwrap_or(false);
+                let hint = if active.map(|t| t.r#type) == Some(TierType::Point) {
+                    "Add points at edges"
+                } else {
+                    "Add interval"
+                };
+                if ui
+                    .add_enabled(can_commit, egui::Button::new(hint))
+                    .on_hover_text("add the selection to the active tier")
+                    .clicked()
+                {
+                    if let Some(t) = active {
+                        selection_commit = Some((t.id, t.r#type, lo, hi));
+                    }
+                }
+                if ui.button("Clear").clicked() {
+                    clear_selection = true;
+                }
+            }
         });
         if tiers.is_empty() {
             ui.label(egui::RichText::new("(no tiers in this bundle yet)").italics());
@@ -4725,12 +4981,21 @@ impl SaddaApp {
                         egui::Vec2::new(SIGNAL_LEFT_GUTTER, TIER_LANE_HEIGHT),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
-                            let name_resp = ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(truncate_label(&tier.name, 16)).strong(),
-                                )
-                                .sense(egui::Sense::click()),
-                            );
+                            // Active tier (the span-selection target) is
+                            // highlighted; left-click sets it.
+                            let mut name_text =
+                                egui::RichText::new(truncate_label(&tier.name, 16)).strong();
+                            if active_tier_id == Some(tier.id) {
+                                name_text = name_text.color(SELECTION_EDGE);
+                            }
+                            let name_resp = ui
+                                .add(egui::Label::new(name_text).sense(egui::Sense::click()))
+                                .on_hover_text(
+                                    "click to make this the active tier; right-click for actions",
+                                );
+                            if name_resp.clicked() {
+                                clicked_active = Some(tier.id);
+                            }
                             name_resp.context_menu(|ui| {
                                 if ui.button("Rename tier…").clicked() {
                                     tier_op = Some(TierOp::Rename(tier.id, tier.name.clone()));
@@ -4838,6 +5103,10 @@ impl SaddaApp {
                         }
                     }
 
+                    // Selection band spans every lane so it lines up with
+                    // the waveform / spectrogram. Drawn under the cursor.
+                    draw_selection_band_rect(&painter, rect, view_start, view_end, selection);
+
                     // Draw the synced cursor over every lane (incl.
                     // reference / dense captions) at this frame's
                     // timeline.cursor — clipped to the lane rect.
@@ -4910,6 +5179,22 @@ impl SaddaApp {
         // ---- Inline label edit request -----------------------------
         if let Some(req) = label_edit_request {
             self.label_edit = Some(req);
+        }
+
+        // ---- Active-tier + selection-commit (apply after &project) -
+        if let Some(id) = clicked_active {
+            // Toggle off if clicking the already-active tier.
+            self.active_tier_id = if self.active_tier_id == Some(id) {
+                None
+            } else {
+                Some(id)
+            };
+        }
+        if clear_selection {
+            self.timeline.clear_selection();
+        }
+        if let Some((tier_id, tier_type, lo, hi)) = selection_commit {
+            self.commit_selection_to_tier(tier_id, tier_type, lo, hi);
         }
 
         // ---- Tier-lifecycle requests (apply after &project ended) --

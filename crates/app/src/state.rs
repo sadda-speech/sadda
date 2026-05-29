@@ -945,6 +945,9 @@ mod tier_strip_tests {
 /// Minimum view-range size in seconds; prevents the user from zooming
 /// to a window so small that floats start losing precision.
 const MIN_VIEW_RANGE_SECONDS: f64 = 0.005;
+/// Drags shorter than this (in seconds) don't "stick" as a selection —
+/// they read as a plain click (which clears the selection + sets cursor).
+const MIN_SELECTION_SECONDS: f64 = 0.002;
 
 /// Shared timeline state used by every C5+ pane: cursor, view window,
 /// and the bundle duration the window clamps against. Pure-data —
@@ -961,6 +964,12 @@ pub struct TimelineState {
     /// Bundle duration in seconds. Acts as the upper bound for
     /// `view_end` and `cursor` clamping.
     pub duration: f64,
+    /// Active time-span selection `(lo, hi)` in seconds, drawn as a band
+    /// across every lane. `None` when nothing is selected. Drag on the
+    /// waveform / spectrogram sets it; a plain click clears it.
+    pub selection: Option<(f64, f64)>,
+    /// Transient drag anchor while a selection is being dragged out.
+    selection_anchor: Option<f64>,
 }
 
 impl Default for TimelineState {
@@ -970,6 +979,8 @@ impl Default for TimelineState {
             view_end: 0.0,
             cursor: 0.0,
             duration: 0.0,
+            selection: None,
+            selection_anchor: None,
         }
     }
 }
@@ -983,6 +994,39 @@ impl TimelineState {
         self.view_start = 0.0;
         self.view_end = d.max(MIN_VIEW_RANGE_SECONDS);
         self.cursor = 0.0;
+        self.selection = None;
+        self.selection_anchor = None;
+    }
+
+    /// Begins a drag-selection anchored at `t` (seconds).
+    pub fn begin_selection(&mut self, t: f64) {
+        let t = t.clamp(0.0, self.duration);
+        self.selection_anchor = Some(t);
+        self.selection = Some((t, t));
+    }
+
+    /// Extends the in-progress selection to `t` (sorted into `(lo, hi)`).
+    pub fn update_selection(&mut self, t: f64) {
+        if let Some(a) = self.selection_anchor {
+            let t = t.clamp(0.0, self.duration);
+            self.selection = Some(if a <= t { (a, t) } else { (t, a) });
+        }
+    }
+
+    /// Finalises a drag-selection; discards spans too short to be intentional.
+    pub fn end_selection(&mut self) {
+        self.selection_anchor = None;
+        if let Some((lo, hi)) = self.selection {
+            if (hi - lo) < MIN_SELECTION_SECONDS {
+                self.selection = None;
+            }
+        }
+    }
+
+    /// Clears any selection (and drag anchor).
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+        self.selection_anchor = None;
     }
 
     /// Returns `view_end - view_start` (always > 0 for an
@@ -1114,6 +1158,47 @@ mod timeline_tests {
         t.reset_for_bundle(-1.0);
         assert_eq!(t.duration, 0.0);
         assert!(t.view_end >= MIN_VIEW_RANGE_SECONDS);
+    }
+
+    #[test]
+    fn selection_drag_sorts_and_sticks() {
+        let mut t = fresh(5.0);
+        // Drag right-to-left still yields a sorted (lo, hi).
+        t.begin_selection(3.0);
+        t.update_selection(1.0);
+        assert_eq!(t.selection, Some((1.0, 3.0)));
+        t.end_selection();
+        assert_eq!(t.selection, Some((1.0, 3.0)));
+    }
+
+    #[test]
+    fn tiny_selection_is_discarded_as_a_click() {
+        let mut t = fresh(5.0);
+        t.begin_selection(2.0);
+        t.update_selection(2.0 + MIN_SELECTION_SECONDS / 2.0);
+        t.end_selection();
+        assert_eq!(t.selection, None);
+    }
+
+    #[test]
+    fn clear_and_reset_drop_selection() {
+        let mut t = fresh(5.0);
+        t.begin_selection(1.0);
+        t.update_selection(2.0);
+        t.clear_selection();
+        assert_eq!(t.selection, None);
+        t.begin_selection(1.0);
+        t.update_selection(2.0);
+        t.reset_for_bundle(5.0);
+        assert_eq!(t.selection, None);
+    }
+
+    #[test]
+    fn selection_clamps_to_duration() {
+        let mut t = fresh(2.0);
+        t.begin_selection(-1.0);
+        t.update_selection(9.0);
+        assert_eq!(t.selection, Some((0.0, 2.0)));
     }
 
     #[test]

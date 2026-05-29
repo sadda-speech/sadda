@@ -6,6 +6,18 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-30 — Cross-lane span selection → annotation on a chosen tier (GUI)
+
+Second half of the annotation request: a time-span selection you drag on the waveform/spectrogram that extends through every lane, used to place boundaries/points on a **chosen** tier.
+
+- **Selection state** (`TimelineState`): `selection: Option<(lo, hi)>` + a private drag anchor; `begin/update/end/clear_selection` (sorts `lo ≤ hi`, clamps to `[0, duration]`, discards sub-`MIN_SELECTION_SECONDS` drags as clicks, cleared on bundle reset). Unit-tested (sort, clamp, tiny-discard, clear/reset).
+- **Interaction**: dragging on the **waveform, spectrogram, measure lanes, or embedding heatmap** draws the selection (shared `apply_lane_selection_drag` from each plot lane's `response`); a plain click clears it and sets the cursor (unchanged). Tier lanes keep their existing drag-to-edit behaviour (no select-drag there).
+- **Rendering**: the band (translucent fill + edge lines) is drawn in *every* lane — `draw_selection_band` for the `egui_plot` lanes and `draw_selection_band_rect` (painter) for the tier lanes, sharing one fill/edge colour so it lines up vertically across the whole stack and you can see exactly where boundaries/points will land.
+- **Target tier (per the maintainer's note — pick the tier, don't fan out):** an **active tier** concept. Left-click a tier's gutter name to make it the target (highlighted in the selection colour; click again to toggle off). The tier-strip toolbar shows the active tier, and when a selection exists offers **"Add interval"** (interval tier → one interval `[lo, hi]`) or **"Add points at edges"** (point tier → points at `lo` and `hi`), plus **Clear**. The selection is *kept* after a commit so the same span can be placed on several tiers in turn. Disabled for reference/dense active tiers.
+- Active-tier id is cleared when its tier is deleted; commits go through `commit_selection_to_tier` after the `&project` borrow ends (same snapshot discipline as the rest of the strip).
+
+GUI/state-only — no engine/Python/doc-surface change. The selection-state logic is unit-tested; the drag/render is GUI (not auto-tested, consistent with the rest of the app — build + clippy clean). Gates green: fmt/clippy `--workspace --all-targets -D warnings`/`test --workspace` (65 app tests incl. the new selection cases).
+
 ## 2026-05-30 — Tier lifecycle: create / rename / delete across all three surfaces
 
 The GUI could edit annotations *within* tiers but couldn't create, rename, or delete tiers — and `delete_tier`/`rename_tier` didn't exist at the engine/Python layer at all (only `add_tier` + bundle-level rename/delete). Closes that gap end to end.
