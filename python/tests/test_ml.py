@@ -79,11 +79,22 @@ def test_load_model_resolves_bundled_vad() -> None:
     assert m.weights_checksum.startswith("sha256:")
 
 
-def test_load_model_hf_is_deferred() -> None:
+def test_load_model_hf_refused_without_network_opt_in() -> None:
+    """The `download` capability is compiled into the wheel, but a network
+    fetch is refused unless SADDA_ALLOW_NETWORK is set — and the error names
+    the opt-in. Runs in CI (no network: the gate fires before any request).
+    """
+    import os
+
+    if os.environ.get("SADDA_ALLOW_NETWORK"):
+        pytest.skip("SADDA_ALLOW_NETWORK is set; gate would allow the fetch")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        with pytest.raises(Exception):
-            sadda.ml.load_model("hf://facebook/wav2vec2-base-960h")
+        with pytest.raises(Exception) as exc:
+            # Well-formed id (org/name/file) so it passes parsing and reaches
+            # the network gate rather than failing on the id shape.
+            sadda.ml.load_model("hf://sadda-test/does-not-exist-xyz/model.onnx")
+    assert "SADDA_ALLOW_NETWORK" in str(exc.value)
 
 
 def test_load_model_is_provisional() -> None:

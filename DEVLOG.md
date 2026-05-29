@@ -6,6 +6,17 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-29 — Download-enabled wheel: `hf://` fetch on the wheel, runtime network opt-in (follow-up 1/3)
+
+Surfaces E12a's `hf://` model download to Python users. The crux: a cargo feature is compile-time but a pip extra is install-time, so `pip install sadda[download]` *can't* toggle a Rust feature — the capability has to be compiled into the single PyPI wheel. Decision (with the user): **compile it in + a runtime env-gate**, so the wheel *can* download but stays network-free until explicitly allowed.
+
+- **Engine gate** (`engine::models`, behind `download`): `download_file` now calls `ensure_network_allowed()` first — refuses unless `SADDA_ALLOW_NETWORK` is set (truthy: anything but ``/`0`/`false`/`no`/`off`), with a clear "network access is disabled; set SADDA_ALLOW_NETWORK=1 …" error. Gated at the network boundary, so cached models and `local://` / `sadda/…` ids still resolve fully offline (they never reach `download_file`). This is the explicit opt-in principle #10 asks for, now expressed at runtime rather than by omitting the feature from the build.
+- **Wheel** (`crates/python/Cargo.toml`): engine feature `ml` → `download` (implies `ml`), so the fetch (ureq/rustls, ~+2 MB) compiles into every wheel. The **desktop app deliberately keeps `ml` only** — the GUI stays network-free by construction; `cargo build -p sadda-app` never pulls `download`.
+- **Python**: no new API — `sadda.ml.load_model("hf://…")` already existed and now reaches the gated fetch. `[download]` pip extra added (`= sadda[ml]`): it doesn't enable the network (the env var does); it just pulls ONNX Runtime so a downloaded model runs immediately.
+- **Tests**: engine `hf_fetch_refused_without_network_opt_in` + `env_is_truthy_cases` run in CI with **no network** (the gate fires before any request); the old `test_load_model_hf_is_deferred` (asserted the feature was absent) became `test_load_model_hf_refused_without_network_opt_in`. Real-network tests (`net_test_ready`) now require **both** `SADDA_NET_TESTS=1` *and* `SADDA_ALLOW_NETWORK=1`. Docs: a "Downloading models (`hf://`)" section on `sadda.ml`.
+
+Three-surface note: engine + Python only, **by design** — network download is intentionally absent from the GUI (the desktop app's network-free stance serves the clinical/forensic/field audiences). Gates green: fmt/clippy `--workspace --all-targets -D warnings`/`test --workspace`, stubs unchanged (no new pyclass/pyfunction), 178 pytest + 27 `tools/docs`, source-link gate 0 unresolved, `mkdocs build --strict` clean. Release CI builds the wheel via maturin, which now compiles `download` in (ureq adds rustls/ring to the manylinux build).
+
 ## 2026-05-29 — Source links on auto-rendered class getters (closes the noted nicety)
 
 Closes the loose end from the class-member rendering fix: data classes documented with a bare `::: sadda.Audio` (no explicit `members:` list) render *all* their public getters/methods, but those weren't in the scanner's universe, so they rendered without source links.
