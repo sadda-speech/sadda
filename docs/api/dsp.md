@@ -20,4 +20,5 @@ dependency. STABLE tier.
         - voiced_pitch
         - formants
         - mfcc
+        - log_mel_whisper
         - FormantFrame

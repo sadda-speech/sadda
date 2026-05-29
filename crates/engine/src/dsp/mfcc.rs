@@ -29,7 +29,7 @@
 use ndarray::Array2;
 use realfft::RealFftPlanner;
 
-use crate::dsp::windowing::hann;
+use crate::dsp::windowing::{hann, hann_periodic};
 
 /// Computes the MFCC matrix of shape `(n_frames, n_mfcc)`.
 ///
@@ -172,6 +172,133 @@ pub fn log_mel(
             }
             out[[f, m]] = (e + 1e-10).ln();
         }
+    }
+    out
+}
+
+/// Reflect-pads `samples` by `pad` on each side, matching the
+/// `mode="reflect"` padding `torch.stft(center=True)` applies internally:
+/// the edge sample is the mirror axis and is **not** repeated, so a left
+/// pad reads `samples[pad], samples[pad-1], …, samples[1]`. Requires
+/// `samples.len() > pad` (true for any real audio vs. `n_fft/2`).
+fn reflect_pad(samples: &[f32], pad: usize) -> Vec<f32> {
+    let n = samples.len();
+    let mut out = Vec::with_capacity(n + 2 * pad);
+    for k in 0..pad {
+        out.push(samples[pad - k]); // samples[pad] … samples[1]
+    }
+    out.extend_from_slice(samples);
+    for k in 1..=pad {
+        out.push(samples[n - 1 - k]); // samples[n-2] … samples[n-1-pad]
+    }
+    out
+}
+
+/// Byte-faithful reproduction of OpenAI Whisper's log-mel front end — the
+/// exact input contract of the Whisper ONNX encoder. Differs from
+/// [`log_mel`] (which is the generic Slaney/natural-log feature) in the
+/// post-filterbank steps and framing; the **mel filterbank itself is the
+/// same Slaney bank** (Whisper loads `librosa.filters.mel(sr=16000,
+/// n_fft=400, n_mels=…)` with librosa's defaults — Slaney scale + Slaney
+/// area norm, `fmin=0`, `fmax=sr/2` — *not* HTK).
+///
+/// Pipeline (per `whisper/audio.py::log_mel_spectrogram`):
+/// 1. optionally zero-pad / trim the audio to `target_frames · hop_length`
+///    samples (Whisper pads to `N_SAMPLES = 30 s`), so the result has
+///    exactly `target_frames` frames and the global max below is taken over
+///    the same window Whisper uses;
+/// 2. `center=True` reflect-pad by `n_fft/2`, Hann window, power STFT,
+///    **dropping the last frame** (`stft[..., :-1]`);
+/// 3. Slaney mel projection;
+/// 4. `log10(max(mel, 1e-10))`;
+/// 5. dynamic-range floor: `max(log_spec, log_spec.max() − 8.0)` (global max);
+/// 6. normalise: `(log_spec + 4.0) / 4.0`.
+///
+/// Returns `(n_frames, n_mels)`, frames-first (like [`log_mel`]). Empty if
+/// the audio is too short to frame.
+///
+/// Reference: OpenAI Whisper, `whisper/audio.py`.
+/// <https://github.com/openai/whisper/blob/main/whisper/audio.py>
+pub fn log_mel_whisper(
+    samples: &[f32],
+    sample_rate: u32,
+    n_fft: usize,
+    hop_length: usize,
+    n_mels: usize,
+    target_frames: Option<usize>,
+) -> Array2<f32> {
+    assert!(sample_rate > 0 && n_fft > 0 && hop_length > 0 && n_mels > 0);
+    // Step 1: pad/trim the audio (Whisper's `F.pad` to N_SAMPLES). `resize`
+    // zero-pads when short and truncates when long.
+    let audio: Vec<f32> = match target_frames {
+        Some(tf) => {
+            let mut v = samples.to_vec();
+            v.resize(tf * hop_length, 0.0);
+            v
+        }
+        None => samples.to_vec(),
+    };
+    let pad = n_fft / 2;
+    if audio.len() <= pad {
+        return Array2::zeros((0, n_mels));
+    }
+    // Step 2: center reflect-pad + frame.
+    let padded = reflect_pad(&audio, pad);
+    // torch center=True yields `1 + len/hop` frames; Whisper drops the last.
+    let n_all = (padded.len() - n_fft) / hop_length + 1;
+    let n_frames = n_all.saturating_sub(1);
+    if n_frames == 0 {
+        return Array2::zeros((0, n_mels));
+    }
+    let n_freq_bins = n_fft / 2 + 1;
+    // Whisper/torch/librosa STFTs use the PERIODIC Hann window, not the
+    // scipy-symmetric one — required for a bin-for-bin match.
+    let window = hann_periodic(n_fft);
+    let mel_fb = slaney_mel_filterbank(
+        n_mels,
+        n_freq_bins,
+        sample_rate as f32,
+        0.0,
+        sample_rate as f32 / 2.0,
+    );
+
+    let mut planner = RealFftPlanner::<f32>::new();
+    let plan = planner.plan_fft_forward(n_fft);
+    let mut fft_in = plan.make_input_vec();
+    let mut fft_out = plan.make_output_vec();
+
+    let mut out = Array2::<f32>::zeros((n_frames, n_mels));
+    let mut power = vec![0.0_f32; n_freq_bins];
+    let mut global_max = f32::NEG_INFINITY;
+    for f in 0..n_frames {
+        let start = f * hop_length;
+        for (dst, (&s, &w)) in fft_in
+            .iter_mut()
+            .zip(padded[start..start + n_fft].iter().zip(window.iter()))
+        {
+            *dst = s * w;
+        }
+        plan.process(&mut fft_in, &mut fft_out)
+            .expect("realfft buffers sized via make_*_vec");
+        for (i, c) in fft_out.iter().enumerate() {
+            power[i] = c.re * c.re + c.im * c.im;
+        }
+        for m in 0..n_mels {
+            let mut e = 0.0_f32;
+            for (b, &p) in power.iter().enumerate() {
+                e += p * mel_fb[m * n_freq_bins + b];
+            }
+            // Steps 3–4: Slaney mel energy → log10(clamp(·, 1e-10)).
+            let v = e.max(1e-10).log10();
+            out[[f, m]] = v;
+            global_max = global_max.max(v);
+        }
+    }
+    // Steps 5–6: global dynamic-range floor, then normalise. Applied after
+    // the whole spectrogram exists (the floor uses the global maximum).
+    let floor = global_max - 8.0;
+    for v in out.iter_mut() {
+        *v = (v.max(floor) + 4.0) / 4.0;
     }
     out
 }
@@ -376,6 +503,47 @@ mod tests {
     #[test]
     fn mfcc_of_short_input_returns_empty() {
         let out = mfcc(&[0.5; 100], 16_000, 0.025, 0.010, 40, 13, 0.0, 8000.0);
+        assert_eq!(out.dim().0, 0);
+    }
+
+    #[test]
+    fn reflect_pad_mirrors_without_repeating_edge() {
+        // torch reflect: edge sample is the axis, not duplicated.
+        assert_eq!(
+            reflect_pad(&[1.0, 2.0, 3.0, 4.0], 2),
+            vec![3.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 2.0]
+        );
+    }
+
+    #[test]
+    fn whisper_target_frames_is_exact() {
+        // With `target_frames`, the audio is padded/trimmed so the result
+        // has exactly that many frames (Whisper's encoder needs 3000).
+        let tone: Vec<f32> = (0..3200)
+            .map(|i| (2.0 * std::f32::consts::PI * 220.0 * i as f32 / 16_000.0).sin())
+            .collect();
+        let out = log_mel_whisper(&tone, 16_000, 400, 160, 80, Some(100));
+        assert_eq!(out.dim(), (100, 80));
+        assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn whisper_silence_normalises_to_constant() {
+        // Silence → mel 0 → log10(1e-10) = -10 everywhere → global max -10,
+        // floor -18, so max(-10,-18)=-10, then (-10+4)/4 = -1.5.
+        let out = log_mel_whisper(&[0.0; 8000], 16_000, 400, 160, 80, Some(50));
+        assert_eq!(out.dim(), (50, 80));
+        for v in out.iter() {
+            assert!(
+                (v - (-1.5)).abs() < 1e-5,
+                "silence frame = {v}, expected -1.5"
+            );
+        }
+    }
+
+    #[test]
+    fn whisper_short_input_returns_empty() {
+        let out = log_mel_whisper(&[0.1; 100], 16_000, 400, 160, 80, None);
         assert_eq!(out.dim().0, 0);
     }
 }

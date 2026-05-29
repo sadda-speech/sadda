@@ -35,6 +35,25 @@ pub fn hann(n: usize) -> Vec<f32> {
         .collect()
 }
 
+/// Periodic ("DFT-even") Hann window: `0.5 * (1 - cos(2π n / N))` — the
+/// `sym=False` / `fftbins=True` convention used by STFT front ends
+/// (`torch.hann_window` default, `librosa.stft`, OpenAI Whisper). Differs
+/// from [`hann`] only in the denominator (`N` vs `N-1`); use this where an
+/// analysis must match those libraries bin-for-bin, [`hann`] for the
+/// scipy-symmetric default. Length-0 / length-1 return empty / `[1.0]`.
+pub fn hann_periodic(n: usize) -> Vec<f32> {
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        return vec![1.0];
+    }
+    let denom = n as f32;
+    (0..n)
+        .map(|k| 0.5 * (1.0 - (2.0 * PI * k as f32 / denom).cos()))
+        .collect()
+}
+
 /// Hamming window: `0.54 - 0.46 * cos(2π n / (N-1))`.
 pub fn hamming(n: usize) -> Vec<f32> {
     if n == 0 {
