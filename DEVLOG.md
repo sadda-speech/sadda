@@ -60,6 +60,12 @@ A criterion is a **declarative pipeline**: **select** RoIs (cross-tier query) �
 
 **Threads into logged roadmap items:** the automated-labeling intake (#5, 2026-05-27) is the *model-based* cousin of rule-based criteria; the AI-agent surface could *author* criteria; recipes replay a criteria run; report/figure-IR consumes the results; the protocol registry is the 4th registry.
 
+### Why this matters: complete publication + repeatability
+The deepest payoff. Because the rubric + the computational measurement scheme are **structured, versioned, executable data** — not prose buried in a paper's Methods section — a study's *full* annotation + measurement methodology becomes a publishable, machine-readable artifact:
+- **Complete publication** — ship the versioned rubric/protocol alongside the paper; the criteria *are* the methods, unambiguously.
+- **Repeatability** — an independent lab can **re-run the exact criteria/measurements** (on the original data, or their own) and reproduce the study, rather than reverse-engineering an under-specified description.
+- **Sharing + adaptation + direct comparison** — rubric schemes are shared via the protocol registry, **adapted to new data for apples-to-apples comparison** across labs/studies/corpora, and built on. This is the "principled, reproducible measurement layer for speech science" thesis made concrete — a direct answer to the field's under-specification / replication problems. Composes with provenance (A1), recipes (replay), and the reproducibility-&-accountability intake (#6, 2026-05-27).
+
 ### Sliced roadmap
 1. **Slice 1 (first):** rubric/protocol object (schema built to hold criteria) + per-tier controlled vocabularies + manual labeling UX (label dropdown / hotkeys / out-of-vocab flag) + the first-class annotation **status** columns (same migration). [steps 1,2,4 + foundation for 5/7]
 2. **Slice 2 (next milestone):** criteria engine v1 — declarative **cross-tier RoI selection + within-interval anchors/spans** → emit to a preview/`auto` tier → diff-vs-manual + accept/reject/promote + re-run loop. (No signal functions yet; already enables "mid-point of every vowel in a function word" and proves the loop.) [steps 3,4]
