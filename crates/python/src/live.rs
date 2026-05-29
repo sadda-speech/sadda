@@ -124,7 +124,7 @@ struct ActiveRecording {
 /// Live recording session. Construct via [`start_session`]; register
 /// callbacks via `on_meter` / `on_pitch` / `on_intensity` / `on_formants`;
 /// then `start()` → `stop()` → `commit()` or `discard()`.
-#[pyclass(name = "LiveSession", unsendable)]
+#[pyclass(module = "sadda._native.live", name = "LiveSession", unsendable)]
 pub(crate) struct PyLiveSession {
     active: Option<ActiveRecording>,
     stopped: Option<StoppedSession>,

@@ -26,7 +26,7 @@ fn filter_pairs(filter: Option<HashMap<String, String>>) -> Vec<(String, String)
 
 /// One resolved reference distribution (its parsed manifest + on-disk
 /// location).
-#[pyclass(name = "RefDist")]
+#[pyclass(module = "sadda._native.refdist", name = "RefDist")]
 pub(crate) struct PyRefDist {
     inner: RefDist,
 }
@@ -241,7 +241,7 @@ impl PyRefDist {
 
 /// Distribution summary of a 1-D measure (D10): mean, SD, and
 /// percentiles. Returned by [`PyRefDist::summary`].
-#[pyclass(name = "Summary")]
+#[pyclass(module = "sadda._native.refdist", name = "Summary")]
 pub(crate) struct PySummary {
     inner: Summary,
 }
@@ -309,7 +309,7 @@ impl PySummary {
 
 /// Equal-width histogram of a 1-D measure (D10). Returned by
 /// [`PyRefDist::histogram`]; `len(edges) == len(counts) + 1`.
-#[pyclass(name = "Histogram")]
+#[pyclass(module = "sadda._native.refdist", name = "Histogram")]
 pub(crate) struct PyHistogram {
     inner: Histogram,
 }

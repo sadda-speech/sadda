@@ -70,6 +70,20 @@ def test_binding_resolution_by_kind(real_map, qualname, source, path_suffix):
     assert entry.line >= 1
 
 
+def test_canonical_native_keys_emitted(real_map):
+    """The map also carries `sadda._native...` alias keys so the griffe
+    extension matches objects under mkdocstrings' runtime inspection."""
+    result, _ = real_map
+    # Re-exported function: documented sadda.dsp.f0 lives at _native.f0.
+    assert result["sadda._native.f0"] is result["sadda.dsp.f0"]
+    # Class method: documented sadda.Project.add_bundle.
+    assert "sadda._native.Project.add_bundle" in result
+    # Submodule class: documented sadda.refdist.RefDist.
+    assert "sadda._native.refdist.RefDist" in result
+    # Pure-Python wrappers keep their documented path (no _native object).
+    assert "sadda._native.recipe.record" not in result
+
+
 def test_impl_marker_produces_an_impl_link(real_map):
     result, _ = real_map
     impl = result["sadda.dsp.f0"].get("impl")

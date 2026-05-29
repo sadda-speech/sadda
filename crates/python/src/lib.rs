@@ -67,7 +67,7 @@ pub(crate) fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
 /// for stereo the layout is `[L0, R0, L1, R1, ...]`. Construct via
 /// `sadda.load_wav(path)`.
 #[gen_stub_pyclass]
-#[pyclass(name = "Audio")]
+#[pyclass(module = "sadda._native", name = "Audio")]
 pub(crate) struct PyAudio {
     pub(crate) inner: sadda_engine::Audio,
 }
@@ -127,7 +127,7 @@ impl PyAudio {
 /// Speaker FKs and a freeform JSON `extra` payload. Read-only view; mutate
 /// via `Project.add_bundle(...)`.
 #[gen_stub_pyclass]
-#[pyclass(name = "Bundle", frozen)]
+#[pyclass(module = "sadda._native", name = "Bundle", frozen)]
 struct PyBundle {
     inner: sadda_engine::Bundle,
 }
@@ -196,7 +196,7 @@ impl PyBundle {
 /// A person who produced speech in the project (participant, patient, case
 /// subject, …). Read-only view; create via `Project.add_speaker(...)`.
 #[gen_stub_pyclass]
-#[pyclass(name = "Speaker", frozen)]
+#[pyclass(module = "sadda._native", name = "Speaker", frozen)]
 struct PySpeaker {
     inner: sadda_engine::Speaker,
 }
@@ -248,7 +248,7 @@ impl PySpeaker {
 /// A recording session — a time-bounded block during which one or more
 /// bundles were captured. Read-only view; create via `Project.add_session(...)`.
 #[gen_stub_pyclass]
-#[pyclass(name = "Session", frozen)]
+#[pyclass(module = "sadda._native", name = "Session", frozen)]
 struct PySession {
     inner: sadda_engine::Session,
 }
@@ -318,7 +318,7 @@ impl PySession {
 /// (the three dense types, landing in B3). Read-only view; create via
 /// `Project.add_tier(...)`.
 #[gen_stub_pyclass]
-#[pyclass(name = "Tier", frozen)]
+#[pyclass(module = "sadda._native", name = "Tier", frozen)]
 struct PyTier {
     inner: sadda_engine::Tier,
 }
@@ -388,7 +388,7 @@ impl PyTier {
 /// One interval annotation. Read-only view; create via
 /// `Project.add_interval(...)`.
 #[gen_stub_pyclass]
-#[pyclass(name = "Interval", frozen)]
+#[pyclass(module = "sadda._native", name = "Interval", frozen)]
 struct PyInterval {
     inner: sadda_engine::Interval,
 }
@@ -452,7 +452,7 @@ impl PyInterval {
 /// One point annotation. Read-only view; create via
 /// `Project.add_point(...)`.
 #[gen_stub_pyclass]
-#[pyclass(name = "Point", frozen)]
+#[pyclass(module = "sadda._native", name = "Point", frozen)]
 struct PyPoint {
     inner: sadda_engine::Point,
 }
@@ -502,7 +502,7 @@ impl PyPoint {
 /// One reference annotation. Read-only view; create via
 /// `Project.add_reference(...)`.
 #[gen_stub_pyclass]
-#[pyclass(name = "Reference", frozen)]
+#[pyclass(module = "sadda._native", name = "Reference", frozen)]
 struct PyReference {
     inner: sadda_engine::Reference,
 }
@@ -558,7 +558,7 @@ impl PyReference {
 /// Created automatically by the `Project.write_continuous_numeric` /
 /// `write_continuous_vector` / `write_categorical_sampled` methods.
 #[gen_stub_pyclass]
-#[pyclass(name = "DerivedSignal", frozen)]
+#[pyclass(module = "sadda._native", name = "DerivedSignal", frozen)]
 struct PyDerivedSignal {
     inner: sadda_engine::DerivedSignal,
 }
@@ -628,7 +628,7 @@ impl PyDerivedSignal {
 /// One row of a bundle's provenance timeline — an analysis that ran on
 /// the bundle. Returned by `Project.processing_runs(bundle_id)`.
 #[gen_stub_pyclass]
-#[pyclass(name = "ProcessingRun", frozen)]
+#[pyclass(module = "sadda._native", name = "ProcessingRun", frozen)]
 struct PyProcessingRun {
     inner: sadda_engine::ProcessingRunRow,
 }
@@ -698,7 +698,7 @@ impl PyProcessingRun {
 /// A literature reference for an analysis a bundle used. Returned by
 /// `Project.citations(bundle_id)`, suitable for a paper's reference list.
 #[gen_stub_pyclass]
-#[pyclass(name = "Citation", frozen)]
+#[pyclass(module = "sadda._native", name = "Citation", frozen)]
 struct PyCitation {
     inner: sadda_engine::Citation,
 }
@@ -736,7 +736,7 @@ impl PyCitation {
 // `from_py_object` opts into the FromPyObject derive (pyo3 0.28 makes it
 // explicit for Clone pyclasses) so `Calibration` can be passed by value
 // to `add_instrument`.
-#[pyclass(name = "Calibration", frozen, from_py_object)]
+#[pyclass(module = "sadda._native", name = "Calibration", frozen, from_py_object)]
 #[derive(Clone)]
 struct PyCalibration {
     inner: sadda_engine::Calibration,
@@ -788,7 +788,7 @@ impl PyCalibration {
 /// A capture instrument (microphone, interface) and its optional
 /// calibration. Returned by `Project.instruments()` / `get_instrument()`.
 #[gen_stub_pyclass]
-#[pyclass(name = "Instrument", frozen)]
+#[pyclass(module = "sadda._native", name = "Instrument", frozen)]
 struct PyInstrument {
     inner: sadda_engine::Instrument,
 }
@@ -865,7 +865,7 @@ fn parse_run_kind(s: &str) -> PyResult<sadda_engine::ProcessingRunKind> {
 /// and a SQLite-backed corpus database. Construct via `sadda.new_project(...)`
 /// or `sadda.open_project(...)`.
 #[gen_stub_pyclass]
-#[pyclass(name = "Project", unsendable)]
+#[pyclass(module = "sadda._native", name = "Project", unsendable)]
 pub(crate) struct PyProject {
     // `unsendable`: rusqlite::Connection is Send but not Sync; the GIL
     // serializes Python-side access, but PyO3 requires Send+Sync by default.
@@ -1746,7 +1746,7 @@ fn intensity<'py>(
 /// enough valid roots in the formant range are honestly empty rather than
 /// NaN-padded.
 #[gen_stub_pyclass]
-#[pyclass(name = "FormantFrame", frozen)]
+#[pyclass(module = "sadda._native", name = "FormantFrame", frozen)]
 struct PyFormantFrame {
     inner: sadda_engine::dsp::FormantFrame,
 }
@@ -1973,7 +1973,7 @@ fn mfcc<'py>(
 /// dB. Returned by `sadda.dsp.ltas`. Level *differences* (slope, tilt,
 /// alpha ratio) are the meaningful quantities.
 #[gen_stub_pyclass]
-#[pyclass(name = "Ltas", frozen)]
+#[pyclass(module = "sadda._native", name = "Ltas", frozen)]
 struct PyLtas {
     inner: sadda_engine::dsp::Ltas,
 }
@@ -2037,7 +2037,7 @@ fn ltas(audio: &PyAudio, bin_hz: f32) -> PyLtas {
 /// jitter / relative shimmers are fractions (0.01 = 1%);
 /// `shimmer_local_db` is in dB.
 #[gen_stub_pyclass]
-#[pyclass(name = "PerturbationReport", frozen)]
+#[pyclass(module = "sadda._native", name = "PerturbationReport", frozen)]
 struct PyPerturbationReport {
     inner: sadda_engine::PerturbationReport,
 }
@@ -2348,19 +2348,31 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // submodule (`sadda._native.live`) and the Python-side
     // `sadda/live/__init__.py` re-exports the symbols under the
     // user-facing `sadda.live.*` path.
-    let live_mod = PyModule::new(m.py(), "live")?;
+    // Submodules are created with their FULL dotted name so the
+    // functions added to them report `__module__ == "sadda._native.live"`
+    // (etc.) rather than a bare `"live"`. Bare names leave the symbols
+    // unresolvable to documentation tooling that inspects the runtime
+    // (griffe → mkdocstrings), and are wrong for pickling / `repr`. We
+    // then attach each under its SHORT attribute name via `m.add(...)`
+    // (so `sadda._native.live` works) and register it in `sys.modules`
+    // so `import sadda._native.live` resolves too — the documented PyO3
+    // submodule idiom.
+    let sys_modules = m.py().import("sys")?.getattr("modules")?;
+
+    let live_mod = PyModule::new(m.py(), "sadda._native.live")?;
     live_mod.add_function(wrap_pyfunction!(live::start_session, &live_mod)?)?;
     live_mod.add_function(wrap_pyfunction!(live::list_input_devices, &live_mod)?)?;
     live_mod.add_function(wrap_pyfunction!(live::default_input_device, &live_mod)?)?;
     live_mod.add_class::<live::PyLiveSession>()?;
-    m.add_submodule(&live_mod)?;
+    m.add("live", &live_mod)?;
+    sys_modules.set_item("sadda._native.live", &live_mod)?;
 
     // Recipes: sadda.recipe.* surface (F1). Mirrors the live module
     // pattern — registered as `sadda._native.recipe`; the Python
     // `sadda/recipe/__init__.py` wraps `start` / `end` /
     // `generate_script` inside a context-manager class and decorates
     // the public surface as `@provisional`.
-    let recipe_mod = PyModule::new(m.py(), "recipe")?;
+    let recipe_mod = PyModule::new(m.py(), "sadda._native.recipe")?;
     recipe_mod.add_function(wrap_pyfunction!(recipe::start, &recipe_mod)?)?;
     recipe_mod.add_function(wrap_pyfunction!(recipe::end, &recipe_mod)?)?;
     recipe_mod.add_function(wrap_pyfunction!(recipe::list_recipes, &recipe_mod)?)?;
@@ -2368,13 +2380,14 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     recipe_mod.add_function(wrap_pyfunction!(recipe::generate_script, &recipe_mod)?)?;
     recipe_mod.add_function(wrap_pyfunction!(recipe::script_path, &recipe_mod)?)?;
     recipe_mod.add_class::<recipe::PyRecipe>()?;
-    m.add_submodule(&recipe_mod)?;
+    m.add("recipe", &recipe_mod)?;
+    sys_modules.set_item("sadda._native.recipe", &recipe_mod)?;
 
     // Reference distributions: sadda.refdist.* surface (C7, consumption
     // side). Registered as `sadda._native.refdist`; the Python
     // `sadda/refdist/__init__.py` re-exports the symbols and adds a Polars
     // `.data()` helper on RefDist.
-    let refdist_mod = PyModule::new(m.py(), "refdist")?;
+    let refdist_mod = PyModule::new(m.py(), "sadda._native.refdist")?;
     refdist_mod.add_function(wrap_pyfunction!(refdist::query, &refdist_mod)?)?;
     refdist_mod.add_function(wrap_pyfunction!(refdist::get, &refdist_mod)?)?;
     refdist_mod.add_function(wrap_pyfunction!(refdist::list_all, &refdist_mod)?)?;
@@ -2384,18 +2397,20 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     refdist_mod.add_class::<refdist::PyRefDist>()?;
     refdist_mod.add_class::<refdist::PySummary>()?;
     refdist_mod.add_class::<refdist::PyHistogram>()?;
-    m.add_submodule(&refdist_mod)?;
+    m.add("refdist", &refdist_mod)?;
+    sys_modules.set_item("sadda._native.refdist", &refdist_mod)?;
 
     // E11 ML inference: sadda.ml.* (registered as `sadda._native.ml`;
     // the Python `sadda/ml/__init__.py` re-exports with stability tiers).
-    let ml_mod = PyModule::new(m.py(), "ml")?;
+    let ml_mod = PyModule::new(m.py(), "sadda._native.ml")?;
     ml_mod.add_function(wrap_pyfunction!(ml::vad, &ml_mod)?)?;
     ml_mod.add_function(wrap_pyfunction!(ml::speech_segments, &ml_mod)?)?;
     ml_mod.add_function(wrap_pyfunction!(ml::load_model, &ml_mod)?)?;
     ml_mod.add_function(wrap_pyfunction!(ml::install_model, &ml_mod)?)?;
     ml_mod.add_function(wrap_pyfunction!(ml::get_model, &ml_mod)?)?;
     ml_mod.add_class::<ml::PyModel>()?;
-    m.add_submodule(&ml_mod)?;
+    m.add("ml", &ml_mod)?;
+    sys_modules.set_item("sadda._native.ml", &ml_mod)?;
     Ok(())
 }
 

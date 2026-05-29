@@ -392,6 +392,43 @@ def _entry(
     return Entry(role, loc[0], loc[1], source)
 
 
+def _canonical_native_key(
+    qualname: str,
+    rust: RustIndex,
+    wrappers: dict[str, WrapperModule],
+) -> Optional[str]:
+    """The `sadda._native...` path the runtime object actually lives at.
+
+    Under mkdocstrings' runtime inspection, the griffe object handed to the
+    extension is the *real* PyO3 object (path `sadda._native.f0`), while the
+    documented name (`sadda.dsp.f0`) is an alias to it. Emitting the entry
+    under this canonical key too lets the extension match either. Returns
+    None for symbols whose real object already sits at the documented path
+    (pure-Python wrapper defs, module directives)."""
+    _, rest = _split_qual(qualname)
+    if len(rest) == 1 and rest[0] in KNOWN_MODULES:
+        return None
+    if rest and rest[0] in KNOWN_MODULES:
+        module, tail = rest[0], rest[1:]
+    else:
+        module, tail = "", rest
+    if len(tail) == 2 and tail[0] in rust.classes:
+        sub = f".{module}" if module else ""
+        return f"sadda._native{sub}.{tail[0]}.{tail[1]}"
+    if len(tail) == 1:
+        wrapper = wrappers.get(module)
+        if wrapper is None:
+            return None
+        leaf = tail[0]
+        if leaf in wrapper.pydefs:
+            return None  # real object already at the documented path
+        if leaf in wrapper.aliases:
+            ref = wrapper.aliases[leaf]
+            sub = f".{ref.sub}" if ref.sub else ""
+            return f"sadda._native{sub}.{ref.leaf}"
+    return None
+
+
 def build_map(
     repo_root: Path,
 ) -> tuple[dict[str, dict[str, Entry]], list[str]]:
@@ -421,6 +458,11 @@ def build_map(
             unresolved.append(qualname)
         if roles:
             result[qualname] = roles
+            # Also register under the canonical _native path so the griffe
+            # extension matches when mkdocstrings inspects the runtime.
+            canon = _canonical_native_key(qualname, rust, wrappers)
+            if canon and canon not in result:
+                result[canon] = roles
     return result, sorted(set(unresolved))
 
 
@@ -464,10 +506,13 @@ def main(argv: list[str]) -> int:
     else:
         print(payload)
 
-    n_impl = sum(1 for r in result.values() if "impl" in r)
+    # Count documented symbols only — `result` also carries canonical
+    # `sadda._native...` alias keys for the griffe extension's benefit.
+    documented = {q: r for q, r in result.items() if not q.startswith("sadda._native")}
+    n_impl = sum(1 for r in documented.values() if "impl" in r)
     print(
-        f"resolved {len(result)} symbols "
-        f"({len(result) - n_impl} binding-only, {n_impl} with impl links); "
+        f"resolved {len(documented)} documented symbols "
+        f"({len(documented) - n_impl} binding-only, {n_impl} with impl links); "
         f"{len(unresolved)} unresolved",
         file=sys.stderr,
     )

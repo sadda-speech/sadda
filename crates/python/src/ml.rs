@@ -55,7 +55,7 @@ pub(crate) fn speech_segments(
 }
 
 /// A model resolved from the registry by [`load_model`].
-#[pyclass(name = "Model")]
+#[pyclass(module = "sadda._native.ml", name = "Model")]
 pub(crate) struct PyModel {
     inner: sadda_engine::Model,
 }

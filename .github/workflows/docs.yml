@@ -58,7 +58,17 @@ jobs:
         run: uv sync
 
       - name: Install docs dependencies
-        run: uv pip install mkdocs-material 'mkdocstrings[python]'
+        # Pinned exactly. Rendering the PyO3-backed classes relies on
+        # griffe's runtime-inspection behaviour (force_inspection +
+        # #[pyclass(module=...)]); an unpinned upgrade previously
+        # regressed class members to nothing. Bump deliberately, not
+        # implicitly. See the 2026-05-29 class-member rendering DEVLOG.
+        run: >-
+          uv pip install
+          mkdocs-material==9.7.6
+          mkdocstrings==1.0.4
+          mkdocstrings-python==2.0.3
+          griffelib==2.0.2
 
       - name: Check API source-link coverage
         # Gate: every symbol documented in docs/api/*.md must resolve to
