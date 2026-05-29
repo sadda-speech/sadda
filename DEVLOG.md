@@ -6,6 +6,14 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-29 — Source links on auto-rendered class getters (closes the noted nicety)
+
+Closes the loose end from the class-member rendering fix: data classes documented with a bare `::: sadda.Audio` (no explicit `members:` list) render *all* their public getters/methods, but those weren't in the scanner's universe, so they rendered without source links.
+
+`source_links.build_map` now runs `_expand_class_members` over the discovered universe: for each documented class directive **without** an explicit `members:` list, it enumerates the class's public `#[pymethods]` (skipping dunders, privates, and the `new` constructor folded into the class heading) and adds them as universe symbols. Classes that *do* carry an explicit `members:` list (Project, LiveSession) are left untouched — mkdocstrings renders only the listed members for those. By construction the added members come straight from the Rust method index, so they always resolve — the CI gate stays green; the expansion is purely additive coverage for the griffe extension. Docs-tooling only (no Rust/wrapper/config change).
+
+**Result:** source links rose 123 → **260** — every getter on `Audio`, `Bundle`, the clinical/refdist data classes, etc. now links to its `#[pymethods]` definition (e.g. `Audio.sample_rate → lib.rs:80`, `Tier.type` via the `r#type` raw ident → `lib.rs:347`). Gate: 270 documented symbols, 0 unresolved; `tools/docs/` tests 24 → 27 (real-repo getter coverage + `_expand_class_members` unit + the explicit-members-untouched case); `mkdocs build --strict` clean.
+
 ## 2026-05-29 — Fix: Rust-backed classes now render their members in the API docs
 
 Fixes the bug surfaced by the source-links slice 2 (entry below): no `#[pyclass]` rendered its methods/getters — every class showed as a bare attribute heading, dropping ~60 documented symbols from the reference. Root cause was two PyO3/mkdocstrings interactions: (a) `Project = stable(_native.Project)` is an *assignment*, so static analysis sees an attribute, not a class; and (b) PyO3 classes reported `__module__ = "builtins"`, so forcing runtime inspection failed with `AliasResolutionError ... pointing at builtins.Project`.

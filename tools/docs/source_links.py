@@ -429,16 +429,55 @@ def _canonical_native_key(
     return None
 
 
+# Members never rendered as their own entry: dunders, privates, and the
+# `new` constructor (folded into the class heading by merge_init_into_class).
+def _is_rendered_member(name: str) -> bool:
+    return not name.startswith("_") and name != "new"
+
+
+def _expand_class_members(
+    doc_symbols: list[tuple[str, Optional[str]]], rust: RustIndex
+) -> list[tuple[str, Optional[str]]]:
+    """Add the auto-rendered members of documented classes to the universe.
+
+    A `::: sadda.Foo` directive with no explicit `members:` list makes
+    mkdocstrings render *every* public member of the class, but those
+    aren't named in the docs, so they'd get no source link. For each such
+    class, enumerate its public `#[pymethods]` (getters + methods) and add
+    them. A class that *does* carry an explicit `members:` list renders
+    only those (already in the universe), so it's left untouched."""
+    explicit_parents = {parent for _, parent in doc_symbols if parent}
+    seen = {q for q, _ in doc_symbols}
+    extra: list[tuple[str, Optional[str]]] = []
+    for qualname, parent in doc_symbols:
+        if parent is not None:  # only class directives, not members
+            continue
+        leaf = qualname.split(".")[-1]
+        if leaf not in rust.classes or qualname in explicit_parents:
+            continue
+        struct = _struct_for(rust, leaf)
+        if struct is None:
+            continue
+        for (s, method) in rust.methods:
+            if s != struct or not _is_rendered_member(method):
+                continue
+            child = f"{qualname}.{method}"
+            if child not in seen:
+                extra.append((child, qualname))
+                seen.add(child)
+    return doc_symbols + extra
+
+
 def build_map(
     repo_root: Path,
 ) -> tuple[dict[str, dict[str, Entry]], list[str]]:
     """Build the qualname -> {role: Entry} map. Returns the map plus the
     list of documented symbols with no resolvable **binding** (the CI
     gate fails when this list is non-empty)."""
-    doc_symbols = discover_doc_symbols(repo_root)
     rust = parse_rust_bindings(repo_root)
     wrappers = parse_python_wrappers(repo_root)
     markers = collect_markers(repo_root)
+    doc_symbols = _expand_class_members(discover_doc_symbols(repo_root), rust)
 
     result: dict[str, dict[str, Entry]] = {}
     unresolved: list[str] = []
