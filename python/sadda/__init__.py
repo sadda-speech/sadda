@@ -32,15 +32,20 @@ __all__ = [
     "ExperimentalAPIWarning",
     "Instrument",
     "Interval",
+    "LabelCheck",
     "Point",
     "ProcessingRun",
     "Project",
     "ProvisionalAPIWarning",
     "Reference",
+    "Rubric",
+    "RubricTier",
     "SaddaWarning",
     "Session",
     "Speaker",
+    "StatusDef",
     "Tier",
+    "VocabEntry",
     "clinical",
     "dsp",
     "experimental",
@@ -80,6 +85,15 @@ Reference = stable(_native.Reference)
 
 # B3 surface — dense-tier Parquet sidecar registration.
 DerivedSignal = stable(_native.DerivedSignal)
+
+# S1 surface (Phase 4) — annotation rubric: guidelines, the status
+# vocabulary, and per-tier controlled vocabularies. New and evolving with the
+# annotation suite, so provisional.
+Rubric = provisional(_native.Rubric)
+StatusDef = provisional(_native.StatusDef)
+RubricTier = provisional(_native.RubricTier)
+VocabEntry = provisional(_native.VocabEntry)
+LabelCheck = provisional(_native.LabelCheck)
 
 # A1 surface (Phase 3) — provenance timeline + citation export.
 ProcessingRun = stable(_native.ProcessingRun)

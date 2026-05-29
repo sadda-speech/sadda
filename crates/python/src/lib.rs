@@ -431,6 +431,16 @@ impl PyInterval {
     fn parent_annotation_id(&self) -> Option<i64> {
         self.inner.parent_annotation_id
     }
+    /// Annotation status (a rubric-defined status string), or `None`.
+    #[getter]
+    fn status(&self) -> Option<String> {
+        self.inner.status.clone()
+    }
+    /// Free-text note, or `None`.
+    #[getter]
+    fn note(&self) -> Option<String> {
+        self.inner.note.clone()
+    }
     /// JSON `extra` payload.
     #[getter]
     fn extra(&self) -> Option<String> {
@@ -484,6 +494,16 @@ impl PyPoint {
     #[getter]
     fn parent_annotation_id(&self) -> Option<i64> {
         self.inner.parent_annotation_id
+    }
+    /// Annotation status (a rubric-defined status string), or `None`.
+    #[getter]
+    fn status(&self) -> Option<String> {
+        self.inner.status.clone()
+    }
+    /// Free-text note, or `None`.
+    #[getter]
+    fn note(&self) -> Option<String> {
+        self.inner.note.clone()
     }
     /// JSON `extra` payload.
     #[getter]
@@ -550,6 +570,189 @@ impl PyReference {
         format!(
             "Reference(id={}, tier_id={}, target_kind={:?}, target_id={})",
             self.inner.id, self.inner.tier_id, self.inner.target_kind, self.inner.target_id,
+        )
+    }
+}
+
+/// The project's annotation rubric (one per project): guidelines + the
+/// allowed status vocabulary + per-tier controlled vocabularies. Read-only
+/// view; create/update via `Project.set_rubric(...)`.
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "Rubric", frozen)]
+struct PyRubric {
+    inner: sadda_engine::Rubric,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyRubric {
+    /// Always 1 (the rubric is a per-project singleton).
+    #[getter]
+    fn id(&self) -> i64 {
+        self.inner.id
+    }
+    /// Human-readable rubric name.
+    #[getter]
+    fn name(&self) -> String {
+        self.inner.name.clone()
+    }
+    /// Monotonic version integer.
+    #[getter]
+    fn version(&self) -> i64 {
+        self.inner.version
+    }
+    /// Free-text annotation guidelines, or `None`.
+    #[getter]
+    fn guidelines(&self) -> Option<String> {
+        self.inner.guidelines.clone()
+    }
+    /// ISO 8601 UTC creation timestamp.
+    #[getter]
+    fn created_at(&self) -> String {
+        self.inner.created_at.clone()
+    }
+    /// ISO 8601 UTC timestamp of the last update.
+    #[getter]
+    fn updated_at(&self) -> String {
+        self.inner.updated_at.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Rubric(name={:?}, version={})",
+            self.inner.name, self.inner.version
+        )
+    }
+}
+
+/// One allowed annotation-status value defined by the rubric. Read-only view.
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "StatusDef", frozen)]
+struct PyStatusDef {
+    inner: sadda_engine::StatusDef,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyStatusDef {
+    /// The status string stored on annotations.
+    #[getter]
+    fn value(&self) -> String {
+        self.inner.value.clone()
+    }
+    /// Optional description of what the status means.
+    #[getter]
+    fn description(&self) -> Option<String> {
+        self.inner.description.clone()
+    }
+    /// Display ordering (ascending).
+    #[getter]
+    fn sort_order(&self) -> i64 {
+        self.inner.sort_order
+    }
+
+    fn __repr__(&self) -> String {
+        format!("StatusDef(value={:?})", self.inner.value)
+    }
+}
+
+/// The rubric's configuration for a tier name: guidelines + open/closed
+/// controlled vocabulary. Read-only view; set via `Project.set_rubric_tier`.
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "RubricTier", frozen)]
+struct PyRubricTier {
+    inner: sadda_engine::RubricTier,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyRubricTier {
+    /// Tier name this configuration applies to.
+    #[getter]
+    fn tier_name(&self) -> String {
+        self.inner.tier_name.clone()
+    }
+    /// Optional per-tier annotation guidance.
+    #[getter]
+    fn description(&self) -> Option<String> {
+        self.inner.description.clone()
+    }
+    /// Whether the controlled vocabulary is closed (rejects out-of-vocab).
+    #[getter]
+    fn closed_vocabulary(&self) -> bool {
+        self.inner.closed_vocabulary
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "RubricTier(tier_name={:?}, closed_vocabulary={})",
+            self.inner.tier_name, self.inner.closed_vocabulary
+        )
+    }
+}
+
+/// One controlled-vocabulary entry (an allowed label) for a tier. Read-only.
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "VocabEntry", frozen)]
+struct PyVocabEntry {
+    inner: sadda_engine::VocabEntry,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyVocabEntry {
+    /// The allowed label value.
+    #[getter]
+    fn value(&self) -> String {
+        self.inner.value.clone()
+    }
+    /// Optional gloss / description of the label.
+    #[getter]
+    fn description(&self) -> Option<String> {
+        self.inner.description.clone()
+    }
+    /// Display ordering (ascending).
+    #[getter]
+    fn sort_order(&self) -> i64 {
+        self.inner.sort_order
+    }
+
+    fn __repr__(&self) -> String {
+        format!("VocabEntry(value={:?})", self.inner.value)
+    }
+}
+
+/// Result of checking a label against a tier's controlled vocabulary.
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "LabelCheck", frozen)]
+struct PyLabelCheck {
+    inner: sadda_engine::LabelCheck,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyLabelCheck {
+    /// Whether the tier has any controlled vocabulary defined.
+    #[getter]
+    fn has_vocabulary(&self) -> bool {
+        self.inner.has_vocabulary
+    }
+    /// Whether the tier's vocabulary is closed.
+    #[getter]
+    fn closed(&self) -> bool {
+        self.inner.closed
+    }
+    /// Whether the label is in the vocabulary (true for empty/no label, and
+    /// when no vocabulary is defined).
+    #[getter]
+    fn in_vocabulary(&self) -> bool {
+        self.inner.in_vocabulary
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "LabelCheck(has_vocabulary={}, closed={}, in_vocabulary={})",
+            self.inner.has_vocabulary, self.inner.closed, self.inner.in_vocabulary
         )
     }
 }
@@ -1249,9 +1452,10 @@ impl PyProject {
 
     /// Inserts an interval annotation. Enforces parent-child cardinality at
     /// insert time; raises `ValueError` on cardinality violation.
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         tier_id, start_seconds, end_seconds, *,
-        label=None, parent_annotation_id=None, extra=None,
+        label=None, parent_annotation_id=None, status=None, note=None, extra=None,
     ))]
     fn add_interval(
         &self,
@@ -1260,6 +1464,8 @@ impl PyProject {
         end_seconds: f64,
         label: Option<String>,
         parent_annotation_id: Option<i64>,
+        status: Option<String>,
+        note: Option<String>,
         extra: Option<String>,
     ) -> PyResult<i64> {
         let spec = sadda_engine::IntervalSpec {
@@ -1268,6 +1474,8 @@ impl PyProject {
             end_seconds,
             label,
             parent_annotation_id,
+            status,
+            note,
             extra,
         };
         self.inner.add_interval(&spec).map_err(engine_err_to_py)
@@ -1282,9 +1490,10 @@ impl PyProject {
     }
 
     /// Inserts a point annotation. Enforces parent-child cardinality.
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         tier_id, time_seconds, *,
-        label=None, parent_annotation_id=None, extra=None,
+        label=None, parent_annotation_id=None, status=None, note=None, extra=None,
     ))]
     fn add_point(
         &self,
@@ -1292,6 +1501,8 @@ impl PyProject {
         time_seconds: f64,
         label: Option<String>,
         parent_annotation_id: Option<i64>,
+        status: Option<String>,
+        note: Option<String>,
         extra: Option<String>,
     ) -> PyResult<i64> {
         let spec = sadda_engine::PointSpec {
@@ -1299,6 +1510,8 @@ impl PyProject {
             time_seconds,
             label,
             parent_annotation_id,
+            status,
+            note,
             extra,
         };
         self.inner.add_point(&spec).map_err(engine_err_to_py)
@@ -1345,6 +1558,135 @@ impl PyProject {
         self.inner
             .references_for(tier_id)
             .map(|rs| rs.into_iter().map(|inner| PyReference { inner }).collect())
+            .map_err(engine_err_to_py)
+    }
+
+    // -- Annotation rubric (slice S1) ------------------------------------
+
+    /// Creates or updates the project's singleton annotation rubric.
+    #[pyo3(signature = (name, version=1, guidelines=None))]
+    fn set_rubric(&self, name: &str, version: i64, guidelines: Option<&str>) -> PyResult<PyRubric> {
+        self.inner
+            .set_rubric(name, version, guidelines)
+            .map(|inner| PyRubric { inner })
+            .map_err(engine_err_to_py)
+    }
+
+    /// Reads the project's rubric, or `None` if none has been defined.
+    fn rubric(&self) -> PyResult<Option<PyRubric>> {
+        self.inner
+            .rubric()
+            .map(|opt| opt.map(|inner| PyRubric { inner }))
+            .map_err(engine_err_to_py)
+    }
+
+    /// Replaces the rubric's status vocabulary. `statuses` is a list of
+    /// `(value, description, sort_order)` tuples. Requires a rubric.
+    fn set_rubric_statuses(&self, statuses: Vec<(String, Option<String>, i64)>) -> PyResult<()> {
+        let defs: Vec<sadda_engine::StatusDef> = statuses
+            .into_iter()
+            .map(|(value, description, sort_order)| sadda_engine::StatusDef {
+                value,
+                description,
+                sort_order,
+            })
+            .collect();
+        self.inner
+            .set_rubric_statuses(&defs)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Reads the rubric's status vocabulary in (sort_order, value) order.
+    fn rubric_statuses(&self) -> PyResult<Vec<PyStatusDef>> {
+        self.inner
+            .rubric_statuses()
+            .map(|rs| rs.into_iter().map(|inner| PyStatusDef { inner }).collect())
+            .map_err(engine_err_to_py)
+    }
+
+    /// Creates or updates the rubric configuration for a tier name
+    /// (guidelines + open/closed vocabulary). Requires a rubric.
+    #[pyo3(signature = (tier_name, description=None, closed=false))]
+    fn set_rubric_tier(
+        &self,
+        tier_name: &str,
+        description: Option<&str>,
+        closed: bool,
+    ) -> PyResult<PyRubricTier> {
+        self.inner
+            .set_rubric_tier(tier_name, description, closed)
+            .map(|inner| PyRubricTier { inner })
+            .map_err(engine_err_to_py)
+    }
+
+    /// Reads the rubric configuration for a tier name, or `None`.
+    fn rubric_tier(&self, tier_name: &str) -> PyResult<Option<PyRubricTier>> {
+        self.inner
+            .rubric_tier(tier_name)
+            .map(|opt| opt.map(|inner| PyRubricTier { inner }))
+            .map_err(engine_err_to_py)
+    }
+
+    /// Replaces the controlled vocabulary for a tier name. `entries` is a
+    /// list of `(value, description, sort_order)` tuples. Auto-creates an
+    /// open rubric-tier row if needed. Requires a rubric.
+    fn set_controlled_vocabulary(
+        &self,
+        tier_name: &str,
+        entries: Vec<(String, Option<String>, i64)>,
+    ) -> PyResult<()> {
+        let defs: Vec<sadda_engine::VocabEntry> = entries
+            .into_iter()
+            .map(
+                |(value, description, sort_order)| sadda_engine::VocabEntry {
+                    value,
+                    description,
+                    sort_order,
+                },
+            )
+            .collect();
+        self.inner
+            .set_controlled_vocabulary(tier_name, &defs)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Reads the controlled vocabulary for a tier name.
+    fn controlled_vocabulary(&self, tier_name: &str) -> PyResult<Vec<PyVocabEntry>> {
+        self.inner
+            .controlled_vocabulary(tier_name)
+            .map(|rs| rs.into_iter().map(|inner| PyVocabEntry { inner }).collect())
+            .map_err(engine_err_to_py)
+    }
+
+    /// Checks a label against a tier's controlled vocabulary.
+    #[pyo3(signature = (tier_name, label=None))]
+    fn label_check(&self, tier_name: &str, label: Option<&str>) -> PyResult<PyLabelCheck> {
+        self.inner
+            .label_check(tier_name, label)
+            .map(|inner| PyLabelCheck { inner })
+            .map_err(engine_err_to_py)
+    }
+
+    /// Sets the status + note on an interval annotation, validating the
+    /// status against the rubric. Either may be `None` to clear it.
+    #[pyo3(signature = (id, status=None, note=None))]
+    fn set_interval_status(
+        &self,
+        id: i64,
+        status: Option<&str>,
+        note: Option<&str>,
+    ) -> PyResult<()> {
+        self.inner
+            .set_interval_status(id, status, note)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Sets the status + note on a point annotation, validating the status
+    /// against the rubric. Either may be `None` to clear it.
+    #[pyo3(signature = (id, status=None, note=None))]
+    fn set_point_status(&self, id: i64, status: Option<&str>, note: Option<&str>) -> PyResult<()> {
+        self.inner
+            .set_point_status(id, status, note)
             .map_err(engine_err_to_py)
     }
 
@@ -2387,6 +2729,11 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyInterval>()?;
     m.add_class::<PyPoint>()?;
     m.add_class::<PyReference>()?;
+    m.add_class::<PyRubric>()?;
+    m.add_class::<PyStatusDef>()?;
+    m.add_class::<PyRubricTier>()?;
+    m.add_class::<PyVocabEntry>()?;
+    m.add_class::<PyLabelCheck>()?;
     m.add_class::<PyDerivedSignal>()?;
     m.add_class::<PyFormantFrame>()?;
     m.add_class::<PyLtas>()?;
