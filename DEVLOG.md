@@ -6,6 +6,69 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-28 — Roadmap intake: model *training* facilities (path undecided)
+
+Ideation prompted by the framing question "sadda does ML inference — what would *training* facilities look like?" Logged-not-designed, ~Phase 4+/v1.x, needs its own design session. **The user is explicitly NOT ready to commit to a training path** — this entry captures the fork and the option menu so the decision can be made later with the landscape in hand; it does **not** pick a direction. Extends the speech-AI-engineer intake (2026-05-27) — training is the gap that intake's "measurement/eval/data layer" thesis circles but never enters.
+
+**Framing thesis (carries over): sadda is not — and should not become — a training framework.** The ecosystem for training large speech models (PyTorch/JAX, HF Trainer, ESPnet, NeMo, SpeechBrain) is mature and not in Rust; reimplementing it is duplicative and breaks the engine-first / local-first / no-telemetry ethos. The question is therefore *which training-adjacent facilities fit sadda's identity (the phonetically-literate measurement/eval/data layer) and play to its existing substrate* (corpus + speakers/sessions, provenance/citations A1, refdist as yardstick, typed embedding tiers B3/E12, DSP, recipe record/replay F1, the annotation GUI).
+
+### The fork — two philosophically opposite "training" products
+
+* **Path A — local-first training of *small* models, in the Rust engine.** Probes / classifiers / classical models trained in-process on frozen embeddings or DSP features: no Python, no PyTorch, no GPU, no network. A logistic-regression probe needs neither the ONNX Runtime sidecar nor any of the inference stack — it runs natively and serializes as a sadda model type. True to the ethos; methodologically central to the SSL-probing flagship (#4 of the 2026-05-27 intake). **Ceiling: small models only.**
+* **Path B — orchestrating *external* training of *large* models.** sadda as the data + provenance + evaluation layer wrapping someone else's PyTorch/HF training loop, with the result exported to ONNX and round-tripped into the model registry (E11/E12). Covers real fine-tuning, but pulls in the heavy stack and crosses the local-first / no-network line (downloads, GPU, env management).
+
+Not mutually exclusive, but opposite gravity. A is distinctive-but-bounded; B is powerful-but-off-ethos-unless-kept-thin.
+
+### Facility menu — organized by fit to sadda's strengths
+
+1. **Training-data preparation that's correct by construction.** Because sadda knows speakers/sessions/tiers: train/val/test splits with **guaranteed speaker-disjointness** (the most common silent bug in speech ML), manifest export (HF `datasets`, ESPnet/NeMo-style, WebDataset shards), annotation tiers (TextGrid/EAF) → frame-/segment-level targets, all provenance-stamped so the dataset card writes itself. Highest-value, lowest-controversy; useful under *either* path.
+2. **Pre-training dataset audit** (= flagship #1 of the speech-AI intake, applied before epoch 0): coverage/representation vs refdist, class balance, duration/SNR distributions, leakage/near-duplicate detection. The "acoustic conscience" doing its job *before* training, not just after.
+3. **Linear-probe / small-classifier training in pure Rust** (Path A's core). Train logistic-regression / shallow classifiers on frozen wav2vec2/HuBERT embeddings to ask "what does layer N encode about phone identity / voicing / prosody / speaker?" Native, ONNX-Runtime-free, local-first. This is what interpretability (#4) lives on.
+4. **Human-in-the-loop active-learning loop.** sadda is rare in having *both* corpus and annotation GUI: model pre-labels → expert corrects spans in-GUI (with confidence + provenance) → retrain. Half-built by the automated-labeling intake (#5).
+5. **Evaluation-as-training-callback.** Disaggregated, significance-tested eval (#3) exposed as a callback an external trainer calls each epoch — slice by speaker group / SNR / phone class, not a single global WER/EER. sadda judges; the external loop trains.
+6. **Reproducible fine-tuning recipes** (Path B kept thin). Extend `recipe` record/replay to wrap an external run: pin data + config + git SHA + refdist yardstick, capture as provenance, require ONNX export at the end → result lands in the registry. Honest framing: sadda *orchestrates and accounts for* the training; it does not run the loop.
+
+### Prior art
+
+* **Rust ML (Path A):** `linfa` (Rust's scikit-learn — classical ML / linear+logistic regression / SVM / GMM; the clean fit for probes, lightweight, pure Rust), `burn` (pure-Rust DL with real autodiff + training, multiple backends inc. wgpu/CUDA — for small MLPs), `candle` (HF's lighter Rust ML, mostly inference), `tch-rs` (full libtorch training, but a heavy C++ dep that would break local-first).
+* **External stack to orchestrate, not replace (Path B):** HF Trainer / Lightning, ESPnet, NeMo, SpeechBrain; MFA for alignment.
+
+### Recommendation (for the eventual session, not a decision now)
+
+Lean into **Path A** as sadda's distinctive contribution (items 1, 2, 3, 5) — true to identity, uniquely sadda, base tool stays small + network-free; treat **Path B** (item 6) as a deliberately thin orchestration shim, explicitly *not* a framework. The line to hold: **sadda prepares the data, trains the small probes locally, and judges everything — it delegates the big training loop.** Recorded as a recommendation only; **user has deferred the path decision.**
+
+### Cross-connections + open questions
+
+Composes with: refdist (data-audit yardstick + license/consent discipline), embeddings E12 (probe inputs), provenance A1 (training-run accounting), recipe F1 (reproducible runs), annotation GUI (HITL loop), model registry E11/E12 (round-trip trained models), and the speech-AI-engineer flagships (#1 auditing, #3 eval, #4 probing). Open for the design session: native sadda model type for Rust-trained probes (serialization + does it bypass ONNX entirely?); how far Path A scales before Path B is unavoidable; whether B's orchestration is even in scope given the no-network/local-first principle (#10); statistics engine shared with the eval intake.
+
+### Status
+
+Roadmap intake only; **training path undecided by user's choice.** Immediate work unchanged. Revisit with its own frame→prior-art→options design session when scheduled.
+
+---
+
+## 2026-05-28 — Plan item: source links from the API reference (design, not yet built)
+
+**Goal.** Every element in the rendered API reference (`docs/api/*.md` → mkdocs-material site) should link directly to where it's defined in the repo. Logged-not-built: this entry records the design + decisions; the slice itself is queued, not committed.
+
+**Why it's a real item and not a config flip.** mkdocstrings/griffe's built-in "view source" works by reading a Python object's source file + line via `inspect.getsourcefile`. sadda's public surface is almost entirely **re-exported from the Rust `_native` extension** — `python/sadda/dsp/__init__.py` is `hann = stable(_native.hann)`; the top `__init__.py` does the same for `Project`, `Audio`, etc. For a PyO3 builtin, `getsourcefile` returns nothing, so `show_source: true` / the standard griffe source-link extension would cover ~none of the surface. The real definitions live in `crates/python/src/*.rs` (the PyO3 bindings) and `crates/engine/src/...` (the algorithms). So the only thing that works is to **resolve `qualified_name → (file, line)` ourselves** and inject a GitHub link into each API heading — i.e. exactly the "tag the head of each definition" instinct that prompted this.
+
+**Prior art.** Sphinx `linkcode` (`linkcode_resolve(domain, info) → URL` per object) is the canonical version; mkdocstrings has no built-in equivalent, so a **griffe extension** is the idiomatic injection point. Other Rust-backed Python packages (pydantic-core, polars, tokenizers) hit the same wrapper-over-native gap and none ship a clean cross-language source link — no off-the-shelf answer to copy, which is why the marker convention is designed deliberately here.
+
+**Decisions** (DEVLOG-style multi-option questions):
+
+1. **Resolution = hybrid (derive + explicit fallback), CI-gated.** Auto-resolve from PyO3 `#[pyfunction]` / `#[pymethods]` names where the convention is clean; require an explicit marker comment only where it's ambiguous (renames, `#[pyo3(name = "...")]`, impls split across files). A CI gate fails the docs build if any documented public symbol resolves to nothing — so the link map can't silently drift to dead links. Marker syntax: `// [docs:sadda.dsp.voiced_pitch]` in `.rs`, `# [docs:...]` in `.py`.
+
+2. **Link target = both binding + engine impl.** For a symbol like `sadda.dsp.f0` the PyO3 function is a thin shim that calls the engine algorithm. Render two links per heading: **`[binding]`** → the `#[pyfunction]`/`#[pymethods]` def in `crates/python` (matches the Python signature 1:1, trivial to resolve), and **`[impl]`** → the engine algorithm in `crates/engine` (where the logic + DSP citations live; the more useful target for someone studying the method — aligns with the DSP-method-diversity principle). The impl link needs a second resolution path: either a convention (the shim calls `engine::<module>::...`) or an explicit `// [docs-impl:...]` marker. Pure-Python-only symbols (if any) render a single link.
+
+3. **Pin to `main`.** Links are `blob/main/<path>#Lnnn` — always the latest code. Accepted trade-off: line numbers drift as files change, so a link can point at the wrong line until the next docs rebuild. (Considered SHA-pinning to `GITHUB_SHA` for exactness; chose `main` for always-current code, accepting drift between rebuilds. The docs workflow already rebuilds on every push touching `crates/python/src/**`, `python/sadda/**`, `docs/**`, or `mkdocs.yml`, which bounds the drift window.)
+
+**Proposed shape** (to confirm at build time): a scanner walks `.rs` + `.py` → `{qualified_name → [(role, path, line)]}` map (role ∈ binding|impl); a **griffe extension** looks up each documented object during `mkdocs build` and stashes the `blob/main/...#Lnnn` URL(s); a small mkdocstrings template override renders them as `source` links in the heading; a CI check (already inside `mkdocs build --strict`, or a preflight step) fails if a documented public symbol has no resolvable anchor. Lands in the docs workflow (`.github/workflows/docs.yml`) so it's enforced wherever the site is built. Three-surface rule N/A (docs-tooling, not a user capability) but the CI-gate is the analogue of "tests for each surface."
+
+**Open at build time:** exact griffe-extension hook (`on_instance` vs `on_package_loaded`); whether the scanner is Python (lives with the docs deps) or a small Rust xtask; how to spell the impl-resolution convention vs. how often an explicit `[docs-impl:...]` marker is actually needed; rendering (two inline links vs a small "binding · impl" affordance under the signature).
+
+---
+
 ## 2026-05-28 — YIN + pYIN pitch trackers (closes deferred task #52)
 
 Adds the second algorithmic family for f0 estimation: de Cheveigné & Kawahara 2002 YIN (cumulative mean normalized difference) and Mauch & Dixon 2014 pYIN (probabilistic YIN with HMM smoothing — librosa's default). Closes the second of the C2-deferred pitch items (task #52 in the method-diversity tracker), complementing today's Boersma slice (#51).
