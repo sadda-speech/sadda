@@ -54,6 +54,9 @@ rustfft = "6"
 # `instrument.calibration` TEXT column. Both already in the lock tree.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# S2 criteria engine: `label_regex` matching in structured rules. Already in
+# the lock tree (transitive), so no new fetch.
+regex = "1"
 sha2 = "0.10"
 thiserror = "2"
 # C7 reference-distribution manifest parsing (refdist.toml) + project.toml

@@ -7,6 +7,7 @@ pub mod audio;
 pub mod citation;
 pub mod clinical;
 pub mod corpus;
+pub mod criteria;
 pub mod dsp;
 pub mod error;
 pub mod io;
@@ -31,12 +32,13 @@ pub use clinical::{
     PerturbationReport, abi, avqi, cpps, gne, h1_h2, hfno, hnr, hnr_d, perturbation,
 };
 pub use corpus::{
-    Bundle, BundleSpec, Calibration, DerivedSignal, Instrument, InstrumentSpec, Interval,
-    IntervalSpec, LabelCheck, Point, PointSpec, ProcessingRunKind, ProcessingRunRow,
+    Bundle, BundleSpec, Calibration, Criterion, DerivedSignal, Instrument, InstrumentSpec,
+    Interval, IntervalSpec, LabelCheck, Point, PointSpec, ProcessingRunKind, ProcessingRunRow,
     ProcessingRunSpec, ProcessingRunStatus, Project, RecipeRun, Reference, ReferenceSpec, Rubric,
     RubricTier, Session, SessionSpec, Speaker, SpeakerSpec, StatusDef, Tier, TierRows, TierSpec,
     TierType, VocabEntry,
 };
+pub use criteria::{CriterionRule, Emit, EvalInterval, Proposal, Selector};
 pub use error::{EngineError, Result};
 pub use live::{
     LiveConfig, LiveFormantsFrame, LiveIntensityFrame, LivePitchFrame, LiveResults, LiveSession,

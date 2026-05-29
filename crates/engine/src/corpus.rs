@@ -568,6 +568,31 @@ pub struct LabelCheck {
     pub in_vocabulary: bool,
 }
 
+/// A criteria-engine rule (slice S2): a re-runnable rule that emits proposed
+/// annotations onto a preview tier for review. `kind` is `"structured"` (a
+/// JSON [`crate::criteria::CriterionRule`] body, evaluated by the engine) or
+/// `"python"` (a Python-function body, evaluated in the python/app layer).
+#[derive(Debug, Clone)]
+pub struct Criterion {
+    /// Criterion id (primary key).
+    pub id: i64,
+    /// Unique human-readable name.
+    pub name: String,
+    /// Optional description.
+    pub description: Option<String>,
+    /// `"structured"` or `"python"`.
+    pub kind: String,
+    /// JSON rule (structured) or Python source (python).
+    pub body: String,
+    /// Name of the tier accepted proposals promote to. The preview tier is
+    /// `"<target_tier> (auto)"`.
+    pub target_tier: String,
+    /// ISO 8601 UTC creation timestamp.
+    pub created_at: String,
+    /// ISO 8601 UTC timestamp of the last update.
+    pub updated_at: String,
+}
+
 /// Registration row for a Parquet sidecar holding a dense tier's data.
 /// Created automatically by `Project::write_continuous_numeric` /
 /// `write_continuous_vector` / `write_categorical_sampled`.
@@ -2039,6 +2064,296 @@ impl Project {
             )));
         }
         Ok(())
+    }
+
+    // ====================================================================
+    // Criteria engine (slice S2): re-runnable rules that emit proposed
+    // annotations onto a preview ("auto") tier; accept promotes them.
+    // ====================================================================
+
+    /// Creates or updates a criterion (upsert by name). Validates that a
+    /// `structured` body parses as a rule.
+    pub fn set_criterion(
+        &self,
+        name: &str,
+        description: Option<&str>,
+        kind: &str,
+        body: &str,
+        target_tier: &str,
+    ) -> Result<Criterion> {
+        if !matches!(kind, "structured" | "python") {
+            return Err(EngineError::Corpus(format!(
+                "criterion kind must be 'structured' or 'python', got {kind:?}"
+            )));
+        }
+        if kind == "structured" {
+            crate::criteria::CriterionRule::from_json(body).map_err(EngineError::Corpus)?;
+        }
+        self.conn.execute(
+            "INSERT INTO criterion (name, description, kind, body, target_tier, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) \
+             ON CONFLICT(name) DO UPDATE SET \
+                 description = excluded.description, kind = excluded.kind, \
+                 body = excluded.body, target_tier = excluded.target_tier, \
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            rusqlite::params![name, description, kind, body, target_tier],
+        )?;
+        self.criterion_by_name(name)?
+            .ok_or_else(|| EngineError::Corpus("criterion missing after upsert".into()))
+    }
+
+    /// Lists all criteria in name order.
+    pub fn criteria(&self) -> Result<Vec<Criterion>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, description, kind, body, target_tier, created_at, updated_at \
+             FROM criterion ORDER BY name",
+        )?;
+        let rows = stmt
+            .query_map([], Self::map_criterion_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Reads a criterion by id.
+    pub fn get_criterion(&self, id: i64) -> Result<Option<Criterion>> {
+        self.conn
+            .query_row(
+                "SELECT id, name, description, kind, body, target_tier, created_at, updated_at \
+                 FROM criterion WHERE id = ?1",
+                [id],
+                Self::map_criterion_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn criterion_by_name(&self, name: &str) -> Result<Option<Criterion>> {
+        self.conn
+            .query_row(
+                "SELECT id, name, description, kind, body, target_tier, created_at, updated_at \
+                 FROM criterion WHERE name = ?1",
+                [name],
+                Self::map_criterion_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn map_criterion_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Criterion> {
+        Ok(Criterion {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get(2)?,
+            kind: row.get(3)?,
+            body: row.get(4)?,
+            target_tier: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    }
+
+    /// Deletes a criterion by id. Idempotent.
+    pub fn delete_criterion(&self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM criterion WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Finds a tier by name on a bundle, if present.
+    fn tier_by_name(&self, bundle_id: i64, name: &str) -> Result<Option<Tier>> {
+        Ok(self
+            .tiers(Some(bundle_id))?
+            .into_iter()
+            .find(|t| t.name == name))
+    }
+
+    /// Finds a tier by name, creating it with `ttype` if absent. Errors if a
+    /// tier of that name exists with a different type.
+    fn ensure_tier(&self, bundle_id: i64, name: &str, ttype: TierType) -> Result<i64> {
+        match self.tier_by_name(bundle_id, name)? {
+            Some(t) if t.r#type == ttype => Ok(t.id),
+            Some(t) => Err(EngineError::Corpus(format!(
+                "tier {name:?} exists with type {:?}, expected {ttype:?}",
+                t.r#type
+            ))),
+            None => self.add_tier(&TierSpec::new(bundle_id, name, ttype)),
+        }
+    }
+
+    /// Deletes all interval/point annotations on a tier.
+    fn clear_tier_annotations(&self, tier_id: i64, ttype: TierType) -> Result<()> {
+        match ttype {
+            TierType::Interval => {
+                self.conn.execute(
+                    "DELETE FROM annotation_interval WHERE tier_id = ?1",
+                    [tier_id],
+                )?;
+            }
+            TierType::Point => {
+                self.conn
+                    .execute("DELETE FROM annotation_point WHERE tier_id = ?1", [tier_id])?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Fetches an interval tier's rows as evaluator intervals; `None` if no
+    /// tier of that name exists. Errors if the named tier isn't an interval
+    /// tier (only interval tiers are selectable in v1).
+    fn eval_intervals(
+        &self,
+        bundle_id: i64,
+        tier_name: &str,
+    ) -> Result<Option<Vec<crate::criteria::EvalInterval>>> {
+        let Some(tier) = self.tier_by_name(bundle_id, tier_name)? else {
+            return Ok(None);
+        };
+        if tier.r#type != TierType::Interval {
+            return Err(EngineError::Corpus(format!(
+                "criterion tier {tier_name:?} must be an interval tier (is {:?})",
+                tier.r#type
+            )));
+        }
+        let ivs = self
+            .intervals(tier.id)?
+            .into_iter()
+            .map(|i| crate::criteria::EvalInterval {
+                start: i.start_seconds,
+                end: i.end_seconds,
+                label: i.label,
+            })
+            .collect();
+        Ok(Some(ivs))
+    }
+
+    /// The preview ("auto") tier name for a criterion's target tier.
+    fn preview_tier_name(target_tier: &str) -> String {
+        format!("{target_tier} (auto)")
+    }
+
+    /// Runs a `structured` criterion against a bundle: evaluates the rule and
+    /// (re)writes its proposals onto the preview tier `"<target> (auto)"`,
+    /// replacing any prior proposals. Returns the proposal count. `python`
+    /// criteria are rejected here — they run in the python/app layer.
+    pub fn run_criterion(&self, id: i64, bundle_id: i64) -> Result<usize> {
+        let crit = self
+            .get_criterion(id)?
+            .ok_or_else(|| EngineError::Corpus(format!("no criterion with id {id}")))?;
+        if crit.kind != "structured" {
+            return Err(EngineError::Corpus(format!(
+                "criterion {id} is kind '{}'; only 'structured' criteria run in the engine \
+                 (python criteria run in the sadda.app layer)",
+                crit.kind
+            )));
+        }
+        let rule =
+            crate::criteria::CriterionRule::from_json(&crit.body).map_err(EngineError::Corpus)?;
+        let select_ivs = self
+            .eval_intervals(bundle_id, &rule.select.tier)?
+            .ok_or_else(|| {
+                EngineError::Corpus(format!(
+                    "select tier {:?} not found on bundle {bundle_id}",
+                    rule.select.tier
+                ))
+            })?;
+        let within_ivs = match &rule.within {
+            Some(s) => self.eval_intervals(bundle_id, &s.tier)?.unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let overlaps_ivs = match &rule.overlaps {
+            Some(s) => self.eval_intervals(bundle_id, &s.tier)?.unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let proposals = crate::criteria::evaluate(&rule, &select_ivs, &within_ivs, &overlaps_ivs)
+            .map_err(EngineError::Corpus)?;
+
+        let preview_name = Self::preview_tier_name(&crit.target_tier);
+        let preview_type = if rule.emit.is_point() {
+            TierType::Point
+        } else {
+            TierType::Interval
+        };
+        let preview_id = self.ensure_tier(bundle_id, &preview_name, preview_type)?;
+        self.clear_tier_annotations(preview_id, preview_type)?;
+        for p in &proposals {
+            match preview_type {
+                TierType::Point => {
+                    self.add_point(&PointSpec {
+                        tier_id: preview_id,
+                        time_seconds: p.start,
+                        label: p.label.clone(),
+                        ..Default::default()
+                    })?;
+                }
+                _ => {
+                    self.add_interval(&IntervalSpec {
+                        tier_id: preview_id,
+                        start_seconds: p.start,
+                        end_seconds: p.end.unwrap_or(p.start),
+                        label: p.label.clone(),
+                        ..Default::default()
+                    })?;
+                }
+            }
+        }
+        Ok(proposals.len())
+    }
+
+    /// Promotes all proposals on `"<target> (auto)"` to the target tier
+    /// (created if needed), then clears the preview tier. Each promoted row
+    /// is validated against the target tier's rubric (e.g. a closed
+    /// vocabulary), so an out-of-vocab proposal label surfaces an error.
+    /// Returns the number promoted.
+    pub fn accept_proposals(&self, bundle_id: i64, target_tier: &str) -> Result<usize> {
+        let preview_name = Self::preview_tier_name(target_tier);
+        let Some(preview) = self.tier_by_name(bundle_id, &preview_name)? else {
+            return Ok(0);
+        };
+        let target_id = self.ensure_tier(bundle_id, target_tier, preview.r#type)?;
+        let mut promoted = 0;
+        match preview.r#type {
+            TierType::Point => {
+                for p in self.points(preview.id)? {
+                    self.add_point(&PointSpec {
+                        tier_id: target_id,
+                        time_seconds: p.time_seconds,
+                        label: p.label,
+                        ..Default::default()
+                    })?;
+                    promoted += 1;
+                }
+            }
+            _ => {
+                for iv in self.intervals(preview.id)? {
+                    self.add_interval(&IntervalSpec {
+                        tier_id: target_id,
+                        start_seconds: iv.start_seconds,
+                        end_seconds: iv.end_seconds,
+                        label: iv.label,
+                        ..Default::default()
+                    })?;
+                    promoted += 1;
+                }
+            }
+        }
+        self.clear_tier_annotations(preview.id, preview.r#type)?;
+        Ok(promoted)
+    }
+
+    /// Discards all proposals on `"<target> (auto)"`. Returns the count
+    /// cleared.
+    pub fn clear_proposals(&self, bundle_id: i64, target_tier: &str) -> Result<usize> {
+        let preview_name = Self::preview_tier_name(target_tier);
+        let Some(preview) = self.tier_by_name(bundle_id, &preview_name)? else {
+            return Ok(0);
+        };
+        let n = match preview.r#type {
+            TierType::Point => self.points(preview.id)?.len(),
+            _ => self.intervals(preview.id)?.len(),
+        };
+        self.clear_tier_annotations(preview.id, preview.r#type)?;
+        Ok(n)
     }
 
     /// Inserts a reference annotation.
@@ -4406,6 +4721,100 @@ mod tests {
         assert_eq!(updated.id, 1);
         assert_eq!(updated.version, 2);
         assert_eq!(updated.created_at, rubric.created_at);
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn structured_criterion_runs_proposes_and_accepts() {
+        let root = unique_dir("criteria");
+        let _ = std::fs::remove_dir_all(&root);
+        let source_wav =
+            std::env::temp_dir().join(format!("sadda_criteria_{}.wav", std::process::id()));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("b", &source_wav).unwrap();
+        let phones = project
+            .add_tier(&TierSpec::new(bundle_id, "phones", TierType::Interval))
+            .unwrap();
+        let words = project
+            .add_tier(&TierSpec::new(bundle_id, "words", TierType::Interval))
+            .unwrap();
+        for (s, e, l) in [(0.0, 0.1, "a"), (0.1, 0.2, "b"), (0.5, 0.6, "a")] {
+            project
+                .add_interval(&IntervalSpec {
+                    tier_id: phones,
+                    start_seconds: s,
+                    end_seconds: e,
+                    label: Some(l.into()),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        // One "word" covering only the first two phones (0.0..0.3).
+        project
+            .add_interval(&IntervalSpec {
+                tier_id: words,
+                start_seconds: 0.0,
+                end_seconds: 0.3,
+                label: Some("stressed".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        // Criterion: vowels "a" within a stressed word, emit the midpoint.
+        let body = r#"{
+            "select": {"tier": "phones", "label_any": ["a"]},
+            "within": {"tier": "words", "label_any": ["stressed"]},
+            "emit": {"kind": "point", "at": 0.5}
+        }"#;
+        let crit = project
+            .set_criterion("vowel midpoints", None, "structured", body, "landmarks")
+            .unwrap();
+        assert_eq!(crit.kind, "structured");
+
+        // A python criterion is stored but not runnable in the engine.
+        let py = project
+            .set_criterion("py", None, "python", "def c(): pass", "x")
+            .unwrap();
+        assert!(project.run_criterion(py.id, bundle_id).is_err());
+
+        // Run: only the first "a" (0.0..0.1, inside the stressed word) qualifies
+        // — the second "a" at 0.5 is outside it. One proposal at its midpoint.
+        let n = project.run_criterion(crit.id, bundle_id).unwrap();
+        assert_eq!(n, 1);
+        let preview = project
+            .tiers(Some(bundle_id))
+            .unwrap()
+            .into_iter()
+            .find(|t| t.name == "landmarks (auto)")
+            .expect("preview tier created");
+        assert_eq!(preview.r#type, TierType::Point);
+        let pts = project.points(preview.id).unwrap();
+        assert_eq!(pts.len(), 1);
+        assert!((pts[0].time_seconds - 0.05).abs() < 1e-9);
+
+        // Re-running replaces (not appends) the proposals.
+        assert_eq!(project.run_criterion(crit.id, bundle_id).unwrap(), 1);
+        assert_eq!(project.points(preview.id).unwrap().len(), 1);
+
+        // Accept: proposals promote to the "landmarks" tier and the preview
+        // tier is cleared.
+        let promoted = project.accept_proposals(bundle_id, "landmarks").unwrap();
+        assert_eq!(promoted, 1);
+        assert!(project.points(preview.id).unwrap().is_empty());
+        let landmarks = project
+            .tier_by_name(bundle_id, "landmarks")
+            .unwrap()
+            .unwrap();
+        assert_eq!(project.points(landmarks.id).unwrap().len(), 1);
+
+        // Reject path: run again, then clear discards the proposals.
+        assert_eq!(project.run_criterion(crit.id, bundle_id).unwrap(), 1);
+        assert_eq!(project.clear_proposals(bundle_id, "landmarks").unwrap(), 1);
+        assert!(project.points(preview.id).unwrap().is_empty());
 
         let _ = std::fs::remove_file(&source_wav);
         let _ = std::fs::remove_dir_all(&root);

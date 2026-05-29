@@ -22,6 +22,7 @@ const V5_SQL: &str = include_str!("../../migrations/V5__derived_signal.sql");
 const V6_SQL: &str = include_str!("../../migrations/V6__processing_run_kind_live_recording.sql");
 const V7_SQL: &str = include_str!("../../migrations/V7__recipe_run.sql");
 const V8_SQL: &str = include_str!("../../migrations/V8__annotation_rubric.sql");
+const V9_SQL: &str = include_str!("../../migrations/V9__criteria.sql");
 
 /// One forward-only migration step.
 struct Migration {
@@ -88,6 +89,11 @@ static MIGRATIONS: &[Migration] = &[
         version: 8,
         name: "annotation_rubric",
         kind: Kind::Sql(V8_SQL),
+    },
+    Migration {
+        version: 9,
+        name: "criteria",
+        kind: Kind::Sql(V9_SQL),
     },
 ];
 
@@ -202,7 +208,7 @@ mod tests {
 
     #[test]
     fn engine_max_version_matches_static_table() {
-        assert_eq!(engine_max_version(), 8);
+        assert_eq!(engine_max_version(), 9);
     }
 
     #[test]
