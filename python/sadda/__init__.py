@@ -90,6 +90,8 @@ Instrument = stable(_native.Instrument)
 Calibration = stable(_native.Calibration)
 
 
+# [docs:sadda.Project.query]  — monkey-patched onto _native.Project below,
+# so the source-link scanner can't derive it from the PyO3 bindings.
 def _project_query(self, tier_id):
     """Returns the rows of a sparse tier as a ``polars.DataFrame``. Columns
     depend on the tier's type:

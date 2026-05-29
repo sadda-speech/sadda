@@ -78,4 +78,4 @@ jobs:
           fi
 
       - name: pytest
-        run: uv run pytest python/tests/ -v
+        run: uv run pytest python/tests/ tools/docs/ -v

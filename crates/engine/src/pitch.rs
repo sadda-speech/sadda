@@ -215,6 +215,8 @@ pub fn pitch(audio: &Audio, config: &PitchConfig, method: PitchMethod) -> Vec<Pi
     }
 }
 
+// [docs-impl:sadda.dsp.f0]  — engine algorithm behind the `sadda.dsp.f0`
+// PyO3 shim; the source-link scanner renders this as the "impl" link.
 /// Estimates f0 using naive time-domain autocorrelation (Phase-0 method).
 ///
 /// Multi-channel audio is downmixed to mono before analysis. Returns one

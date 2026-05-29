@@ -6,6 +6,45 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-29 — API source-link griffe extension (slice 2) + a rendering bug it surfaced
+
+Slice 2 of the source-links feature: a griffe extension that consumes slice 1's resolver and renders the links into the built API reference. **`tools/docs/griffe_source_links.py`** — a `griffe.Extension` whose `on_object` hook looks up each object's `path` (then `canonical_path`) in `source_links.build_map(...)` and **appends an HTML "Source:" line to the object's docstring** (creating one if absent). Wired in `mkdocs.yml` under the python handler's `options.extensions`.
+
+Why inject into the docstring rather than override a template: it renders reliably across mkdocstrings/griffe versions without depending on the internal heading template, and HTML in a docstring passes through the Markdown converter untouched. The link shows at the foot of each entry as `Source: <path>:<line>` (binding) `· impl: <path>:<line>` where an impl marker exists. Degrades gracefully — if `build_map` throws, it logs and injects nothing rather than breaking the build. Idempotent (a `doc-source-link` sentinel guards against double-injection).
+
+**Verified by a real local `mkdocs build --strict`**: ~80 source links in the generated HTML, including `sadda.dsp.f0` rendering **both** its binding (`crates/python/src/lib.rs:1549`) and impl (`crates/engine/src/pitch.rs:226`) links. Tests: `tools/docs/test_griffe_source_links.py` (6) cover `_render` (binding-only + binding+impl), docstring append/create, idempotency, unmapped-symbol no-op, and canonical-path fallback — without standing up mkdocs. All 23 `tools/docs/` tests pass.
+
+### ⚠ Bug surfaced (logged-not-fixed, tracked separately): Rust-backed classes render no members
+
+While checking method links I found a **pre-existing** docs defect, independent of this feature: **no Rust-backed `#[pyclass]` renders its methods/getters in the API reference.** `add_bundle`, `sample_rate`, `duration_seconds`, … all appear **0 times** in the built site. Every class (`Project`, `Audio`, `LiveSession`, `RefDist`, `Model`, …) renders as a bare *attribute heading* with only its class-level docstring; the `members:` lists in `docs/api/*.md` are silently dropped. So ≈60 of the 124 documented symbols (the Project + LiveSession method members, and all data-class getters) are missing from the published reference — and, for this feature, can't be source-linked because they aren't objects in the doc tree (slice 2 still links the ~64 that do render: top-level functions, module functions, and class headings).
+
+Root cause (confirmed by probing griffe directly):
+- `Project = stable(_native.Project)` is an **assignment**, so griffe's static analysis sees an *attribute*, not a class → no member expansion.
+- Forcing inspection fails harder: PyO3 classes report `__module__ = "builtins"`, so griffe raises `AliasResolutionError: Could not resolve alias sadda.Project pointing at builtins.Project`.
+
+It is **version-sensitive**: the docs CI installs `mkdocstrings[python]` **unpinned**, and this reproduces on the current latest (mkdocstrings-python 2.0.3) — so the live site likely regressed to member-less classes on a recent rebuild, regardless of this feature. Candidate fixes for the dedicated slice: set `#[pyclass(module = "sadda._native")]` on every binding class (so `__module__` maps back into the tree) + a griffe alias-resolution pass; OR render classes from the `.pyi` stubs (which declare real classes — but the handler config deliberately avoids stubs to keep runtime metadata); OR stop aliasing classes in the wrappers. Each is a separate, non-trivial effort; pinning the docs deps is a likely companion fix. **NOT addressed here** — slice 2 ships for what renders; this is the next source-links/docs item when prioritized.
+
+## 2026-05-29 — API source-link scanner (slice 1 of the source-links feature)
+
+Implements the load-bearing first piece of the 2026-05-28 "API-reference source links" plan item: a resolver that maps every documented API symbol to its definition site in the repo, plus the CI gate. The griffe extension + heading template that *render* the links are deferred to slice 2; this slice produces and gate-enforces the map.
+
+**Why a bespoke resolver (recap).** Nearly the whole `sadda` public surface is re-exported from the Rust `_native` extension (`hann = stable(_native.hann)`; `Project = stable(_native.Project)`), so the documented objects are PyO3 builtins with no Python source file — mkdocstrings' built-in `show_source` / the standard griffe source-link covers ~none of them. We resolve names to their real definitions ourselves.
+
+**`tools/docs/source_links.py`** (pure-stdlib Python; lives outside `docs/` so mkdocs doesn't copy it). `build_map(repo_root) -> (map, unresolved)`. Resolution is **hybrid**, per the design decision:
+
+- **Explicit markers win.** `# [docs:<qualname>]` (Python) / `// [docs:<qualname>]` (Rust) pins a binding link; `[docs-impl:<qualname>]` pins an engine-impl link. A marker tags the definition head below it; the collector skips the comment / doc-comment / attribute / decorator lines between the marker and the `fn`/`def`/`struct` so it lands on the real head (the f0 impl marker sits above a 6-line doc-comment block and still resolves to `pub fn autocorrelation`).
+- **Derivation otherwise.** Four sources, composed by analysing the qualname against `KNOWN_MODULES` and the PyO3 class set: (a) Rust `#[pyclass(name="X")]`→struct head; (b) `#[pymethods] impl Struct` method heads (brace-counted so nested fns/closures and `r#type` raw idents are handled); (c) `#[pyfunction]` free-function heads (attribute lines skipped); (d) the pure-Python wrapper `def`/`class` heads (`sadda.recipe.record`, `sadda.ml.vad`, …) and the alias lines (`name = wrapper(_native[.sub].leaf)`) that map a Python name — including **renames** like `recipe.record`→native `start` and `recipe.list`→`list_recipes` — onto the native symbol.
+
+**Two link roles, per the design.** `binding` (the PyO3 shim or pure-Python wrapper — matches the Python signature) is **required** for every documented symbol; `impl` (the engine algorithm behind a thin shim) is **best-effort**, present only where a `[docs-impl:...]` marker exists, never gate-required (data classes, getters, and pure-Python wrappers have no distinct engine impl). Links pin to `main` (`blob/main/<path>#Lnnn`) — the always-current-code-accepts-line-drift choice from the design.
+
+**Result on the current tree:** 124 documented symbols, **0 unresolved**. Exactly one binding needed an explicit marker — `sadda.Project.query`, which is monkey-patched onto `_native.Project` in `python/sadda/__init__.py` (`def _project_query`) and so isn't derivable from the bindings; a `# [docs:sadda.Project.query]` marker resolves it (and exercises the marker path end-to-end). One real `[docs-impl:sadda.dsp.f0]` marker on `engine::pitch::autocorrelation` proves the impl role (the f0 shim calls `sadda_engine::autocorrelation`); the other ~123 impl markers are a future fill-in, not blocking.
+
+**CI gate.** `source_links.py --check` exits non-zero if any documented symbol lacks a binding link. Wired into `docs.yml` (a step before `mkdocs build --strict` — the authoritative place) and the scanner's own tests run in `ci.yml`'s pytest (`tools/docs/` added to the path) so the gate also fires on every push. `tools/docs/**` added to `docs.yml`'s path filter.
+
+**Tests** (`tools/docs/test_source_links.py`, 17): the real-repo gate (`unresolved == []`) + a per-kind spot-check table (alias→Rust, pymethods method, pure-Python wrapper, rename, module-namespaced class + method, top-level class/func, marker override) + a "resolved line actually contains a definition head" off-by-one guard + synthetic-fixture unit tests for each parser (Rust incl. nested-fn/`r#` cases, Python wrapper aliases, marker doc-comment/decorator skipping, docs discovery, and an end-to-end build with a rename and a marker).
+
+**Deferred to slice 2+:** the griffe extension that injects these URLs into rendered headings + the heading template (`binding · impl` affordance); back-filling `[docs-impl:...]` markers across the engine for full impl coverage; deciding whether auto-expanded class getters (not in explicit `members:` lists) get per-getter links (currently best-effort/derivable, not gate-required).
+
 ## 2026-05-29 — Script-panel polish: focus-aware shortcuts, Python highlighting, output scrollbar
 
 Three fixes to the embedded CPython script panel (`crates/app`), found while dogfooding.

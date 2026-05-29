@@ -51,7 +51,12 @@ plugins:
           # docs CI installs via `maturin develop --release`). Falling
           # back to the `.pyi` stubs would lose runtime-only metadata.
           paths: [python]
+          # griffe extension: append a repo source link to every API
+          # entry, resolved by tools/docs/source_links.py. See the
+          # 2026-05-29 source-links DEVLOG entries.
           options:
+            extensions:
+              - tools/docs/griffe_source_links.py
             docstring_style: google
             show_source: false
             show_root_heading: true

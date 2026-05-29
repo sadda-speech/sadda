@@ -8,6 +8,7 @@ on:
       - "mkdocs.yml"
       - "python/sadda/**"
       - "crates/python/src/**"
+      - "tools/docs/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -58,6 +59,13 @@ jobs:
 
       - name: Install docs dependencies
         run: uv pip install mkdocs-material 'mkdocstrings[python]'
+
+      - name: Check API source-link coverage
+        # Gate: every symbol documented in docs/api/*.md must resolve to
+        # a definition site in the repo. Fails the docs build if a newly
+        # documented symbol has no binding link (add a # [docs:<qualname>]
+        # marker at its definition). See tools/docs/source_links.py.
+        run: uv run python tools/docs/source_links.py --check -o /dev/null
 
       - name: Build mkdocs site
         run: uv run mkdocs build --strict
