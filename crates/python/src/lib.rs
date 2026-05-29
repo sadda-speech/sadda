@@ -1969,6 +1969,37 @@ fn mfcc<'py>(
     arr.into_pyarray(py)
 }
 
+/// Whisper-exact log-mel spectrogram, shape `(n_frames, n_mels)`.
+///
+/// Byte-faithful to OpenAI Whisper's encoder front end (Slaney mel,
+/// power STFT with a periodic Hann window, `log10` + clamp, global
+/// dynamic-range floor, `(+4)/4` normalisation). Expects **16 kHz mono**
+/// for Whisper fidelity. `target_frames` pads/trims the audio so the
+/// result has exactly that many frames (Whisper uses 3000 for 30 s);
+/// `None` keeps the natural length.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (audio, *, n_fft=400, hop_length=160, n_mels=80, target_frames=None))]
+fn log_mel_whisper<'py>(
+    py: Python<'py>,
+    audio: &PyAudio,
+    n_fft: usize,
+    hop_length: usize,
+    n_mels: usize,
+    target_frames: Option<usize>,
+) -> Bound<'py, PyArray2<f32>> {
+    let mono: Vec<f32> = audio.inner.mono_samples().collect();
+    let arr = sadda_engine::dsp::log_mel_whisper(
+        &mono,
+        audio.inner.sample_rate,
+        n_fft,
+        hop_length,
+        n_mels,
+        target_frames,
+    );
+    arr.into_pyarray(py)
+}
+
 /// A long-term average spectrum: mean power per `bin_hz`-wide band, in
 /// dB. Returned by `sadda.dsp.ltas`. Level *differences* (slope, tilt,
 /// alpha ratio) are the meaningful quantities.
@@ -2314,6 +2345,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(voiced_pitch, m)?)?;
     m.add_function(wrap_pyfunction!(formants, m)?)?;
     m.add_function(wrap_pyfunction!(mfcc, m)?)?;
+    m.add_function(wrap_pyfunction!(log_mel_whisper, m)?)?;
     m.add_function(wrap_pyfunction!(ltas, m)?)?;
     m.add_function(wrap_pyfunction!(perturbation, m)?)?;
     m.add_function(wrap_pyfunction!(hnr, m)?)?;

@@ -325,3 +325,34 @@ def test_c2_surface_is_stable() -> None:
         sadda.dsp.FormantFrame,
     ):
         assert get_stability(sym) == "stable", sym
+
+
+# ---------------------------------------------------------------------------
+# Whisper-exact log-mel front end
+# ---------------------------------------------------------------------------
+
+def test_log_mel_whisper_silence_normalises_to_constant(tmp_path: Path) -> None:
+    # Silence → every band hits the log floor → Whisper's (+4)/4 norm of
+    # log10(1e-10) = -1.5; `target_frames` makes the frame count exact.
+    wav = tmp_path / "sil.wav"
+    _write_silent_wav(wav, 16_000, 0.5)  # 8000 samples → 50 frames
+    audio = sadda.load_wav(str(wav))
+    lm = sadda.dsp.log_mel_whisper(audio, target_frames=50)
+    assert lm.shape == (50, 80)
+    assert lm.dtype == np.float32
+    assert np.allclose(lm, -1.5, atol=1e-4)
+
+
+def test_log_mel_whisper_tone_is_finite(tmp_path: Path) -> None:
+    wav = tmp_path / "tone.wav"
+    _write_sine_wav(wav, 220.0, 16_000, 0.3)
+    audio = sadda.load_wav(str(wav))
+    lm = sadda.dsp.log_mel_whisper(audio, n_mels=80)
+    assert lm.shape[1] == 80
+    assert np.all(np.isfinite(lm))
+
+
+def test_log_mel_whisper_is_stable() -> None:
+    from sadda._stability import get_stability
+
+    assert get_stability(sadda.dsp.log_mel_whisper) == "stable"

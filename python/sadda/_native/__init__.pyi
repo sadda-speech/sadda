@@ -42,6 +42,7 @@ __all__ = [
     "intensity",
     "kaiser",
     "load_wav",
+    "log_mel_whisper",
     "ltas",
     "mfcc",
     "new_project",
@@ -1146,6 +1147,18 @@ def kaiser(n: builtins.int, beta: builtins.float) -> numpy.typing.NDArray[numpy.
 def load_wav(path: builtins.str | os.PathLike | pathlib.Path) -> Audio:
     r"""
     Loads a WAV file from disk. Returns a sadda.Audio.
+    """
+
+def log_mel_whisper(audio: Audio, *, n_fft: builtins.int = 400, hop_length: builtins.int = 160, n_mels: builtins.int = 80, target_frames: typing.Optional[builtins.int] = None) -> numpy.typing.NDArray[numpy.float32]:
+    r"""
+    Whisper-exact log-mel spectrogram, shape `(n_frames, n_mels)`.
+    
+    Byte-faithful to OpenAI Whisper's encoder front end (Slaney mel,
+    power STFT with a periodic Hann window, `log10` + clamp, global
+    dynamic-range floor, `(+4)/4` normalisation). Expects **16 kHz mono**
+    for Whisper fidelity. `target_frames` pads/trims the audio so the
+    result has exactly that many frames (Whisper uses 3000 for 30 s);
+    `None` keeps the natural length.
     """
 
 def ltas(audio: Audio, *, bin_hz: builtins.float = 100.0) -> Ltas:

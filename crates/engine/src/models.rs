@@ -302,9 +302,37 @@ impl Model {
                 }
                 Tensor::from_array(([1usize, n_mels, frames], flat)).map_err(ort_err)?
             }
+            // Byte-faithful Whisper front end: log_mel_whisper bakes the
+            // 30 s pad/trim into the audio (via `fixed_frames`) so it
+            // returns exactly that many frames — no post-hoc frame padding.
+            "log_mel_whisper" => {
+                let n_mels = self.manifest.input.n_mels.unwrap_or(80);
+                let n_fft = self.manifest.input.n_fft.unwrap_or(400);
+                let hop = self.manifest.input.hop_length.unwrap_or(160);
+                let lm = crate::dsp::log_mel_whisper(
+                    &samples,
+                    sr,
+                    n_fft,
+                    hop,
+                    n_mels,
+                    self.manifest.input.fixed_frames,
+                );
+                let frames = lm.nrows();
+                if frames == 0 {
+                    return Err(model_err("audio shorter than one log-mel window"));
+                }
+                let mut flat = Vec::with_capacity(n_mels * frames);
+                for m in 0..n_mels {
+                    for fr in 0..frames {
+                        flat.push(lm[[fr, m]]);
+                    }
+                }
+                Tensor::from_array(([1usize, n_mels, frames], flat)).map_err(ort_err)?
+            }
             other => {
                 return Err(model_err(format!(
-                    "unsupported input.representation {other:?} (expected waveform | log_mel)"
+                    "unsupported input.representation {other:?} \
+                     (expected waveform | log_mel | log_mel_whisper)"
                 )));
             }
         };
@@ -963,11 +991,10 @@ tier_kind = "interval"
     }
 
     // Real fixed-length log-mel encoder — whisper-tiny.en encoder via hf://
-    // (~33 MB). Exercises the `log_mel` + `fixed_frames=3000` path: the
-    // bare hf:// model is re-declared as a log-mel encoder in-memory.
-    // NOTE: `dsp::log_mel` is Slaney/natural-log, not Whisper's exact
-    // HTK/log10/normalized mel — so this validates the harness *mechanics*
-    // (fixed-length shaping → run → [frames, 384]), not embedding fidelity.
+    // (~33 MB). Exercises the `log_mel_whisper` + `fixed_frames=3000` path.
+    // Uses the byte-faithful Whisper front end (`dsp::log_mel_whisper`,
+    // validated against an OpenAI-Whisper golden in tests/whisper_mel.rs),
+    // so this is now a *fidelity* check, not just a shape/mechanics one.
     #[cfg(feature = "download")]
     #[test]
     fn whisper_tiny_encoder_logmel_real() {
@@ -975,7 +1002,7 @@ tier_kind = "interval"
             return;
         }
         let mut m = load_model("hf://Xenova/whisper-tiny.en/onnx/encoder_model.onnx").unwrap();
-        m.manifest.input.representation = Some("log_mel".into());
+        m.manifest.input.representation = Some("log_mel_whisper".into());
         m.manifest.input.n_mels = Some(80);
         m.manifest.input.n_fft = Some(400);
         m.manifest.input.hop_length = Some(160);

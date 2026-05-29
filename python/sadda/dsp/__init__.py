@@ -24,6 +24,7 @@ __all__ = [
     "hann",
     "intensity",
     "kaiser",
+    "log_mel_whisper",
     "ltas",
     "mfcc",
     "spectrogram",
@@ -45,6 +46,8 @@ f0 = stable(_native.f0)
 voiced_pitch = stable(_native.voiced_pitch)
 formants = stable(_native.formants)
 mfcc = stable(_native.mfcc)
+# Whisper-exact log-mel front end (the byte-faithful Whisper-encoder input).
+log_mel_whisper = stable(_native.log_mel_whisper)
 FormantFrame = stable(_native.FormantFrame)
 
 # LTAS surface — long-term average spectrum + slope/tilt/alpha ratio.

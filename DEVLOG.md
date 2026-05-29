@@ -6,6 +6,20 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-29 — Byte-faithful Whisper log-mel front end (follow-up 2/3)
+
+Closes the E12b fidelity caveat: the embedding harness's `log_mel` path was Slaney/natural-log, so Whisper-encoder embeddings validated *mechanics*, not fidelity. New `engine::dsp::log_mel_whisper` reproduces OpenAI Whisper's `whisper/audio.py::log_mel_spectrogram` exactly.
+
+**Correction worth recording:** the deferred-item note (and this follow-up's working title) said Whisper needs an **HTK** mel. It does not — verified against the canonical source: Whisper loads `librosa.filters.mel(sr=16000, n_fft=400, n_mels=…)` with librosa's **defaults = Slaney scale + Slaney area-norm**, `fmin=0`, `fmax=sr/2`. So the filterbank already matched our `slaney_mel_filterbank`; the real deltas were in framing + post-filterbank steps. The **HTK mel-scale toggle stays task #55** (a separate method-diversity item, not needed for Whisper).
+
+`log_mel_whisper` (per audio.py, cited in the doc comment): optional zero-pad/trim of the *audio* to `target_frames·hop` (Whisper's 30 s `N_SAMPLES`) → `center=True` reflect-pad by `n_fft/2` → Hann (periodic) power STFT, **drop last frame** → Slaney mel → `log10(max(·,1e-10))` → global dynamic-range floor `max(·, max−8)` → `(·+4)/4`.
+
+**Bug found + fixed along the way:** our `dsp::hann` is the scipy-**symmetric** window (`N−1` denominator), but Whisper/`torch.stft`/`librosa.stft` use the **periodic** Hann (`N` denominator). Added `dsp::windowing::hann_periodic` and used it in `log_mel_whisper` (required for a bin-for-bin match). **Latent gap noted, not fixed here:** the *generic* `log_mel` and `mfcc` still use the symmetric window, so they don't match librosa's STFT bin-for-bin — a separate correctness pass (would shift existing MFCC goldens). That's why this slice exposes only the faithful `log_mel_whisper` to Python and leaves the generic `log_mel` engine-internal.
+
+**Validation (the point of the slice):** golden generated from OpenAI Whisper's **own** filterbank asset (`mel_filters.npz`) + the **verbatim** audio.py steps in torch — an independent reference, not a re-derivation of our code (`tests/dsp/whisper/make_whisper_golden.py`; committed input + golden TSVs; CI needs no torch/whisper). `tests/whisper_mel.rs` asserts our output matches **< 5e-3** abs (f32 FFT-impl differences only).
+
+**Three surfaces:** engine (`log_mel_whisper` + harness `representation = "log_mel_whisper"`, which bakes the 30 s pad in via `fixed_frames` so it returns exactly that many frames — no post-hoc frame padding); Python `sadda.dsp.log_mel_whisper` (stable; sibling to `mfcc`); GUI unchanged (the resulting `continuous_vector` already renders in the embedding-heatmap lane). The network-gated `whisper_tiny_encoder_logmel_real` test now uses the faithful path, upgrading it from a mechanics check to a fidelity check. Engine units: silence → constant `−1.5`, exact `target_frames`, reflect-pad mirror, short-input empty. Gates green: fmt/clippy `--workspace --all-targets -D warnings`/`test --workspace`, stubs regenerated (+`log_mel_whisper`), 181 pytest + 27 `tools/docs`, source-link gate 271/0, `mkdocs build --strict` clean.
+
 ## 2026-05-29 — Download-enabled wheel: `hf://` fetch on the wheel, runtime network opt-in (follow-up 1/3)
 
 Surfaces E12a's `hf://` model download to Python users. The crux: a cargo feature is compile-time but a pip extra is install-time, so `pip install sadda[download]` *can't* toggle a Rust feature — the capability has to be compiled into the single PyPI wheel. Decision (with the user): **compile it in + a runtime env-gate**, so the wheel *can* download but stays network-free until explicitly allowed.
