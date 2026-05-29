@@ -1789,8 +1789,9 @@ fn parse_pitch_method(s: &str) -> PyResult<sadda_engine::pitch::PitchMethod> {
         "boersma" => Ok(sadda_engine::pitch::PitchMethod::Boersma),
         "yin" => Ok(sadda_engine::pitch::PitchMethod::Yin),
         "pyin" => Ok(sadda_engine::pitch::PitchMethod::PYin),
+        "swipe" => Ok(sadda_engine::pitch::PitchMethod::Swipe),
         other => Err(PyValueError::new_err(format!(
-            "unknown pitch method {other:?}; expected 'autocorrelation', 'windowed_autocorrelation', 'boersma', 'yin', or 'pyin'"
+            "unknown pitch method {other:?}; expected 'autocorrelation', 'windowed_autocorrelation', 'boersma', 'yin', 'pyin', or 'swipe'"
         ))),
     }
 }
@@ -1834,6 +1835,10 @@ fn parse_lpc_method(s: &str) -> PyResult<sadda_engine::dsp::LpcMethod> {
 /// - `"pyin"` — Mauch & Dixon 2014, librosa's default. Probabilistic
 ///   YIN with a beta-prior distribution over thresholds plus an HMM
 ///   smoothing pass. librosa-validated.
+/// - `"swipe"` — Camacho & Harris 2008 SWIPE' (prime variant). Spectral
+///   method (a third algorithmic family): matches the `sqrt`-loudness
+///   ERB-scale spectrum against prime-harmonic cosine kernels. Validated
+///   against the author's own MATLAB run under Octave.
 ///
 /// `voicing_threshold` is informational here: the function returns voicing
 /// values for every frame so callers can apply their own threshold.

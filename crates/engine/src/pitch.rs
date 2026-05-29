@@ -1,8 +1,9 @@
-//! Fundamental-frequency (f0) estimation — five non-equivalent
+//! Fundamental-frequency (f0) estimation — six non-equivalent
 //! pitch-estimation methods per the 2026-05-21 DSP method-diversity entry.
-//! Two algorithmic families are covered (autocorrelation and
-//! cumulative-mean-normalized-difference); having two independent
-//! estimators is the cross-validation story for downstream work.
+//! Three algorithmic families are covered (autocorrelation,
+//! cumulative-mean-normalized-difference, and spectral); having
+//! independent estimators from different families is the cross-validation
+//! story for downstream work.
 //!
 //! **Autocorrelation family:**
 //! - [`autocorrelation`] — naive time-domain autocorrelation (Phase-0
@@ -30,6 +31,14 @@
 //!   cost). The modern Python-DSP audience expectation. Validated
 //!   against librosa golden fixtures and synthetic ground-truth.
 //!
+//! **Spectral family:**
+//! - [`swipe`] — Camacho & Harris 2008 SWIPE' (prime variant). Matches the
+//!   `sqrt`-loudness spectrum (on an ERB-rate scale) against prime-harmonic
+//!   cosine kernels at the optimal window size per candidate. A faithful
+//!   port of Camacho's dissertation MATLAB, validated against the author's
+//!   *own* code run under Octave (the cross-check caught a 1-based-index
+//!   bug during development).
+//!
 //! ## References
 //! - Rabiner, L.R. (1977), "On the use of autocorrelation analysis for pitch
 //!   detection." *IEEE TASSP* 25(1).
@@ -56,12 +65,8 @@
 //!   bumps accuracy further when wanted, sub-slice.
 //!
 //! ## Deferred alternates (per the DSP method-diversity entry)
-//! - YIN: de Cheveigné & Kawahara (2002), <https://doi.org/10.1121/1.1458024>
 //! - RAPT: Talkin (1995), in *Speech Coding and Synthesis* (Elsevier),
 //!   ISBN 978-0-444-82169-1
-//! - SWIPE': Camacho & Harris (2008), <https://doi.org/10.1121/1.2951592>
-//! - pYIN: Mauch & Dixon (2014), <https://doi.org/10.1109/ICASSP.2014.6853678>
-//!   — librosa's default; HMM-refined YIN
 //! - CREPE (neural): Kim et al. (2018), <https://arxiv.org/abs/1802.06182>
 //!   — SOTA accuracy, requires bundled model weights
 
@@ -95,6 +100,12 @@ pub enum PitchMethod {
     /// per-frame candidates. librosa's default; closest to the
     /// modern Python-DSP audience expectation. See [`pyin`].
     PYin,
+    /// Camacho & Harris 2008 SWIPE' — Sawtooth Waveform Inspired Pitch
+    /// Estimator (prime variant). Spectral method: matches the
+    /// `sqrt`-loudness ERB-scale spectrum against prime-harmonic cosine
+    /// kernels across multiple optimal window sizes. A third algorithmic
+    /// family (neither autocorrelation nor CMNDF). See [`swipe`].
+    Swipe,
 }
 
 /// Configuration for the pitch trackers.
@@ -212,6 +223,7 @@ pub fn pitch(audio: &Audio, config: &PitchConfig, method: PitchMethod) -> Vec<Pi
         PitchMethod::Boersma => boersma(audio, config),
         PitchMethod::Yin => yin(audio, config),
         PitchMethod::PYin => pyin(audio, config),
+        PitchMethod::Swipe => swipe(audio, config),
     }
 }
 
@@ -1235,6 +1247,408 @@ fn ln_gamma(x: f32) -> f32 {
     ln as f32
 }
 
+/// Hz → ERB-rate (Camacho's `hz2erbs`: `21.4·log10(1 + hz/229)`).
+fn hz2erbs(hz: f64) -> f64 {
+    21.4 * (1.0 + hz / 229.0).log10()
+}
+
+/// ERB-rate → Hz (inverse of [`hz2erbs`]).
+fn erbs2hz(erbs: f64) -> f64 {
+    (10f64.powf(erbs / 21.4) - 1.0) * 229.0
+}
+
+/// Primes ≤ `n` (sieve). SWIPE' sums the 1st + prime harmonics only.
+fn primes_upto(n: i64) -> Vec<usize> {
+    if n < 2 {
+        return Vec::new();
+    }
+    let n = n as usize;
+    let mut sieve = vec![true; n + 1];
+    sieve[0] = false;
+    sieve[1] = false;
+    let mut i = 2;
+    while i * i <= n {
+        if sieve[i] {
+            let mut m = i * i;
+            while m <= n {
+                sieve[m] = false;
+                m += i;
+            }
+        }
+        i += 1;
+    }
+    (2..=n).filter(|&k| sieve[k]).collect()
+}
+
+/// Quadratic `(c2, c1, c0)` of `c2·x² + c1·x + c0` through three points
+/// (exact Lagrange fit, the 3-point case of Camacho's `polyfit(…, 2)`).
+fn quad_through_3(x: [f64; 3], y: [f64; 3]) -> (f64, f64, f64) {
+    let (x0, x1, x2) = (x[0], x[1], x[2]);
+    let (y0, y1, y2) = (y[0], y[1], y[2]);
+    let d0 = (x0 - x1) * (x0 - x2);
+    let d1 = (x1 - x0) * (x1 - x2);
+    let d2 = (x2 - x0) * (x2 - x1);
+    let c2 = y0 / d0 + y1 / d1 + y2 / d2;
+    let c1 = -(y0 * (x1 + x2) / d0 + y1 * (x0 + x2) / d1 + y2 * (x0 + x1) / d2);
+    let c0 = y0 * x1 * x2 / d0 + y1 * x0 * x2 / d1 + y2 * x0 * x1 / d2;
+    (c2, c1, c0)
+}
+
+/// Not-a-knot cubic-spline second derivatives ("moments") for **uniformly
+/// spaced** samples `y` (spacing `h`) — MATLAB's `interp1(…, 'spline')` /
+/// scipy `CubicSpline` default. On a uniform grid the not-a-knot end
+/// conditions (`M₀ = 2M₁ − M₂`, `M_{n-1} = 2M_{n-2} − M_{n-3}`) decouple
+/// `M₁` and `M_{n-2}` (`= rᵢ/6`), leaving a `1,4,1` tridiagonal system for
+/// the interior moments (Thomas algorithm). Validated against scipy.
+fn spline_moments_uniform(y: &[f64], h: f64) -> Vec<f64> {
+    let n = y.len();
+    let mut m = vec![0.0f64; n];
+    if n < 3 {
+        return m;
+    }
+    let r = |i: usize| 6.0 / (h * h) * (y[i + 1] - 2.0 * y[i] + y[i - 1]);
+    m[1] = r(1) / 6.0;
+    if n == 3 {
+        m[0] = m[1];
+        m[2] = m[1];
+        return m;
+    }
+    m[n - 2] = r(n - 2) / 6.0;
+    let cnt = n - 4; // interior unknowns M[2..=n-3]
+    if cnt > 0 {
+        let mut b = vec![4.0f64; cnt];
+        let mut d: Vec<f64> = (0..cnt).map(|k| r(2 + k)).collect();
+        d[0] -= m[1];
+        d[cnt - 1] -= m[n - 2];
+        for k in 1..cnt {
+            let w = 1.0 / b[k - 1];
+            b[k] -= w;
+            d[k] -= w * d[k - 1];
+        }
+        let mut sol = vec![0.0f64; cnt];
+        sol[cnt - 1] = d[cnt - 1] / b[cnt - 1];
+        for k in (0..cnt - 1).rev() {
+            sol[k] = (d[k] - sol[k + 1]) / b[k];
+        }
+        m[2..(cnt + 2)].copy_from_slice(&sol);
+    }
+    m[0] = 2.0 * m[1] - m[2];
+    m[n - 1] = 2.0 * m[n - 2] - m[n - 3];
+    m
+}
+
+/// Evaluates the uniform not-a-knot cubic spline (samples `y` at `0, h,
+/// 2h, …`, moments `m` from [`spline_moments_uniform`]) at `xq`. Clamps the
+/// segment to the data range; callers zero out points outside it.
+fn spline_eval_uniform(y: &[f64], m: &[f64], h: f64, xq: f64) -> f64 {
+    let n = y.len();
+    let i = ((xq / h).floor() as isize).clamp(0, n as isize - 2) as usize;
+    let t = xq - i as f64 * h;
+    let (a, b) = (m[i], m[i + 1]);
+    y[i] + ((y[i + 1] - y[i]) / h - h * (2.0 * a + b) / 6.0) * t
+        + a / 2.0 * t * t
+        + (b - a) / (6.0 * h) * t * t * t
+}
+
+/// SWIPE' pitch strength of candidate `pc` over the per-frame-L2-normalised
+/// ERB-scale loudness `l` (`fERBs × n_frames`): builds the prime-harmonic
+/// cosine kernel (peaks `|q−h|<.25 → cos(2πq)`, valleys `.25<|q−h|<.75 →
+/// +cos(2πq)/2`), applies the `√(1/f)` envelope, normalises by `‖k₊‖`, and
+/// returns `kernel · l` per frame.
+fn swipe_strength_one(ferbs: &[f64], l: &[Vec<f64>], pc: f64, n_frames: usize) -> Vec<f64> {
+    use std::f64::consts::PI;
+    let n_harm = (ferbs[ferbs.len() - 1] / pc - 0.75).floor() as i64;
+    let mut harms = vec![1i64];
+    harms.extend(primes_upto(n_harm).into_iter().map(|p| p as i64));
+    let mut kernel = vec![0.0f64; ferbs.len()];
+    for &h in &harms {
+        for (e, &fe) in ferbs.iter().enumerate() {
+            let q = fe / pc;
+            let a = (q - h as f64).abs();
+            if a < 0.25 {
+                kernel[e] = (2.0 * PI * q).cos();
+            } else if a < 0.75 {
+                kernel[e] += (2.0 * PI * q).cos() / 2.0;
+            }
+        }
+    }
+    let mut nrm = 0.0;
+    for (e, &fe) in ferbs.iter().enumerate() {
+        kernel[e] *= (1.0 / fe).sqrt();
+        if kernel[e] > 0.0 {
+            nrm += kernel[e] * kernel[e];
+        }
+    }
+    nrm = nrm.sqrt();
+    let mut s = vec![0.0f64; n_frames];
+    if nrm == 0.0 {
+        return s;
+    }
+    for (e, k) in kernel.iter().enumerate() {
+        let ke = k / nrm;
+        if ke == 0.0 {
+            continue;
+        }
+        for (m, sm) in s.iter_mut().enumerate() {
+            *sm += ke * l[e][m];
+        }
+    }
+    s
+}
+
+/// **SWIPE'** — Camacho & Harris 2008 "Sawtooth Waveform Inspired Pitch
+/// Estimator" (prime variant), a faithful port of Camacho's own
+/// dissertation-appendix MATLAB `swipep`. A third algorithmic family
+/// alongside the autocorrelation and CMNDF trackers: it matches the
+/// `sqrt`-loudness spectrum (resampled onto an ERB-rate scale) against
+/// prime-harmonic cosine kernels, computed at the optimal power-of-2
+/// window size for each candidate pitch and blended across the two
+/// bracketing window sizes.
+///
+/// Reads `min_freq_hz` / `max_freq_hz` as the search range and
+/// `hop_size_seconds` as the output time step; `frame_size_seconds` is
+/// unused (SWIPE' derives its own per-candidate window sizes). Emits one
+/// [`PitchFrame`] per step with `voicing` = the winning candidate's SWIPE'
+/// strength, so callers threshold `voicing` to drop unvoiced frames
+/// (Camacho's default `sTHR` is 0.30), as with the other trackers.
+///
+/// ## Fidelity to the published algorithm
+/// Step-for-step with Camacho's dissertation MATLAB, with **no algorithmic
+/// deviation**: ERB scale, `4·K = 8` window sizing, 50 % hop, the
+/// prime-harmonic kernel + `√(1/f)` envelope + `‖k₊‖` normalisation,
+/// per-frame L2-normalised loudness, the **not-a-knot cubic-spline**
+/// interpolation onto the ERB grid (`interp1(…, 'spline', 0)`),
+/// `mu = 1 − |d − i|` cross-window blending, and parabolic refinement on a
+/// 1/768-octave grid. Validated against the author's own code: a golden
+/// produced by running Camacho's verbatim `swipep` under Octave
+/// (`tests/dsp/swipe/`).
+///
+/// One clarifying note (a difference from *Gorman's C port*, not from the
+/// published algorithm): we use Camacho's `hanning(N)` window (denominator
+/// `N + 1`); Gorman's widely-used C uses a periodic Hann (denominator `N`).
+/// We match the original author's MATLAB. The difference is negligible for
+/// SWIPE's large windows regardless.
+///
+/// Reference: Camacho & Harris (2008), JASA 124(3).
+/// <https://doi.org/10.1121/1.2951592>
+pub fn swipe(audio: &Audio, config: &PitchConfig) -> Vec<PitchFrame> {
+    use std::f64::consts::PI;
+    let fs = audio.sample_rate as f64;
+    let x: Vec<f64> = audio.mono_samples().map(|s| s as f64).collect();
+    let p_min = config.min_freq_hz as f64;
+    let p_max = config.max_freq_hz as f64;
+    let dt = config.hop_size_seconds as f64;
+    if x.is_empty() || p_min <= 0.0 || p_max <= p_min || dt <= 0.0 {
+        return Vec::new();
+    }
+
+    let dlog2p = 1.0 / 96.0;
+    let derbs = 0.1;
+    let four_k = 8.0; // 4·K, K = 2
+
+    let n_t = ((x.len() as f64 / fs) / dt).floor() as usize + 1;
+
+    // Pitch candidates, log2-spaced.
+    let log2_min = p_min.log2();
+    let log2_max = p_max.log2();
+    let n_pc = ((log2_max - log2_min) / dlog2p).floor() as usize + 1;
+    let log2pc: Vec<f64> = (0..n_pc).map(|i| log2_min + i as f64 * dlog2p).collect();
+    let pc: Vec<f64> = log2pc.iter().map(|&l| 2f64.powf(l)).collect();
+
+    // Power-of-2 window sizes (largest for p_min … smallest for p_max).
+    let logws_hi = (four_k * fs / p_min).log2().round() as i64;
+    let logws_lo = (four_k * fs / p_max).log2().round() as i64;
+    if logws_lo < 1 || logws_hi < logws_lo || logws_hi > 30 {
+        return Vec::new();
+    }
+    let ws: Vec<usize> = (logws_lo..=logws_hi).rev().map(|e| 1usize << e).collect();
+    let p_opt: Vec<f64> = ws.iter().map(|&w| four_k * fs / w as f64).collect();
+    let d: Vec<f64> = log2pc
+        .iter()
+        .map(|&l| 1.0 + l - (four_k * fs / ws[0] as f64).log2())
+        .collect();
+
+    // ERB-spaced analysis frequencies.
+    let erb_lo = hz2erbs(pc[0] / 4.0);
+    let erb_hi = hz2erbs(fs / 2.0);
+    let n_erb = ((erb_hi - erb_lo) / derbs).floor() as usize + 1;
+    let ferbs: Vec<f64> = (0..n_erb)
+        .map(|i| erbs2hz(erb_lo + i as f64 * derbs))
+        .collect();
+
+    let mut s_mat = vec![vec![0.0f64; n_t]; n_pc];
+    let mut planner = realfft::RealFftPlanner::<f64>::new();
+
+    for (i, &w) in ws.iter().enumerate() {
+        let dn = (4.0 * fs / p_opt[i]).round() as usize; // dc = 4 → hop = w/2
+        if dn == 0 {
+            continue;
+        }
+        let pad_l = w / 2;
+        let mut xzp = vec![0.0f64; pad_l + x.len() + dn + w / 2];
+        xzp[pad_l..pad_l + x.len()].copy_from_slice(&x);
+        if xzp.len() < w {
+            continue;
+        }
+        // Camacho's hanning(w): denominator N+1.
+        let win: Vec<f64> = (0..w)
+            .map(|k| 0.5 * (1.0 - (2.0 * PI * (k as f64 + 1.0) / (w as f64 + 1.0)).cos()))
+            .collect();
+        let step = dn;
+        let ncol = 1 + (xzp.len() - w) / step;
+        let n_freq = w / 2 + 1;
+        let bin_hz = fs / w as f64;
+        let ti: Vec<f64> = (0..ncol)
+            .map(|m| ((m * step) as f64 + w as f64 / 2.0) / fs)
+            .collect();
+
+        let plan = planner.plan_fft_forward(w);
+        let mut fin = plan.make_input_vec();
+        let mut fout = plan.make_output_vec();
+        let mut mag = vec![vec![0.0f64; ncol]; n_freq];
+        for m in 0..ncol {
+            for (dst, (&xs, &wv)) in fin
+                .iter_mut()
+                .zip(xzp[m * step..m * step + w].iter().zip(win.iter()))
+            {
+                *dst = xs * wv;
+            }
+            plan.process(&mut fin, &mut fout).expect("realfft sized");
+            for (b, c) in fout.iter().enumerate() {
+                mag[b][m] = (c.re * c.re + c.im * c.im).sqrt();
+            }
+        }
+        // Loudness L[erb][frame] = sqrt(not-a-knot cubic-spline interpolation
+        // of the magnitude onto the ERB grid), 0 outside the spectrum range —
+        // matching Camacho's `interp1(…, 'spline', 0)` exactly. The spline is
+        // built per frame from that frame's magnitude column.
+        let f_hi = (n_freq - 1) as f64 * bin_hz;
+        let mut l_mat = vec![vec![0.0f64; ncol]; ferbs.len()];
+        let mut col = vec![0.0f64; n_freq];
+        for m in 0..ncol {
+            for (b, c) in col.iter_mut().enumerate() {
+                *c = mag[b][m];
+            }
+            let moments = spline_moments_uniform(&col, bin_hz);
+            for (e, &fe) in ferbs.iter().enumerate() {
+                if fe < 0.0 || fe > f_hi {
+                    continue;
+                }
+                let v = spline_eval_uniform(&col, &moments, bin_hz, fe).max(0.0);
+                l_mat[e][m] = v.sqrt();
+            }
+        }
+        // Per-frame L2 normalisation over the ERB axis.
+        for m in 0..ncol {
+            let mut nrm = 0.0;
+            for row in &l_mat {
+                nrm += row[m] * row[m];
+            }
+            if nrm > 0.0 {
+                let nrm = nrm.sqrt();
+                for row in l_mat.iter_mut() {
+                    row[m] /= nrm;
+                }
+            }
+        }
+        // Candidates using this window + the blend subset `k` (indices into j).
+        // `d` is calibrated to Camacho's 1-based window index (d ≈ 1 for the
+        // first window), so compare against `i + 1`, not the 0-based `i`.
+        let di = (i + 1) as f64;
+        let (j_idx, k_in_j): (Vec<usize>, Vec<usize>) = if i == ws.len() - 1 {
+            let j: Vec<usize> = (0..n_pc).filter(|&c| d[c] - di > -1.0).collect();
+            let k: Vec<usize> = (0..j.len()).filter(|&jj| d[j[jj]] - di < 0.0).collect();
+            (j, k)
+        } else if i == 0 {
+            let j: Vec<usize> = (0..n_pc).filter(|&c| d[c] - di < 1.0).collect();
+            let k: Vec<usize> = (0..j.len()).filter(|&jj| d[j[jj]] - di > 0.0).collect();
+            (j, k)
+        } else {
+            let j: Vec<usize> = (0..n_pc).filter(|&c| (d[c] - di).abs() < 1.0).collect();
+            let k = (0..j.len()).collect();
+            (j, k)
+        };
+        let mut mu = vec![1.0f64; j_idx.len()];
+        for &kj in &k_in_j {
+            mu[kj] = 1.0 - (d[j_idx[kj]] - di).abs();
+        }
+        for (jj, &c) in j_idx.iter().enumerate() {
+            let si = swipe_strength_one(&ferbs, &l_mat, pc[c], ncol);
+            for (tk, s_row) in s_mat[c].iter_mut().enumerate() {
+                let tt = tk as f64 * dt;
+                let val = if ncol < 2 || tt < ti[0] || tt > ti[ncol - 1] {
+                    f64::NAN
+                } else {
+                    let mut seg = 0usize;
+                    while seg + 1 < ncol && ti[seg + 1] < tt {
+                        seg += 1;
+                    }
+                    let f = (tt - ti[seg]) / (ti[seg + 1] - ti[seg]);
+                    si[seg] * (1.0 - f) + si[seg + 1] * f
+                };
+                *s_row += mu[jj] * val;
+            }
+        }
+    }
+
+    // Parabolic pitch pick per time column.
+    let poly_step = 1.0 / 12.0 / 64.0; // 1/768 octave
+    let mut out = Vec::with_capacity(n_t);
+    for tk in 0..n_t {
+        let mut best = f64::NEG_INFINITY;
+        let mut imax = usize::MAX;
+        for (c, row) in s_mat.iter().enumerate() {
+            if row[tk].is_finite() && row[tk] > best {
+                best = row[tk];
+                imax = c;
+            }
+        }
+        let time_seconds = tk as f64 * dt;
+        if imax == usize::MAX {
+            out.push(PitchFrame {
+                time_seconds,
+                frequency_hz: crate::units::Hertz::new(0.0),
+                voicing: 0.0,
+            });
+            continue;
+        }
+        let voicing = best.clamp(0.0, 1.0) as f32;
+        let freq = if imax == 0 || imax == n_pc - 1 {
+            pc[0] // Camacho's edge-candidate behaviour
+        } else {
+            let idx = [imax - 1, imax, imax + 1];
+            let tc = [1.0 / pc[idx[0]], 1.0 / pc[idx[1]], 1.0 / pc[idx[2]]];
+            let ntc = [
+                (tc[0] / tc[1] - 1.0) * 2.0 * PI,
+                0.0,
+                (tc[2] / tc[1] - 1.0) * 2.0 * PI,
+            ];
+            let sy = [s_mat[idx[0]][tk], s_mat[idx[1]][tk], s_mat[idx[2]][tk]];
+            let (c2, c1, c0) = quad_through_3(ntc, sy);
+            let lo = pc[idx[0]].log2();
+            let hi = pc[idx[2]].log2();
+            let n_fine = ((hi - lo) / poly_step).floor() as usize + 1;
+            let mut bestv = f64::NEG_INFINITY;
+            let mut bestk = 0usize;
+            for kk in 0..n_fine {
+                let nf = (1.0 / 2f64.powf(lo + kk as f64 * poly_step) / tc[1] - 1.0) * 2.0 * PI;
+                let val = c2 * nf * nf + c1 * nf + c0;
+                if val > bestv {
+                    bestv = val;
+                    bestk = kk;
+                }
+            }
+            2f64.powf(lo + bestk as f64 * poly_step)
+        };
+        out.push(PitchFrame {
+            time_seconds,
+            frequency_hz: crate::units::Hertz::new(freq as f32),
+            voicing,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1812,5 +2226,104 @@ mod tests {
     fn beta_pdf_edges_are_zero() {
         assert_eq!(beta_pdf(0.0, 2.0, 18.0), 0.0);
         assert_eq!(beta_pdf(1.0, 2.0, 18.0), 0.0);
+    }
+
+    // --- SWIPE' ---
+
+    fn harmonic_audio(sample_rate: u32, f0: f32, duration_s: f32, n_harm: usize) -> Audio {
+        let n = (sample_rate as f32 * duration_s) as usize;
+        let mut samples = vec![0.0f32; n];
+        for (i, s) in samples.iter_mut().enumerate() {
+            let t = i as f32 / sample_rate as f32;
+            let mut v = 0.0;
+            for h in 1..=n_harm {
+                v += (2.0 * std::f32::consts::PI * h as f32 * f0 * t).sin() / h as f32;
+            }
+            *s = v;
+        }
+        let peak = samples
+            .iter()
+            .fold(0.0f32, |a, &x| a.max(x.abs()))
+            .max(1e-9);
+        for s in samples.iter_mut() {
+            *s /= peak;
+        }
+        Audio {
+            samples,
+            sample_rate,
+            channels: 1,
+        }
+    }
+
+    fn median_voiced(frames: &[PitchFrame]) -> f64 {
+        let mut v: Vec<f64> = frames
+            .iter()
+            .filter(|f| f.voicing >= 0.30)
+            .map(|f| f.frequency_hz.value() as f64)
+            .collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!(!v.is_empty(), "no voiced frames");
+        v[v.len() / 2]
+    }
+
+    #[test]
+    fn spline_uniform_matches_scipy() {
+        // Reference values from scipy.interpolate.CubicSpline (default
+        // not-a-knot) on x=0..7, y below, queried at the half-points.
+        let y = [0.0, 1.0, 0.0, 2.0, 1.0, 3.0, 2.0, 4.0];
+        let m = spline_moments_uniform(&y, 1.0);
+        let xq = [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5];
+        let scipy = [
+            1.318481, 0.181519, 1.080442, 1.496711, 1.932723, 2.772425, 1.977575,
+        ];
+        for (q, &want) in xq.iter().zip(scipy.iter()) {
+            let got = spline_eval_uniform(&y, &m, 1.0, *q);
+            assert!((got - want).abs() < 1e-5, "x={q}: got {got}, want {want}");
+        }
+    }
+
+    #[test]
+    fn swipe_recovers_harmonic_tone() {
+        let audio = harmonic_audio(16_000, 200.0, 0.5, 10);
+        let cfg = PitchConfig {
+            min_freq_hz: 100.0,
+            max_freq_hz: 600.0,
+            hop_size_seconds: 0.01,
+            ..PitchConfig::default()
+        };
+        let med = median_voiced(&swipe(&audio, &cfg));
+        assert!(
+            (med - 200.0).abs() < 2.0,
+            "swipe median {med} Hz, expected ~200"
+        );
+    }
+
+    #[test]
+    fn swipe_agrees_with_yin_and_boersma() {
+        // Independent-family cross-validation: SWIPE' (spectral), YIN (CMNDF),
+        // Boersma (autocorrelation) should agree on a clean harmonic tone.
+        let audio = harmonic_audio(16_000, 180.0, 0.5, 12);
+        let cfg = PitchConfig {
+            min_freq_hz: 100.0,
+            max_freq_hz: 600.0,
+            hop_size_seconds: 0.01,
+            ..PitchConfig::default()
+        };
+        let s = median_voiced(&swipe(&audio, &cfg));
+        let y = median_voiced(&yin(&audio, &cfg));
+        let b = median_voiced(&boersma(&audio, &cfg));
+        assert!((s - y).abs() < 5.0, "swipe {s} vs yin {y}");
+        assert!((s - b).abs() < 5.0, "swipe {s} vs boersma {b}");
+    }
+
+    #[test]
+    fn swipe_silence_has_no_voiced_frames() {
+        let audio = silent_audio(16_000, 0.3);
+        let cfg = PitchConfig::default();
+        let frames = swipe(&audio, &cfg);
+        assert!(
+            frames.iter().all(|f| f.voicing < 0.30),
+            "silence should be unvoiced"
+        );
     }
 }

@@ -173,6 +173,33 @@ def test_voiced_pitch_pyin_method_tracks_clean_tone() -> None:
         )
 
 
+def test_voiced_pitch_swipe_method_tracks_clean_tone() -> None:
+    """method='swipe' resolves to Camacho & Harris 2008 SWIPE' — a spectral
+    tracker (a third algorithmic family). Validated bit-faithfully against
+    the author's own MATLAB under Octave at the engine layer; here we just
+    confirm the Python surface recovers a clean harmonic tone. SWIPE' keys
+    on harmonics, so we use a harmonic-rich tone rather than a pure sine."""
+    n = int(16_000 * 0.6)
+    t = np.arange(n) / 16_000
+    x = sum(np.sin(2 * np.pi * h * 220.0 * t) / h for h in range(1, 11))
+    x = x / np.max(np.abs(x))
+    with tempfile.TemporaryDirectory() as td:
+        wav = Path(td) / "harm.wav"
+        with wave.open(str(wav), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16_000)
+            w.writeframes((x * 32767).astype(np.int16).tobytes())
+        audio = sadda.load_wav(str(wav))
+        times, freqs, voicing = sadda.dsp.voiced_pitch(audio, method="swipe")
+        voiced = freqs[voicing >= 0.30]
+        assert len(voiced) > 5, f"expected several voiced frames, got {len(voiced)}"
+        median_f0 = float(np.median(voiced))
+        assert abs(median_f0 - 220.0) < 3.0, (
+            f"swipe median f0 = {median_f0:.3f} Hz, expected ~220"
+        )
+
+
 def test_voiced_pitch_unknown_method_raises_value_error() -> None:
     # "yin" used to be unknown; it landed in 0.4-prep alongside pyin.
     # Use a still-deferred name (CREPE — neural; tracked under task #52
