@@ -32,6 +32,9 @@ cpal = "0.17"
 # H1 recording modal uses the same SPSC ringbuffer the engine's
 # live module exposes via `LiveSession::take_producer`.
 rtrb = "0.3"
+# PNG encoding for the `SADDA_DEBUG` F12 screenshot capture (see
+# `debug.rs`). Already in the tree transitively; PNG-only keeps it lean.
+image = { version = "0.25", default-features = false, features = ["png"] }
 # E8 embedded-CPython script panel. Reuses the Phase-0 crate
 # that already validated the embed end-to-end.
 sadda-script-engine = { path = "../script-engine" }

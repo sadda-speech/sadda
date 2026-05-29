@@ -4166,6 +4166,7 @@ dependencies = [
  "cpal",
  "eframe",
  "egui_plot",
+ "image",
  "pyo3",
  "rfd",
  "rtrb",
