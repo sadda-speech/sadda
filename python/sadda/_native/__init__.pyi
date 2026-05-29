@@ -1254,6 +1254,10 @@ def voiced_pitch(audio: Audio, *, frame_size_seconds: builtins.float = 0.0299999
     - `"pyin"` — Mauch & Dixon 2014, librosa's default. Probabilistic
       YIN with a beta-prior distribution over thresholds plus an HMM
       smoothing pass. librosa-validated.
+    - `"swipe"` — Camacho & Harris 2008 SWIPE' (prime variant). Spectral
+      method (a third algorithmic family): matches the `sqrt`-loudness
+      ERB-scale spectrum against prime-harmonic cosine kernels. Validated
+      against the author's own MATLAB run under Octave.
     
     `voicing_threshold` is informational here: the function returns voicing
     values for every frame so callers can apply their own threshold.

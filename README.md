@@ -194,6 +194,17 @@ Common trigger: conda / miniconda `python3` is first on `PATH`.
 See `crates/script-engine/README.md` for the same gotcha at the
 test layer.
 
+### Validation
+
+DSP and clinical measures are validated against authoritative external
+references — the tool or reference implementation that *defines* each
+method (Praat, librosa, OpenAI Whisper, and Camacho's own SWIPE' MATLAB
+run under Octave). The reference values are committed as small golden
+files, so the test suite runs fully offline; the external tools are only
+needed to regenerate a golden. See
+[`crates/engine/tests/README.md`](crates/engine/tests/README.md) for the
+philosophy and which tool produces which golden.
+
 ## License
 
 Dual-licensed under either of:
