@@ -4359,6 +4359,10 @@ impl SaddaApp {
         let mut drag_start: Option<f64> = None;
         let mut drag_to: Option<f64> = None;
         let mut drag_ended = false;
+        // Left edge of where the plot widget will be allocated (egui_plot
+        // uses available_rect_before_wrap().min); the data area's left
+        // minus this is the true y-axis gutter width.
+        let widget_left = ui.available_rect_before_wrap().left();
 
         let plot_response = Plot::new("waveform")
             .show_axes([true, true])
@@ -4414,12 +4418,12 @@ impl SaddaApp {
             });
 
         // Measure the lane geometry as WIDTHS (not absolute coords): the
-        // y-axis gutter = data-area left minus the plot widget's own left,
-        // and the data-area width. The tier lanes apply these from their
-        // own panel left, so alignment survives any panel-inset difference.
+        // y-axis gutter = data-area left minus the plot WIDGET's left
+        // (NB egui_plot's `response.rect` is the data area, not the widget,
+        // so we use the captured `widget_left`), plus the data-area width.
         {
             let frame = plot_response.transform.frame();
-            let gutter_w = frame.left() - plot_response.response.rect.left();
+            let gutter_w = frame.left() - widget_left;
             self.lane_geom = Some((gutter_w, frame.width()));
         }
 
@@ -4514,8 +4518,7 @@ impl SaddaApp {
                         .interact_pointer_pos()
                         .map(|p| plot_ui.plot_from_screen(p).x);
                 }
-            })
-            .response;
+            });
 
         apply_lane_selection_drag(
             &mut self.timeline,
@@ -4524,7 +4527,7 @@ impl SaddaApp {
             drag_ended,
             clicked_time,
         );
-        handle_zoom_and_scroll(&plot_response, &mut self.timeline);
+        handle_zoom_and_scroll(&plot_response.response, &mut self.timeline);
     }
 
     fn spectrogram_toolbar(&mut self, ui: &mut egui::Ui) {
@@ -4994,45 +4997,50 @@ impl SaddaApp {
                     // (row_left + SIGNAL_LEFT_GUTTER), matching where
                     // the plots' inner plot areas start.
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    // Gutter = the signal plots' measured y-axis width,
-                    // applied from this panel's own left, so the lane's data
-                    // area lines up with the egui_plot lanes. Falls back to
-                    // the fixed gutter until the waveform has been measured.
+                    // Gutter: reserve EXACTLY the signal plots' y-axis width
+                    // (measured from the waveform), applied from this panel's
+                    // own left so the lane's data area lines up with the
+                    // egui_plot lanes. `allocate_exact_size` is essential —
+                    // `allocate_ui_with_layout` shrinks to its content (the
+                    // short tier name), which left-shifted the lane. Falls
+                    // back to the fixed gutter until the waveform is measured.
                     let gutter_w = lane_geom
                         .map(|(g, _)| g.max(40.0))
                         .unwrap_or(SIGNAL_LEFT_GUTTER);
-                    // Left gutter: tier name + type hint.
-                    ui.allocate_ui_with_layout(
+                    let (gutter_rect, gutter_resp) = ui.allocate_exact_size(
                         egui::Vec2::new(gutter_w, TIER_LANE_HEIGHT),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            // Active tier (the span-selection target) is
-                            // highlighted; left-click sets it.
-                            let mut name_text =
-                                egui::RichText::new(truncate_label(&tier.name, 16)).strong();
-                            if active_tier_id == Some(tier.id) {
-                                name_text = name_text.color(SELECTION_EDGE);
-                            }
-                            let name_resp = ui
-                                .add(egui::Label::new(name_text).sense(egui::Sense::click()))
-                                .on_hover_text(
-                                    "click to make this the active tier; right-click for actions",
-                                );
-                            if name_resp.clicked() {
-                                clicked_active = Some(tier.id);
-                            }
-                            name_resp.context_menu(|ui| {
-                                if ui.button("Rename tier…").clicked() {
-                                    tier_op = Some(TierOp::Rename(tier.id, tier.name.clone()));
-                                    ui.close();
-                                }
-                                if ui.button("Delete tier").clicked() {
-                                    tier_op = Some(TierOp::Delete(tier.id, tier.name.clone()));
-                                    ui.close();
-                                }
-                            });
-                        },
+                        egui::Sense::click(),
                     );
+                    // Active tier (the span-selection target) is highlighted;
+                    // the name is painted into the reserved gutter rect.
+                    let name_color = if active_tier_id == Some(tier.id) {
+                        SELECTION_EDGE
+                    } else {
+                        ui.visuals().strong_text_color()
+                    };
+                    ui.painter_at(gutter_rect).text(
+                        gutter_rect.left_center() + egui::vec2(4.0, 0.0),
+                        egui::Align2::LEFT_CENTER,
+                        truncate_label(&tier.name, 16),
+                        egui::FontId::proportional(13.0),
+                        name_color,
+                    );
+                    let gutter_resp = gutter_resp.on_hover_text(
+                        "click to make this the active tier; right-click for actions",
+                    );
+                    if gutter_resp.clicked() {
+                        clicked_active = Some(tier.id);
+                    }
+                    gutter_resp.context_menu(|ui| {
+                        if ui.button("Rename tier…").clicked() {
+                            tier_op = Some(TierOp::Rename(tier.id, tier.name.clone()));
+                            ui.close();
+                        }
+                        if ui.button("Delete tier").clicked() {
+                            tier_op = Some(TierOp::Delete(tier.id, tier.name.clone()));
+                            ui.close();
+                        }
+                    });
                     // Right: time-positioned lane — width matched to the
                     // plot data area so the lane's right edge aligns too.
                     let avail = ui.available_size_before_wrap();
