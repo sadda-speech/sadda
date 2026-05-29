@@ -84,6 +84,49 @@ def test_canonical_native_keys_emitted(real_map):
     assert "sadda._native.recipe.record" not in result
 
 
+def test_autorendered_class_getters_are_linked(real_map):
+    """Data classes documented without an explicit `members:` list render
+    all their getters; those must resolve to source links too."""
+    result, _ = real_map
+    for q in (
+        "sadda.Audio.sample_rate",
+        "sadda.Audio.duration_seconds",
+        "sadda.Tier.type",  # r# raw ident
+        "sadda.clinical.PerturbationReport.jitter_local",
+    ):
+        assert q in result and "binding" in result[q], q
+
+
+def test_expand_class_members_unit():
+    rust = sl.RustIndex(
+        classes={"Audio": ("crates/python/src/lib.rs", 1)},
+        struct_to_pyname={"PyAudio": "Audio"},
+        methods={
+            ("PyAudio", "sample_rate"): ("crates/python/src/lib.rs", 2),
+            ("PyAudio", "__repr__"): ("crates/python/src/lib.rs", 3),
+            ("PyAudio", "new"): ("crates/python/src/lib.rs", 4),
+        },
+        funcs={},
+    )
+    expanded = dict(sl._expand_class_members([("sadda.Audio", None)], rust))
+    assert "sadda.Audio.sample_rate" in expanded
+    assert "sadda.Audio.__repr__" not in expanded  # dunder skipped
+    assert "sadda.Audio.new" not in expanded  # constructor skipped
+
+
+def test_expand_skips_classes_with_explicit_members():
+    rust = sl.RustIndex(
+        classes={"Audio": ("crates/python/src/lib.rs", 1)},
+        struct_to_pyname={"PyAudio": "Audio"},
+        methods={("PyAudio", "sample_rate"): ("crates/python/src/lib.rs", 2)},
+        funcs={},
+    )
+    # Audio already lists `mono` explicitly -> mkdocstrings renders only
+    # that, so we must NOT auto-add sample_rate.
+    given = [("sadda.Audio", None), ("sadda.Audio.mono", "sadda.Audio")]
+    assert sl._expand_class_members(given, rust) == given
+
+
 def test_impl_marker_produces_an_impl_link(real_map):
     result, _ = real_map
     impl = result["sadda.dsp.f0"].get("impl")
