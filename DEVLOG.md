@@ -6,6 +6,18 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-29 — Script-panel polish: focus-aware shortcuts, Python highlighting, output scrollbar
+
+Three fixes to the embedded CPython script panel (`crates/app`), found while dogfooding.
+
+**1. Global single-key shortcuts no longer steal keystrokes from the editor.** Clicking into the script editor and typing was broken: **Space** toggled audio transport instead of inserting a space, and **Backspace/Delete** deleted the selected annotation instead of editing text. Root cause: the app-level keyboard handlers ran without checking whether a text field held focus — the Space→transport handler `consume_key`'d unconditionally, and the Delete/Backspace→delete-annotation handler gated only on `label_edit.is_none()` (the *inline interval-label* editor), which has nothing to do with the script panel. Fix: compute `ctx.text_edit_focused()` once at the top of the frame and gate both shortcuts on it. Chose `text_edit_focused()` over the broader (and now deprecated) `wants_keyboard_input()` so Space still toggles transport when a *non-text* widget happens to hold focus. Modifier combos (Ctrl/Cmd+Enter run, Ctrl/Cmd+P palette) deliberately still pass through so they work while the editor is focused. The arrow/Home/End scrub shortcuts were already correctly gated (`focused().is_none()`).
+
+**2. Python syntax highlighting** in the editor via `TextEdit::layouter`. Backed by a small, dependency-free lexer (`tokenize_python`) + a theme-aware `SyntaxPalette` (familiar VS Code light/dark colours). Tints keywords (3.12 `kwlist` + soft `match`/`case`), a pragmatic builtins subset, strings (single/triple-quoted, escape-aware), comments, and numbers. The lexer is **lossless by construction** — concatenating its `(run, class)` output reproduces the buffer byte-for-byte, which is load-bearing: if the rendered galley text didn't equal the buffer, cursor positioning and selection would desync. That invariant has a dedicated test, alongside classification and unterminated-string tests (3 new unit tests). Deliberately lexical-only — a readable editor, not a linter.
+
+**3. Output-pane scrollbar** moved from hugging the right of the output *text* to the far right of the panel, via `.auto_shrink([false, true])` (the default `[true, true]` shrank the scroll area horizontally to content width). Vertical shrink kept so the area still collapses to the text height within `max_height`.
+
+Gates: `cargo fmt` + `cargo clippy --all-targets -D warnings` clean; app tests 58→61. Highlighting + scrollbar verified live in a running WSLg window by the user; the focus gate is logic-verified (`text_edit_focused()` reflects the prior frame's focus, which persists) and confirmed working in the same session.
+
 ## 2026-05-28 — Roadmap intake: model *training* facilities (path undecided)
 
 Ideation prompted by the framing question "sadda does ML inference — what would *training* facilities look like?" Logged-not-designed, ~Phase 4+/v1.x, needs its own design session. **The user is explicitly NOT ready to commit to a training path** — this entry captures the fork and the option menu so the decision can be made later with the landscape in hand; it does **not** pick a direction. Extends the speech-AI-engineer intake (2026-05-27) — training is the gap that intake's "measurement/eval/data layer" thesis circles but never enters.
