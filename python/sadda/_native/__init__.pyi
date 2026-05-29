@@ -12,6 +12,7 @@ __all__ = [
     "Bundle",
     "Calibration",
     "Citation",
+    "Criterion",
     "DerivedSignal",
     "FormantFrame",
     "Instrument",
@@ -204,6 +205,56 @@ class Citation:
     def doi(self) -> typing.Optional[builtins.str]:
         r"""
         Bare DOI, if one exists.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class Criterion:
+    r"""
+    A criteria-engine rule (S2). Read-only view; create via
+    `Project.set_criterion(...)`. `kind` is `"structured"` (a JSON rule the
+    engine evaluates) or `"python"` (a function body run by
+    `sadda.criteria.run_criterion`).
+    """
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Criterion id.
+        """
+    @property
+    def name(self) -> builtins.str:
+        r"""
+        Unique name.
+        """
+    @property
+    def description(self) -> typing.Optional[builtins.str]:
+        r"""
+        Optional description.
+        """
+    @property
+    def kind(self) -> builtins.str:
+        r"""
+        `"structured"` or `"python"`.
+        """
+    @property
+    def body(self) -> builtins.str:
+        r"""
+        JSON rule (structured) or Python source (python).
+        """
+    @property
+    def target_tier(self) -> builtins.str:
+        r"""
+        Name of the tier accepted proposals promote to.
+        """
+    @property
+    def created_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC creation timestamp.
+        """
+    @property
+    def updated_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC timestamp of the last update.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -848,6 +899,46 @@ class Project:
         r"""
         Sets the status + note on a point annotation, validating the status
         against the rubric. Either may be `None` to clear it.
+        """
+    def set_criterion(self, name: builtins.str, kind: builtins.str, body: builtins.str, target_tier: builtins.str, description: typing.Optional[builtins.str] = None) -> Criterion:
+        r"""
+        Creates or updates a criterion (upsert by name). `kind` is
+        `"structured"` (a JSON rule) or `"python"` (a function body).
+        """
+    def criteria(self) -> builtins.list[Criterion]:
+        r"""
+        Lists all criteria in name order.
+        """
+    def get_criterion(self, id: builtins.int) -> typing.Optional[Criterion]:
+        r"""
+        Reads a criterion by id, or `None`.
+        """
+    def delete_criterion(self, id: builtins.int) -> None:
+        r"""
+        Deletes a criterion by id (idempotent).
+        """
+    def run_criterion(self, id: builtins.int, bundle_id: builtins.int) -> builtins.int:
+        r"""
+        Runs a `structured` criterion against a bundle, (re)writing its
+        proposals onto the preview tier. Returns the proposal count.
+        `python` criteria are run via `sadda.criteria.run_criterion`.
+        """
+    def set_proposals(self, bundle_id: builtins.int, target_tier: builtins.str, proposals: typing.Sequence[tuple[builtins.float, typing.Optional[builtins.float], typing.Optional[builtins.str]]]) -> builtins.int:
+        r"""
+        (Re)writes proposals onto the preview tier `"<target> (auto)"`,
+        replacing prior ones. `proposals` is a list of
+        `(start, end_or_None, label_or_None)` tuples — `end=None` for a point.
+        Used by the python-escape criterion executor.
+        """
+    def accept_proposals(self, bundle_id: builtins.int, target_tier: builtins.str) -> builtins.int:
+        r"""
+        Promotes all proposals on `"<target> (auto)"` to the target tier
+        (validated against its rubric), then clears the preview tier. Returns
+        the number promoted.
+        """
+    def clear_proposals(self, bundle_id: builtins.int, target_tier: builtins.str) -> builtins.int:
+        r"""
+        Discards all proposals on `"<target> (auto)"`. Returns the count.
         """
     def write_continuous_numeric(self, tier_id: builtins.int, samples: numpy.typing.NDArray[numpy.float64], sample_rate_hz: builtins.float) -> builtins.int:
         r"""

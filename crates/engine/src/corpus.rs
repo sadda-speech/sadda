@@ -2267,34 +2267,58 @@ impl Project {
         };
         let proposals = crate::criteria::evaluate(&rule, &select_ivs, &within_ivs, &overlaps_ivs)
             .map_err(EngineError::Corpus)?;
+        self.set_proposals(bundle_id, &crit.target_tier, &proposals)
+    }
 
-        let preview_name = Self::preview_tier_name(&crit.target_tier);
-        let preview_type = if rule.emit.is_point() {
+    /// (Re)writes `proposals` onto the preview tier `"<target> (auto)"`,
+    /// replacing any prior proposals, and returns the count. The tier type is
+    /// inferred from the proposals (all points → a point tier, all spans → an
+    /// interval tier; a mix is an error). With no proposals, an existing
+    /// preview tier is just cleared. This is the shared materialization step
+    /// for both the engine's structured `run_criterion` and the python-escape
+    /// executor in the python/app layer.
+    pub fn set_proposals(
+        &self,
+        bundle_id: i64,
+        target_tier: &str,
+        proposals: &[crate::criteria::Proposal],
+    ) -> Result<usize> {
+        let preview_name = Self::preview_tier_name(target_tier);
+        if proposals.is_empty() {
+            if let Some(t) = self.tier_by_name(bundle_id, &preview_name)? {
+                self.clear_tier_annotations(t.id, t.r#type)?;
+            }
+            return Ok(0);
+        }
+        let is_point = proposals[0].end.is_none();
+        if proposals.iter().any(|p| p.end.is_none() != is_point) {
+            return Err(EngineError::Corpus(
+                "proposals must be all points or all spans".into(),
+            ));
+        }
+        let preview_type = if is_point {
             TierType::Point
         } else {
             TierType::Interval
         };
         let preview_id = self.ensure_tier(bundle_id, &preview_name, preview_type)?;
         self.clear_tier_annotations(preview_id, preview_type)?;
-        for p in &proposals {
-            match preview_type {
-                TierType::Point => {
-                    self.add_point(&PointSpec {
-                        tier_id: preview_id,
-                        time_seconds: p.start,
-                        label: p.label.clone(),
-                        ..Default::default()
-                    })?;
-                }
-                _ => {
-                    self.add_interval(&IntervalSpec {
-                        tier_id: preview_id,
-                        start_seconds: p.start,
-                        end_seconds: p.end.unwrap_or(p.start),
-                        label: p.label.clone(),
-                        ..Default::default()
-                    })?;
-                }
+        for p in proposals {
+            if is_point {
+                self.add_point(&PointSpec {
+                    tier_id: preview_id,
+                    time_seconds: p.start,
+                    label: p.label.clone(),
+                    ..Default::default()
+                })?;
+            } else {
+                self.add_interval(&IntervalSpec {
+                    tier_id: preview_id,
+                    start_seconds: p.start,
+                    end_seconds: p.end.unwrap_or(p.start),
+                    label: p.label.clone(),
+                    ..Default::default()
+                })?;
             }
         }
         Ok(proposals.len())

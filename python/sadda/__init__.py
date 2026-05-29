@@ -12,7 +12,7 @@ entry and the 2026-05-21 A2 entry.
 
 from __future__ import annotations
 
-from sadda import _native, clinical, dsp, ml, refdist
+from sadda import _native, clinical, criteria, dsp, ml, refdist
 from sadda._stability import (
     ExperimentalAPIWarning,
     ProvisionalAPIWarning,
@@ -28,6 +28,7 @@ __all__ = [
     "Bundle",
     "Calibration",
     "Citation",
+    "Criterion",
     "DerivedSignal",
     "ExperimentalAPIWarning",
     "Instrument",
@@ -47,6 +48,7 @@ __all__ = [
     "Tier",
     "VocabEntry",
     "clinical",
+    "criteria",
     "dsp",
     "experimental",
     "f0",
@@ -94,6 +96,9 @@ StatusDef = provisional(_native.StatusDef)
 RubricTier = provisional(_native.RubricTier)
 VocabEntry = provisional(_native.VocabEntry)
 LabelCheck = provisional(_native.LabelCheck)
+
+# S2 surface (Phase 4) — criteria engine: re-runnable rules emitting proposals.
+Criterion = provisional(_native.Criterion)
 
 # A1 surface (Phase 3) — provenance timeline + citation export.
 ProcessingRun = stable(_native.ProcessingRun)

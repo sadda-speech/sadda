@@ -757,6 +757,68 @@ impl PyLabelCheck {
     }
 }
 
+/// A criteria-engine rule (S2). Read-only view; create via
+/// `Project.set_criterion(...)`. `kind` is `"structured"` (a JSON rule the
+/// engine evaluates) or `"python"` (a function body run by
+/// `sadda.criteria.run_criterion`).
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "Criterion", frozen)]
+struct PyCriterion {
+    inner: sadda_engine::Criterion,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyCriterion {
+    /// Criterion id.
+    #[getter]
+    fn id(&self) -> i64 {
+        self.inner.id
+    }
+    /// Unique name.
+    #[getter]
+    fn name(&self) -> String {
+        self.inner.name.clone()
+    }
+    /// Optional description.
+    #[getter]
+    fn description(&self) -> Option<String> {
+        self.inner.description.clone()
+    }
+    /// `"structured"` or `"python"`.
+    #[getter]
+    fn kind(&self) -> String {
+        self.inner.kind.clone()
+    }
+    /// JSON rule (structured) or Python source (python).
+    #[getter]
+    fn body(&self) -> String {
+        self.inner.body.clone()
+    }
+    /// Name of the tier accepted proposals promote to.
+    #[getter]
+    fn target_tier(&self) -> String {
+        self.inner.target_tier.clone()
+    }
+    /// ISO 8601 UTC creation timestamp.
+    #[getter]
+    fn created_at(&self) -> String {
+        self.inner.created_at.clone()
+    }
+    /// ISO 8601 UTC timestamp of the last update.
+    #[getter]
+    fn updated_at(&self) -> String {
+        self.inner.updated_at.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Criterion(name={:?}, kind={:?}, target_tier={:?})",
+            self.inner.name, self.inner.kind, self.inner.target_tier
+        )
+    }
+}
+
 /// Registration row for a Parquet sidecar holding a dense tier's data.
 /// Created automatically by the `Project.write_continuous_numeric` /
 /// `write_continuous_vector` / `write_categorical_sampled` methods.
@@ -1687,6 +1749,90 @@ impl PyProject {
     fn set_point_status(&self, id: i64, status: Option<&str>, note: Option<&str>) -> PyResult<()> {
         self.inner
             .set_point_status(id, status, note)
+            .map_err(engine_err_to_py)
+    }
+
+    // -- Criteria engine (slice S2) --------------------------------------
+
+    /// Creates or updates a criterion (upsert by name). `kind` is
+    /// `"structured"` (a JSON rule) or `"python"` (a function body).
+    #[pyo3(signature = (name, kind, body, target_tier, description=None))]
+    fn set_criterion(
+        &self,
+        name: &str,
+        kind: &str,
+        body: &str,
+        target_tier: &str,
+        description: Option<&str>,
+    ) -> PyResult<PyCriterion> {
+        self.inner
+            .set_criterion(name, description, kind, body, target_tier)
+            .map(|inner| PyCriterion { inner })
+            .map_err(engine_err_to_py)
+    }
+
+    /// Lists all criteria in name order.
+    fn criteria(&self) -> PyResult<Vec<PyCriterion>> {
+        self.inner
+            .criteria()
+            .map(|cs| cs.into_iter().map(|inner| PyCriterion { inner }).collect())
+            .map_err(engine_err_to_py)
+    }
+
+    /// Reads a criterion by id, or `None`.
+    fn get_criterion(&self, id: i64) -> PyResult<Option<PyCriterion>> {
+        self.inner
+            .get_criterion(id)
+            .map(|opt| opt.map(|inner| PyCriterion { inner }))
+            .map_err(engine_err_to_py)
+    }
+
+    /// Deletes a criterion by id (idempotent).
+    fn delete_criterion(&self, id: i64) -> PyResult<()> {
+        self.inner.delete_criterion(id).map_err(engine_err_to_py)
+    }
+
+    /// Runs a `structured` criterion against a bundle, (re)writing its
+    /// proposals onto the preview tier. Returns the proposal count.
+    /// `python` criteria are run via `sadda.criteria.run_criterion`.
+    fn run_criterion(&self, id: i64, bundle_id: i64) -> PyResult<usize> {
+        self.inner
+            .run_criterion(id, bundle_id)
+            .map_err(engine_err_to_py)
+    }
+
+    /// (Re)writes proposals onto the preview tier `"<target> (auto)"`,
+    /// replacing prior ones. `proposals` is a list of
+    /// `(start, end_or_None, label_or_None)` tuples — `end=None` for a point.
+    /// Used by the python-escape criterion executor.
+    fn set_proposals(
+        &self,
+        bundle_id: i64,
+        target_tier: &str,
+        proposals: Vec<(f64, Option<f64>, Option<String>)>,
+    ) -> PyResult<usize> {
+        let props: Vec<sadda_engine::Proposal> = proposals
+            .into_iter()
+            .map(|(start, end, label)| sadda_engine::Proposal { start, end, label })
+            .collect();
+        self.inner
+            .set_proposals(bundle_id, target_tier, &props)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Promotes all proposals on `"<target> (auto)"` to the target tier
+    /// (validated against its rubric), then clears the preview tier. Returns
+    /// the number promoted.
+    fn accept_proposals(&self, bundle_id: i64, target_tier: &str) -> PyResult<usize> {
+        self.inner
+            .accept_proposals(bundle_id, target_tier)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Discards all proposals on `"<target> (auto)"`. Returns the count.
+    fn clear_proposals(&self, bundle_id: i64, target_tier: &str) -> PyResult<usize> {
+        self.inner
+            .clear_proposals(bundle_id, target_tier)
             .map_err(engine_err_to_py)
     }
 
@@ -2734,6 +2880,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRubricTier>()?;
     m.add_class::<PyVocabEntry>()?;
     m.add_class::<PyLabelCheck>()?;
+    m.add_class::<PyCriterion>()?;
     m.add_class::<PyDerivedSignal>()?;
     m.add_class::<PyFormantFrame>()?;
     m.add_class::<PyLtas>()?;
