@@ -1272,6 +1272,77 @@ impl Project {
         Ok(id)
     }
 
+    /// Renames a tier's display name. Trims; rejects empty / whitespace-only;
+    /// errors if `tier_id` does not exist. Tier names are not unique-
+    /// constrained. The `UPDATE` fires the tier audit trigger. Mirrors
+    /// [`rename_bundle`](Self::rename_bundle).
+    pub fn rename_tier(&self, tier_id: i64, new_name: &str) -> Result<()> {
+        let trimmed = new_name.trim();
+        if trimmed.is_empty() {
+            return Err(EngineError::Corpus("tier name must not be empty".into()));
+        }
+        let affected = self.conn.execute(
+            "UPDATE tier SET name = ?1 WHERE id = ?2",
+            rusqlite::params![trimmed, tier_id],
+        )?;
+        if affected == 0 {
+            return Err(EngineError::Corpus(format!("no tier with id {tier_id}")));
+        }
+        Ok(())
+    }
+
+    /// Deletes a tier and all of its annotations (`annotation_interval` /
+    /// `_point` / `_reference`) and any dense `derived_signal` row +
+    /// Parquet sidecar. Refuses if the tier has child tiers (`parent_id`
+    /// points at it) — delete those first — to avoid dangling parents.
+    /// Errors if `tier_id` does not exist. Mirrors the cascade in
+    /// [`delete_bundle`](Self::delete_bundle), scoped to one tier.
+    pub fn delete_tier(&self, tier_id: i64) -> Result<()> {
+        let child_count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tier WHERE parent_id = ?1",
+            [tier_id],
+            |row| row.get(0),
+        )?;
+        if child_count > 0 {
+            return Err(EngineError::Corpus(format!(
+                "cannot delete tier {tier_id}: it has {child_count} child tier(s); delete those first"
+            )));
+        }
+        // Dense sidecar path (if any) for post-commit file cleanup.
+        let dense_rel: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT relative_path FROM derived_signal WHERE tier_id = ?1",
+                [tier_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM derived_signal WHERE tier_id = ?1", [tier_id])?;
+        for child in [
+            "annotation_interval",
+            "annotation_point",
+            "annotation_reference",
+        ] {
+            tx.execute(
+                &format!("DELETE FROM {child} WHERE tier_id = ?1"),
+                [tier_id],
+            )?;
+        }
+        let affected = tx.execute("DELETE FROM tier WHERE id = ?1", [tier_id])?;
+        if affected == 0 {
+            return Err(EngineError::Corpus(format!("no tier with id {tier_id}")));
+        }
+        tx.commit()?;
+
+        // Best-effort Parquet removal; an orphan sidecar is harmless.
+        if let Some(rel) = dense_rel {
+            let _ = std::fs::remove_file(self.root.join(rel));
+        }
+        Ok(())
+    }
+
     /// Lists tiers for a given bundle (or every tier in the project when
     /// `bundle_id` is `None`), in id order.
     pub fn tiers(&self, bundle_id: Option<i64>) -> Result<Vec<Tier>> {
@@ -3475,6 +3546,93 @@ mod tests {
         // Unknown id errors rather than silently no-op'ing.
         let err = project.rename_bundle(9_999, "x").unwrap_err();
         assert!(matches!(err, EngineError::Corpus(_)));
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rename_and_delete_tier_lifecycle() {
+        let root = unique_dir("tier_lifecycle");
+        let _ = std::fs::remove_dir_all(&root);
+        let source_wav =
+            std::env::temp_dir().join(format!("sadda_tier_life_{}.wav", std::process::id()));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("b", &source_wav).unwrap();
+        let tier_id = project
+            .add_tier(&TierSpec::new(bundle_id, "phones", TierType::Interval))
+            .unwrap();
+        for (s, e, lbl) in [(0.0, 0.1, "a"), (0.1, 0.2, "b")] {
+            project
+                .add_interval(&IntervalSpec {
+                    tier_id,
+                    start_seconds: s,
+                    end_seconds: e,
+                    label: Some(lbl.into()),
+                    parent_annotation_id: None,
+                    extra: None,
+                })
+                .unwrap();
+        }
+
+        // Rename: trims, rejects empty, errors on unknown id.
+        project.rename_tier(tier_id, "  segments  ").unwrap();
+        assert_eq!(project.get_tier(tier_id).unwrap().name, "segments");
+        assert!(matches!(
+            project.rename_tier(tier_id, "   ").unwrap_err(),
+            EngineError::Corpus(_)
+        ));
+        assert!(matches!(
+            project.rename_tier(9_999, "x").unwrap_err(),
+            EngineError::Corpus(_)
+        ));
+
+        // Delete cascades the tier's annotations, then errors if repeated.
+        assert_eq!(project.intervals(tier_id).unwrap().len(), 2);
+        project.delete_tier(tier_id).unwrap();
+        assert!(project.tiers(Some(bundle_id)).unwrap().is_empty());
+        assert!(project.intervals(tier_id).unwrap().is_empty());
+        assert!(matches!(
+            project.delete_tier(tier_id).unwrap_err(),
+            EngineError::Corpus(_)
+        ));
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delete_tier_refuses_when_children_exist() {
+        let root = unique_dir("tier_children");
+        let _ = std::fs::remove_dir_all(&root);
+        let source_wav =
+            std::env::temp_dir().join(format!("sadda_tier_child_{}.wav", std::process::id()));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("b", &source_wav).unwrap();
+        let parent = project
+            .add_tier(&TierSpec::new(bundle_id, "words", TierType::Interval))
+            .unwrap();
+        let child = project
+            .add_tier(&TierSpec {
+                parent_id: Some(parent),
+                cardinality: Some("one_to_many".into()),
+                ..TierSpec::new(bundle_id, "phones", TierType::Interval)
+            })
+            .unwrap();
+
+        // Refuses while a child references it.
+        assert!(matches!(
+            project.delete_tier(parent).unwrap_err(),
+            EngineError::Corpus(_)
+        ));
+        // Delete the child first, then the parent succeeds.
+        project.delete_tier(child).unwrap();
+        project.delete_tier(parent).unwrap();
+        assert!(project.tiers(Some(bundle_id)).unwrap().is_empty());
 
         let _ = std::fs::remove_file(&source_wav);
         let _ = std::fs::remove_dir_all(&root);

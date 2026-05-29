@@ -49,6 +49,30 @@ def test_add_tier_with_unknown_type_errors() -> None:
             proj.add_tier(bundle_id, "x", "not_a_real_type")
 
 
+def test_rename_and_delete_tier() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        proj, bundle_id = _project_with_bundle(Path(td))
+        tid = proj.add_tier(bundle_id, "phones", "interval")
+        proj.add_interval(tid, 0.0, 0.2, label="h")
+        proj.add_interval(tid, 0.2, 0.4, label="i")
+
+        # Rename (trims), and reject empty / unknown.
+        proj.rename_tier(tid, "  segments  ")
+        assert proj.get_tier(tid).name == "segments"
+        with pytest.raises(RuntimeError):
+            proj.rename_tier(tid, "   ")
+        with pytest.raises(RuntimeError):
+            proj.rename_tier(9999, "x")
+
+        # Delete cascades annotations; deleting again raises.
+        assert len(proj.intervals(tid)) == 2
+        proj.delete_tier(tid)
+        assert proj.tiers(bundle_id) == []
+        assert proj.intervals(tid) == []
+        with pytest.raises(RuntimeError):
+            proj.delete_tier(tid)
+
+
 def test_interval_round_trip_through_intervals_accessor() -> None:
     with tempfile.TemporaryDirectory() as td:
         proj, bundle_id = _project_with_bundle(Path(td))

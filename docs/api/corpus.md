@@ -39,6 +39,8 @@ Project loaders live at the top of the `sadda` package:
         - add_tier
         - tiers
         - get_tier
+        - rename_tier
+        - delete_tier
         - add_interval
         - intervals
         - add_point

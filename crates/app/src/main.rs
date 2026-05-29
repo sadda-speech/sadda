@@ -310,6 +310,11 @@ struct SaddaApp {
     /// Pending bundle rename. `Some` while the rename modal is open;
     /// `name` is the editable buffer, seeded with the current name.
     pending_rename: Option<PendingBundleRename>,
+    /// Tier-lifecycle modals (create / rename / delete), each `Some`
+    /// while its modal is open.
+    pending_new_tier: Option<NewTierDraft>,
+    pending_tier_rename: Option<PendingTierRename>,
+    pending_tier_delete: Option<PendingTierDelete>,
     /// A1: open provenance/citations modal. `Some` holds the snapshot
     /// of the bundle's processing runs + citations, loaded once when
     /// the modal opens.
@@ -332,6 +337,35 @@ struct ProvenanceView {
 struct PendingBundleDelete {
     id: i64,
     name: String,
+}
+
+/// Pending "New tier…" modal: a draft tier awaiting name + type.
+struct NewTierDraft {
+    bundle_id: i64,
+    name: String,
+    tier_type: TierType,
+    just_started: bool,
+}
+
+/// Pending tier-rename modal.
+struct PendingTierRename {
+    id: i64,
+    name: String,
+    just_started: bool,
+}
+
+/// Pending tier-delete confirmation.
+struct PendingTierDelete {
+    id: i64,
+    name: String,
+}
+
+/// A tier-lifecycle request raised from the tier strip, applied after the
+/// `&project` borrow ends (mirrors the selection/draft snapshot pattern).
+enum TierOp {
+    New,
+    Rename(i64, String),
+    Delete(i64, String),
 }
 
 /// A bundle the user is renaming via the modal text-edit. `name` is
@@ -771,6 +805,9 @@ impl SaddaApp {
             record_dialog: None,
             pending_delete: None,
             pending_rename: None,
+            pending_new_tier: None,
+            pending_tier_rename: None,
+            pending_tier_delete: None,
             provenance: None,
         }
     }
@@ -1106,6 +1143,213 @@ impl SaddaApp {
                 self.set_info(format!("Renamed bundle to “{new_name}”."));
             }
             Err(e) => self.set_error(format!("Rename failed: {e}")),
+        }
+    }
+
+    /// "New tier…" modal: name field + type picker (interval / point /
+    /// reference). Creates the tier on the active bundle via the engine.
+    fn render_new_tier(&mut self, ctx: &egui::Context) {
+        if self.pending_new_tier.is_none() {
+            return;
+        }
+        let mut create = false;
+        let mut cancel = false;
+        let mut keep_open = true;
+        if let Some(draft) = self.pending_new_tier.as_mut() {
+            egui::Window::new("New tier")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut keep_open)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        let resp = ui
+                            .add(egui::TextEdit::singleline(&mut draft.name).desired_width(220.0));
+                        if draft.just_started {
+                            resp.request_focus();
+                            draft.just_started = false;
+                        }
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            create = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Type:");
+                        ui.selectable_value(&mut draft.tier_type, TierType::Interval, "Interval");
+                        ui.selectable_value(&mut draft.tier_type, TierType::Point, "Point");
+                        ui.selectable_value(&mut draft.tier_type, TierType::Reference, "Reference");
+                    });
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let can_create = !draft.name.trim().is_empty();
+                        if ui
+                            .add_enabled(can_create, egui::Button::new("Create"))
+                            .clicked()
+                        {
+                            create = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+        }
+        if !keep_open {
+            cancel = true;
+        }
+        if create {
+            self.commit_new_tier();
+        } else if cancel {
+            self.pending_new_tier = None;
+        }
+    }
+
+    fn commit_new_tier(&mut self) {
+        let Some(draft) = self.pending_new_tier.as_ref() else {
+            return;
+        };
+        let (bundle_id, name, tier_type) = (
+            draft.bundle_id,
+            draft.name.trim().to_string(),
+            draft.tier_type,
+        );
+        if name.is_empty() {
+            return;
+        }
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        match project.add_tier(&sadda_engine::TierSpec::new(bundle_id, &name, tier_type)) {
+            Ok(_) => {
+                self.error = None;
+                self.pending_new_tier = None;
+                self.set_info(format!("Created tier “{name}”."));
+            }
+            Err(e) => self.set_error(format!("Create tier failed: {e}")),
+        }
+    }
+
+    /// Tier-rename modal (mirrors the bundle rename).
+    fn render_pending_tier_rename(&mut self, ctx: &egui::Context) {
+        if self.pending_tier_rename.is_none() {
+            return;
+        }
+        let mut commit = false;
+        let mut cancel = false;
+        let mut keep_open = true;
+        if let Some(pending) = self.pending_tier_rename.as_mut() {
+            egui::Window::new("Rename tier")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut keep_open)
+                .show(ctx, |ui| {
+                    let resp =
+                        ui.add(egui::TextEdit::singleline(&mut pending.name).desired_width(260.0));
+                    if pending.just_started {
+                        resp.request_focus();
+                        pending.just_started = false;
+                    }
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        commit = true;
+                    }
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let can_save = !pending.name.trim().is_empty();
+                        if ui
+                            .add_enabled(can_save, egui::Button::new("Save"))
+                            .clicked()
+                        {
+                            commit = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+        }
+        if !keep_open {
+            cancel = true;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            cancel = true;
+        }
+        if commit {
+            let Some(pending) = self.pending_tier_rename.as_ref() else {
+                return;
+            };
+            let (id, new_name) = (pending.id, pending.name.trim().to_string());
+            if new_name.is_empty() {
+                return;
+            }
+            let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+                return;
+            };
+            match project.rename_tier(id, &new_name) {
+                Ok(()) => {
+                    self.error = None;
+                    self.pending_tier_rename = None;
+                    self.set_info(format!("Renamed tier to “{new_name}”."));
+                }
+                Err(e) => self.set_error(format!("Rename tier failed: {e}")),
+            }
+        } else if cancel {
+            self.pending_tier_rename = None;
+        }
+    }
+
+    /// Tier-delete confirmation (mirrors the bundle delete).
+    fn render_pending_tier_delete(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_tier_delete.as_ref() else {
+            return;
+        };
+        let (id, name) = (pending.id, pending.name.clone());
+        let mut action: Option<bool> = None;
+        let mut is_open = true;
+        egui::Window::new("Delete tier?")
+            .open(&mut is_open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Permanently delete tier “{name}” and all of its annotations?"
+                ));
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(
+                            egui::RichText::new("Delete")
+                                .color(egui::Color32::from_rgb(220, 80, 80)),
+                        )
+                        .clicked()
+                    {
+                        action = Some(true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        action = Some(false);
+                    }
+                });
+            });
+        if !is_open {
+            action = Some(false);
+        }
+        match action {
+            Some(true) => {
+                if let AppState::ProjectLoaded { project, .. } = &self.app_state {
+                    match project.delete_tier(id) {
+                        Ok(()) => {
+                            self.error = None;
+                            // Clear any selection/draft that referenced the gone tier.
+                            self.selected_annotation = None;
+                            self.draft_edit = DraftEdit::None;
+                            self.set_info(format!("Deleted tier “{name}”."));
+                        }
+                        Err(e) => self.set_error(format!("Delete tier failed: {e}")),
+                    }
+                }
+                self.pending_tier_delete = None;
+            }
+            Some(false) => self.pending_tier_delete = None,
+            None => {}
         }
     }
 
@@ -3242,6 +3486,11 @@ impl eframe::App for SaddaApp {
         // Bundle-rename modal.
         self.render_pending_rename(ui.ctx());
 
+        // Tier-lifecycle modals (create / rename / delete).
+        self.render_new_tier(ui.ctx());
+        self.render_pending_tier_rename(ui.ctx());
+        self.render_pending_tier_delete(ui.ctx());
+
         // A1 provenance & citations modal.
         self.render_provenance_view(ui.ctx());
 
@@ -4430,9 +4679,22 @@ impl SaddaApp {
                 return;
             }
         };
+        // Tier-lifecycle requests (create / rename / delete) raised below
+        // are applied after the `&project` borrow ends — same snapshot
+        // discipline as the selection state.
+        let mut tier_op: Option<TierOp> = None;
+        ui.horizontal(|ui| {
+            if ui.button("➕ New tier…").clicked() {
+                tier_op = Some(TierOp::New);
+            }
+            ui.label(
+                egui::RichText::new("right-click a tier name to rename or delete")
+                    .weak()
+                    .small(),
+            );
+        });
         if tiers.is_empty() {
             ui.label(egui::RichText::new("(no tiers in this bundle yet)").italics());
-            return;
         }
         // Snapshot the selection up-front; any click handled inside
         // the lane render mutates the snapshot, which we copy back
@@ -4463,7 +4725,22 @@ impl SaddaApp {
                         egui::Vec2::new(SIGNAL_LEFT_GUTTER, TIER_LANE_HEIGHT),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
-                            ui.label(egui::RichText::new(truncate_label(&tier.name, 16)).strong());
+                            let name_resp = ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(truncate_label(&tier.name, 16)).strong(),
+                                )
+                                .sense(egui::Sense::click()),
+                            );
+                            name_resp.context_menu(|ui| {
+                                if ui.button("Rename tier…").clicked() {
+                                    tier_op = Some(TierOp::Rename(tier.id, tier.name.clone()));
+                                    ui.close();
+                                }
+                                if ui.button("Delete tier").clicked() {
+                                    tier_op = Some(TierOp::Delete(tier.id, tier.name.clone()));
+                                    ui.close();
+                                }
+                            });
                         },
                     );
                     // Right: time-positioned lane.
@@ -4633,6 +4910,29 @@ impl SaddaApp {
         // ---- Inline label edit request -----------------------------
         if let Some(req) = label_edit_request {
             self.label_edit = Some(req);
+        }
+
+        // ---- Tier-lifecycle requests (apply after &project ended) --
+        match tier_op {
+            Some(TierOp::New) => {
+                self.pending_new_tier = Some(NewTierDraft {
+                    bundle_id,
+                    name: String::new(),
+                    tier_type: TierType::Interval,
+                    just_started: true,
+                });
+            }
+            Some(TierOp::Rename(id, name)) => {
+                self.pending_tier_rename = Some(PendingTierRename {
+                    id,
+                    name,
+                    just_started: true,
+                });
+            }
+            Some(TierOp::Delete(id, name)) => {
+                self.pending_tier_delete = Some(PendingTierDelete { id, name });
+            }
+            None => {}
         }
     }
 
