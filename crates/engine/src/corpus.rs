@@ -400,6 +400,11 @@ pub struct Interval {
     /// Parent annotation id in the parent tier (required if the tier has a
     /// parent; null otherwise).
     pub parent_annotation_id: Option<i64>,
+    /// Annotation status — one of the rubric-defined status strings, or
+    /// `None` for an untouched annotation. See [`Project::set_interval_status`].
+    pub status: Option<String>,
+    /// Free-text note, settable on an annotation of any status (incl. none).
+    pub note: Option<String>,
     /// Freeform JSON payload.
     pub extra: Option<String>,
 }
@@ -417,6 +422,11 @@ pub struct IntervalSpec {
     pub label: Option<String>,
     /// Parent annotation id (required if tier has a parent; rejected otherwise).
     pub parent_annotation_id: Option<i64>,
+    /// Annotation status (one of the rubric-defined statuses, or `None`).
+    /// Validated against the rubric's status set on insert/update.
+    pub status: Option<String>,
+    /// Free-text note.
+    pub note: Option<String>,
     /// JSON `extra` payload.
     pub extra: Option<String>,
 }
@@ -434,6 +444,11 @@ pub struct Point {
     pub label: Option<String>,
     /// Parent annotation id.
     pub parent_annotation_id: Option<i64>,
+    /// Annotation status — one of the rubric-defined status strings, or
+    /// `None`. See [`Project::set_point_status`].
+    pub status: Option<String>,
+    /// Free-text note, settable on an annotation of any status (incl. none).
+    pub note: Option<String>,
     /// JSON `extra` payload.
     pub extra: Option<String>,
 }
@@ -449,6 +464,10 @@ pub struct PointSpec {
     pub label: Option<String>,
     /// Parent annotation id (required if tier has a parent).
     pub parent_annotation_id: Option<i64>,
+    /// Annotation status (one of the rubric-defined statuses, or `None`).
+    pub status: Option<String>,
+    /// Free-text note.
+    pub note: Option<String>,
     /// JSON `extra` payload.
     pub extra: Option<String>,
 }
@@ -472,6 +491,81 @@ pub struct Reference {
     pub parent_annotation_id: Option<i64>,
     /// JSON `extra` payload.
     pub extra: Option<String>,
+}
+
+/// The project's annotation rubric (one per project): the scheme that
+/// frames manual annotation — free-text guidelines, the allowed status
+/// vocabulary, and per-tier-name controlled vocabularies. Stored as the
+/// singleton `rubric` row (+ `rubric_status` / `rubric_tier` /
+/// `controlled_vocabulary`). See [`Project::set_rubric`].
+#[derive(Debug, Clone)]
+pub struct Rubric {
+    /// Always 1 (the rubric is a per-project singleton).
+    pub id: i64,
+    /// Human-readable rubric name.
+    pub name: String,
+    /// Monotonic version integer (bumped by callers when the scheme changes;
+    /// full version history is a later slice).
+    pub version: i64,
+    /// Free-text annotation guidelines (the prose that used to live in a
+    /// separate document).
+    pub guidelines: Option<String>,
+    /// ISO 8601 UTC timestamp set when the rubric was first created.
+    pub created_at: String,
+    /// ISO 8601 UTC timestamp updated on each [`Project::set_rubric`].
+    pub updated_at: String,
+}
+
+/// One allowed annotation-status value, defined by the rubric. The status
+/// set is arbitrary and user-defined (e.g. `draft` / `done` / `flagged`).
+#[derive(Debug, Clone, Default)]
+pub struct StatusDef {
+    /// The status string stored on annotations.
+    pub value: String,
+    /// Optional human-readable description of what the status means.
+    pub description: Option<String>,
+    /// Display ordering (ascending).
+    pub sort_order: i64,
+}
+
+/// The rubric's configuration for a named tier role: guidelines plus whether
+/// its controlled vocabulary is closed (rejects out-of-vocab labels at
+/// entry) or open (accepts them, to be soft-flagged). Keyed by tier name.
+#[derive(Debug, Clone)]
+pub struct RubricTier {
+    /// `rubric_tier` row id.
+    pub id: i64,
+    /// Tier name this configuration applies to (matches [`Tier::name`]).
+    pub tier_name: String,
+    /// Optional per-tier annotation guidance.
+    pub description: Option<String>,
+    /// When true the controlled vocabulary is closed: a non-empty label not
+    /// in the vocabulary is rejected on insert/update.
+    pub closed_vocabulary: bool,
+}
+
+/// One controlled-vocabulary entry (an allowed label) for a tier.
+#[derive(Debug, Clone, Default)]
+pub struct VocabEntry {
+    /// The allowed label value.
+    pub value: String,
+    /// Optional gloss / description of the label.
+    pub description: Option<String>,
+    /// Display ordering (ascending).
+    pub sort_order: i64,
+}
+
+/// Result of checking a label against a tier's controlled vocabulary, for
+/// UIs that want to autocomplete and soft-flag out-of-vocab labels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LabelCheck {
+    /// Whether the tier has any controlled vocabulary defined at all.
+    pub has_vocabulary: bool,
+    /// Whether the tier's vocabulary is closed.
+    pub closed: bool,
+    /// Whether the label is in the vocabulary (true for an empty label, and
+    /// true when no vocabulary is defined — nothing to be out of).
+    pub in_vocabulary: bool,
 }
 
 /// Registration row for a Parquet sidecar holding a dense tier's data.
@@ -1422,16 +1516,20 @@ impl Project {
             )));
         }
         self.enforce_cardinality(&tier, "annotation_interval", spec.parent_annotation_id)?;
+        self.validate_annotation(&tier.name, spec.label.as_deref(), spec.status.as_deref())?;
         let id: i64 = self.conn.query_row(
             "INSERT INTO annotation_interval \
-                (tier_id, start_seconds, end_seconds, label, parent_annotation_id, extra) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id",
+                (tier_id, start_seconds, end_seconds, label, parent_annotation_id, \
+                 status, note, extra) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING id",
             rusqlite::params![
                 spec.tier_id,
                 spec.start_seconds,
                 spec.end_seconds,
                 spec.label,
                 spec.parent_annotation_id,
+                spec.status,
+                spec.note,
                 spec.extra,
             ],
             |row| row.get(0),
@@ -1471,10 +1569,11 @@ impl Project {
             )));
         }
         self.enforce_cardinality(&tier, "annotation_interval", spec.parent_annotation_id)?;
+        self.validate_annotation(&tier.name, spec.label.as_deref(), spec.status.as_deref())?;
         self.conn.execute(
             "UPDATE annotation_interval \
                 SET start_seconds = ?2, end_seconds = ?3, label = ?4, \
-                    parent_annotation_id = ?5, extra = ?6 \
+                    parent_annotation_id = ?5, status = ?6, note = ?7, extra = ?8 \
               WHERE id = ?1",
             rusqlite::params![
                 id,
@@ -1482,6 +1581,8 @@ impl Project {
                 spec.end_seconds,
                 spec.label,
                 spec.parent_annotation_id,
+                spec.status,
+                spec.note,
                 spec.extra,
             ],
         )?;
@@ -1501,7 +1602,8 @@ impl Project {
     /// Lists intervals for a tier in (start_seconds, id) order.
     pub fn intervals(&self, tier_id: i64) -> Result<Vec<Interval>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, tier_id, start_seconds, end_seconds, label, parent_annotation_id, extra \
+            "SELECT id, tier_id, start_seconds, end_seconds, label, parent_annotation_id, \
+                    status, note, extra \
              FROM annotation_interval WHERE tier_id = ?1 ORDER BY start_seconds, id",
         )?;
         let rows = stmt
@@ -1513,7 +1615,9 @@ impl Project {
                     end_seconds: row.get(3)?,
                     label: row.get(4)?,
                     parent_annotation_id: row.get(5)?,
-                    extra: row.get(6)?,
+                    status: row.get(6)?,
+                    note: row.get(7)?,
+                    extra: row.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1530,15 +1634,18 @@ impl Project {
             )));
         }
         self.enforce_cardinality(&tier, "annotation_point", spec.parent_annotation_id)?;
+        self.validate_annotation(&tier.name, spec.label.as_deref(), spec.status.as_deref())?;
         let id: i64 = self.conn.query_row(
             "INSERT INTO annotation_point \
-                (tier_id, time_seconds, label, parent_annotation_id, extra) \
-             VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
+                (tier_id, time_seconds, label, parent_annotation_id, status, note, extra) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING id",
             rusqlite::params![
                 spec.tier_id,
                 spec.time_seconds,
                 spec.label,
                 spec.parent_annotation_id,
+                spec.status,
+                spec.note,
                 spec.extra,
             ],
             |row| row.get(0),
@@ -1571,15 +1678,19 @@ impl Project {
             )));
         }
         self.enforce_cardinality(&tier, "annotation_point", spec.parent_annotation_id)?;
+        self.validate_annotation(&tier.name, spec.label.as_deref(), spec.status.as_deref())?;
         self.conn.execute(
             "UPDATE annotation_point \
-                SET time_seconds = ?2, label = ?3, parent_annotation_id = ?4, extra = ?5 \
+                SET time_seconds = ?2, label = ?3, parent_annotation_id = ?4, \
+                    status = ?5, note = ?6, extra = ?7 \
               WHERE id = ?1",
             rusqlite::params![
                 id,
                 spec.time_seconds,
                 spec.label,
                 spec.parent_annotation_id,
+                spec.status,
+                spec.note,
                 spec.extra,
             ],
         )?;
@@ -1598,7 +1709,7 @@ impl Project {
     /// Lists points for a tier in (time_seconds, id) order.
     pub fn points(&self, tier_id: i64) -> Result<Vec<Point>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, tier_id, time_seconds, label, parent_annotation_id, extra \
+            "SELECT id, tier_id, time_seconds, label, parent_annotation_id, status, note, extra \
              FROM annotation_point WHERE tier_id = ?1 ORDER BY time_seconds, id",
         )?;
         let rows = stmt
@@ -1609,11 +1720,325 @@ impl Project {
                     time_seconds: row.get(2)?,
                     label: row.get(3)?,
                     parent_annotation_id: row.get(4)?,
-                    extra: row.get(5)?,
+                    status: row.get(5)?,
+                    note: row.get(6)?,
+                    extra: row.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    // ====================================================================
+    // Annotation rubric (slice S1): the per-project scheme — guidelines,
+    // the allowed status vocabulary, and per-tier controlled vocabularies.
+    // ====================================================================
+
+    /// Creates or updates the project's singleton rubric (guidelines +
+    /// version). Returns the stored [`Rubric`]. `created_at` is preserved
+    /// across updates; `updated_at` is refreshed.
+    pub fn set_rubric(&self, name: &str, version: i64, guidelines: Option<&str>) -> Result<Rubric> {
+        self.conn.execute(
+            "INSERT INTO rubric (id, name, version, guidelines, updated_at) \
+             VALUES (1, ?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) \
+             ON CONFLICT(id) DO UPDATE SET \
+                 name = excluded.name, version = excluded.version, \
+                 guidelines = excluded.guidelines, \
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            rusqlite::params![name, version, guidelines],
+        )?;
+        self.rubric()?
+            .ok_or_else(|| EngineError::Corpus("rubric missing after upsert".into()))
+    }
+
+    /// Reads the project's rubric, or `None` if none has been defined.
+    pub fn rubric(&self) -> Result<Option<Rubric>> {
+        self.conn
+            .query_row(
+                "SELECT id, name, version, guidelines, created_at, updated_at \
+                 FROM rubric WHERE id = 1",
+                [],
+                |row| {
+                    Ok(Rubric {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        version: row.get(2)?,
+                        guidelines: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Errors unless a rubric exists; returns the singleton id (always 1).
+    fn require_rubric_id(&self) -> Result<i64> {
+        if self.rubric()?.is_some() {
+            Ok(1)
+        } else {
+            Err(EngineError::Corpus(
+                "no rubric defined; call set_rubric first".into(),
+            ))
+        }
+    }
+
+    /// Replaces the rubric's status vocabulary with `statuses` (the allowed
+    /// annotation-status strings). Requires a rubric to exist.
+    pub fn set_rubric_statuses(&self, statuses: &[StatusDef]) -> Result<()> {
+        let rid = self.require_rubric_id()?;
+        self.conn
+            .execute("DELETE FROM rubric_status WHERE rubric_id = ?1", [rid])?;
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO rubric_status (rubric_id, value, description, sort_order) \
+             VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for s in statuses {
+            stmt.execute(rusqlite::params![rid, s.value, s.description, s.sort_order])?;
+        }
+        Ok(())
+    }
+
+    /// Reads the rubric's status vocabulary in (sort_order, value) order.
+    pub fn rubric_statuses(&self) -> Result<Vec<StatusDef>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT value, description, sort_order FROM rubric_status \
+             WHERE rubric_id = 1 ORDER BY sort_order, value",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(StatusDef {
+                    value: row.get(0)?,
+                    description: row.get(1)?,
+                    sort_order: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Creates or updates the rubric configuration for a tier name
+    /// (guidelines + open/closed vocabulary). Requires a rubric to exist.
+    pub fn set_rubric_tier(
+        &self,
+        tier_name: &str,
+        description: Option<&str>,
+        closed: bool,
+    ) -> Result<RubricTier> {
+        let rid = self.require_rubric_id()?;
+        self.conn.execute(
+            "INSERT INTO rubric_tier (rubric_id, tier_name, description, closed_vocabulary) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(rubric_id, tier_name) DO UPDATE SET \
+                 description = excluded.description, \
+                 closed_vocabulary = excluded.closed_vocabulary",
+            rusqlite::params![rid, tier_name, description, closed as i64],
+        )?;
+        self.rubric_tier(tier_name)?
+            .ok_or_else(|| EngineError::Corpus("rubric_tier missing after upsert".into()))
+    }
+
+    /// Reads the rubric configuration for a tier name, or `None`.
+    pub fn rubric_tier(&self, tier_name: &str) -> Result<Option<RubricTier>> {
+        self.conn
+            .query_row(
+                "SELECT id, tier_name, description, closed_vocabulary \
+                 FROM rubric_tier WHERE rubric_id = 1 AND tier_name = ?1",
+                [tier_name],
+                |row| {
+                    Ok(RubricTier {
+                        id: row.get(0)?,
+                        tier_name: row.get(1)?,
+                        description: row.get(2)?,
+                        closed_vocabulary: row.get::<_, i64>(3)? != 0,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// `rubric_tier` row id for a tier name, if defined.
+    fn rubric_tier_id(&self, tier_name: &str) -> Result<Option<i64>> {
+        self.conn
+            .query_row(
+                "SELECT id FROM rubric_tier WHERE rubric_id = 1 AND tier_name = ?1",
+                [tier_name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Replaces the controlled vocabulary (allowed labels) for a tier name.
+    /// Auto-creates an open `rubric_tier` row if none exists yet. Requires a
+    /// rubric to exist.
+    pub fn set_controlled_vocabulary(&self, tier_name: &str, entries: &[VocabEntry]) -> Result<()> {
+        let rid = self.require_rubric_id()?;
+        let rt_id = match self.rubric_tier_id(tier_name)? {
+            Some(id) => id,
+            None => {
+                self.conn.execute(
+                    "INSERT INTO rubric_tier (rubric_id, tier_name, closed_vocabulary) \
+                     VALUES (?1, ?2, 0)",
+                    rusqlite::params![rid, tier_name],
+                )?;
+                self.conn.last_insert_rowid()
+            }
+        };
+        self.conn.execute(
+            "DELETE FROM controlled_vocabulary WHERE rubric_tier_id = ?1",
+            [rt_id],
+        )?;
+        let mut stmt = self.conn.prepare(
+            "INSERT INTO controlled_vocabulary (rubric_tier_id, value, description, sort_order) \
+             VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for e in entries {
+            stmt.execute(rusqlite::params![
+                rt_id,
+                e.value,
+                e.description,
+                e.sort_order
+            ])?;
+        }
+        Ok(())
+    }
+
+    /// Reads the controlled vocabulary for a tier name in (sort_order, value)
+    /// order. Empty when the tier has no rubric configuration.
+    pub fn controlled_vocabulary(&self, tier_name: &str) -> Result<Vec<VocabEntry>> {
+        let Some(rt_id) = self.rubric_tier_id(tier_name)? else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.conn.prepare(
+            "SELECT value, description, sort_order FROM controlled_vocabulary \
+             WHERE rubric_tier_id = ?1 ORDER BY sort_order, value",
+        )?;
+        let rows = stmt
+            .query_map([rt_id], |row| {
+                Ok(VocabEntry {
+                    value: row.get(0)?,
+                    description: row.get(1)?,
+                    sort_order: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Checks a label against a tier's controlled vocabulary (for UIs that
+    /// autocomplete and soft-flag out-of-vocab labels). An empty/`None`
+    /// label, or a tier with no vocabulary, is always "in vocabulary".
+    pub fn label_check(&self, tier_name: &str, label: Option<&str>) -> Result<LabelCheck> {
+        let Some(rt) = self.rubric_tier(tier_name)? else {
+            return Ok(LabelCheck {
+                has_vocabulary: false,
+                closed: false,
+                in_vocabulary: true,
+            });
+        };
+        let vocab = self.controlled_vocabulary(tier_name)?;
+        let has_vocabulary = !vocab.is_empty();
+        let in_vocabulary = if !has_vocabulary {
+            true
+        } else {
+            match label {
+                None | Some("") => true,
+                Some(l) => vocab.iter().any(|v| v.value == l),
+            }
+        };
+        Ok(LabelCheck {
+            has_vocabulary,
+            closed: rt.closed_vocabulary,
+            in_vocabulary,
+        })
+    }
+
+    /// Validates a status string against the rubric's status vocabulary.
+    fn validate_status(&self, status: &str) -> Result<()> {
+        let statuses = self.rubric_statuses()?;
+        if statuses.iter().any(|s| s.value == status) {
+            Ok(())
+        } else {
+            let defined: Vec<&str> = statuses.iter().map(|s| s.value.as_str()).collect();
+            Err(EngineError::Corpus(format!(
+                "annotation status {status:?} is not defined in the rubric (defined: {defined:?})"
+            )))
+        }
+    }
+
+    /// Validates a label + status pair for an annotation on `tier_name`:
+    /// status must be a rubric-defined value (when set), and a closed tier
+    /// rejects a non-empty out-of-vocabulary label.
+    fn validate_annotation(
+        &self,
+        tier_name: &str,
+        label: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<()> {
+        if let Some(s) = status {
+            self.validate_status(s)?;
+        }
+        if let Some(l) = label {
+            if !l.is_empty() {
+                let check = self.label_check(tier_name, Some(l))?;
+                if check.closed && !check.in_vocabulary {
+                    return Err(EngineError::Corpus(format!(
+                        "label {l:?} is not in the closed controlled vocabulary \
+                         for tier {tier_name:?}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Sets the status + note on an interval annotation, validating the
+    /// status against the rubric. Either may be `None` to clear it.
+    pub fn set_interval_status(
+        &self,
+        id: i64,
+        status: Option<&str>,
+        note: Option<&str>,
+    ) -> Result<()> {
+        if let Some(s) = status {
+            self.validate_status(s)?;
+        }
+        let n = self.conn.execute(
+            "UPDATE annotation_interval SET status = ?2, note = ?3 WHERE id = ?1",
+            rusqlite::params![id, status, note],
+        )?;
+        if n == 0 {
+            return Err(EngineError::Corpus(format!(
+                "no interval annotation with id {id}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Sets the status + note on a point annotation, validating the status
+    /// against the rubric. Either may be `None` to clear it.
+    pub fn set_point_status(
+        &self,
+        id: i64,
+        status: Option<&str>,
+        note: Option<&str>,
+    ) -> Result<()> {
+        if let Some(s) = status {
+            self.validate_status(s)?;
+        }
+        let n = self.conn.execute(
+            "UPDATE annotation_point SET status = ?2, note = ?3 WHERE id = ?1",
+            rusqlite::params![id, status, note],
+        )?;
+        if n == 0 {
+            return Err(EngineError::Corpus(format!(
+                "no point annotation with id {id}"
+            )));
+        }
+        Ok(())
     }
 
     /// Inserts a reference annotation.
@@ -3572,6 +3997,8 @@ mod tests {
                     end_seconds: e,
                     label: Some(lbl.into()),
                     parent_annotation_id: None,
+                    status: None,
+                    note: None,
                     extra: None,
                 })
                 .unwrap();
@@ -3814,6 +4241,173 @@ mod tests {
             "expected 'not empty' in error, got: {msg}"
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rubric_status_note_and_controlled_vocabulary() {
+        let root = unique_dir("rubric");
+        let _ = std::fs::remove_dir_all(&root);
+        let source_wav =
+            std::env::temp_dir().join(format!("sadda_rubric_{}.wav", std::process::id()));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("b", &source_wav).unwrap();
+        let tier_id = project
+            .add_tier(&TierSpec::new(bundle_id, "phones", TierType::Interval))
+            .unwrap();
+
+        // No rubric yet: a plain interval inserts fine (status/note default to
+        // None), but setting a status is rejected (no status vocabulary).
+        let iv = project
+            .add_interval(&IntervalSpec {
+                tier_id,
+                start_seconds: 0.0,
+                end_seconds: 0.1,
+                label: Some("a".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(project.intervals(tier_id).unwrap()[0].status.is_none());
+        assert!(project.set_interval_status(iv, Some("done"), None).is_err());
+
+        // Define the rubric + an arbitrary status vocabulary.
+        let rubric = project
+            .set_rubric("IPA segmentation", 1, Some("Label each phone."))
+            .unwrap();
+        assert_eq!(rubric.id, 1);
+        project
+            .set_rubric_statuses(&[
+                StatusDef {
+                    value: "draft".into(),
+                    description: None,
+                    sort_order: 0,
+                },
+                StatusDef {
+                    value: "done".into(),
+                    description: Some("reviewed".into()),
+                    sort_order: 1,
+                },
+            ])
+            .unwrap();
+        let statuses: Vec<String> = project
+            .rubric_statuses()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.value)
+            .collect();
+        assert_eq!(statuses, ["draft", "done"]);
+
+        // Status + note now round-trip; an undefined status is rejected; a
+        // note may be set on an annotation of any status (including none).
+        project
+            .set_interval_status(iv, Some("done"), Some("looks good"))
+            .unwrap();
+        let row = project.intervals(tier_id).unwrap().remove(0);
+        assert_eq!(row.status.as_deref(), Some("done"));
+        assert_eq!(row.note.as_deref(), Some("looks good"));
+        assert!(
+            project
+                .set_interval_status(iv, Some("bogus"), None)
+                .is_err()
+        );
+        project
+            .set_interval_status(iv, None, Some("revisit"))
+            .unwrap();
+        let row = project.intervals(tier_id).unwrap().remove(0);
+        assert!(row.status.is_none());
+        assert_eq!(row.note.as_deref(), Some("revisit"));
+
+        // Controlled vocabulary, open by default: out-of-vocab is flagged but
+        // still accepted on insert.
+        project
+            .set_controlled_vocabulary(
+                "phones",
+                &[
+                    VocabEntry {
+                        value: "a".into(),
+                        description: None,
+                        sort_order: 0,
+                    },
+                    VocabEntry {
+                        value: "i".into(),
+                        description: None,
+                        sort_order: 1,
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(project.controlled_vocabulary("phones").unwrap().len(), 2);
+        let chk = project.label_check("phones", Some("a")).unwrap();
+        assert!(chk.has_vocabulary && !chk.closed && chk.in_vocabulary);
+        let chk = project.label_check("phones", Some("zzz")).unwrap();
+        assert!(chk.has_vocabulary && !chk.closed && !chk.in_vocabulary);
+        project
+            .add_interval(&IntervalSpec {
+                tier_id,
+                start_seconds: 0.2,
+                end_seconds: 0.3,
+                label: Some("zzz".into()),
+                ..Default::default()
+            })
+            .expect("open vocabulary accepts out-of-vocab labels");
+
+        // Close the vocabulary: out-of-vocab labels are now rejected at entry,
+        // but in-vocab / empty / absent labels still insert.
+        project
+            .set_rubric_tier("phones", Some("IPA phones"), true)
+            .unwrap();
+        assert!(
+            project
+                .rubric_tier("phones")
+                .unwrap()
+                .unwrap()
+                .closed_vocabulary
+        );
+        assert!(
+            project
+                .add_interval(&IntervalSpec {
+                    tier_id,
+                    start_seconds: 0.3,
+                    end_seconds: 0.4,
+                    label: Some("zzz".into()),
+                    ..Default::default()
+                })
+                .is_err()
+        );
+        project
+            .add_interval(&IntervalSpec {
+                tier_id,
+                start_seconds: 0.4,
+                end_seconds: 0.5,
+                label: Some("i".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        project
+            .add_interval(&IntervalSpec {
+                tier_id,
+                start_seconds: 0.5,
+                end_seconds: 0.6,
+                label: None,
+                ..Default::default()
+            })
+            .unwrap();
+
+        // A tier with no rubric configuration is unconstrained.
+        let chk = project.label_check("untouched", Some("anything")).unwrap();
+        assert!(!chk.has_vocabulary && !chk.closed && chk.in_vocabulary);
+
+        // set_rubric updates the singleton in place, preserving created_at.
+        let updated = project
+            .set_rubric("IPA segmentation", 2, Some("v2 guidelines"))
+            .unwrap();
+        assert_eq!(updated.id, 1);
+        assert_eq!(updated.version, 2);
+        assert_eq!(updated.created_at, rubric.created_at);
+
+        let _ = std::fs::remove_file(&source_wav);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

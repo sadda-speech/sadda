@@ -32,9 +32,10 @@ pub use clinical::{
 };
 pub use corpus::{
     Bundle, BundleSpec, Calibration, DerivedSignal, Instrument, InstrumentSpec, Interval,
-    IntervalSpec, Point, PointSpec, ProcessingRunKind, ProcessingRunRow, ProcessingRunSpec,
-    ProcessingRunStatus, Project, RecipeRun, Reference, ReferenceSpec, Session, SessionSpec,
-    Speaker, SpeakerSpec, Tier, TierRows, TierSpec, TierType,
+    IntervalSpec, LabelCheck, Point, PointSpec, ProcessingRunKind, ProcessingRunRow,
+    ProcessingRunSpec, ProcessingRunStatus, Project, RecipeRun, Reference, ReferenceSpec, Rubric,
+    RubricTier, Session, SessionSpec, Speaker, SpeakerSpec, StatusDef, Tier, TierRows, TierSpec,
+    TierType, VocabEntry,
 };
 pub use error::{EngineError, Result};
 pub use live::{

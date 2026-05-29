@@ -16,15 +16,20 @@ __all__ = [
     "FormantFrame",
     "Instrument",
     "Interval",
+    "LabelCheck",
     "Ltas",
     "PerturbationReport",
     "Point",
     "ProcessingRun",
     "Project",
     "Reference",
+    "Rubric",
+    "RubricTier",
     "Session",
     "Speaker",
+    "StatusDef",
     "Tier",
+    "VocabEntry",
     "abi",
     "avqi",
     "blackman",
@@ -366,9 +371,42 @@ class Interval:
         Parent annotation id in the parent tier.
         """
     @property
+    def status(self) -> typing.Optional[builtins.str]:
+        r"""
+        Annotation status (a rubric-defined status string), or `None`.
+        """
+    @property
+    def note(self) -> typing.Optional[builtins.str]:
+        r"""
+        Free-text note, or `None`.
+        """
+    @property
     def extra(self) -> typing.Optional[builtins.str]:
         r"""
         JSON `extra` payload.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class LabelCheck:
+    r"""
+    Result of checking a label against a tier's controlled vocabulary.
+    """
+    @property
+    def has_vocabulary(self) -> builtins.bool:
+        r"""
+        Whether the tier has any controlled vocabulary defined.
+        """
+    @property
+    def closed(self) -> builtins.bool:
+        r"""
+        Whether the tier's vocabulary is closed.
+        """
+    @property
+    def in_vocabulary(self) -> builtins.bool:
+        r"""
+        Whether the label is in the vocabulary (true for empty/no label, and
+        when no vocabulary is defined).
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -493,6 +531,16 @@ class Point:
     def parent_annotation_id(self) -> typing.Optional[builtins.int]:
         r"""
         Parent annotation id.
+        """
+    @property
+    def status(self) -> typing.Optional[builtins.str]:
+        r"""
+        Annotation status (a rubric-defined status string), or `None`.
+        """
+    @property
+    def note(self) -> typing.Optional[builtins.str]:
+        r"""
+        Free-text note, or `None`.
         """
     @property
     def extra(self) -> typing.Optional[builtins.str]:
@@ -723,7 +771,7 @@ class Project:
         tier has child tiers (delete those first) or if `tier_id` does
         not exist.
         """
-    def add_interval(self, tier_id: builtins.int, start_seconds: builtins.float, end_seconds: builtins.float, *, label: typing.Optional[builtins.str] = None, parent_annotation_id: typing.Optional[builtins.int] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
+    def add_interval(self, tier_id: builtins.int, start_seconds: builtins.float, end_seconds: builtins.float, *, label: typing.Optional[builtins.str] = None, parent_annotation_id: typing.Optional[builtins.int] = None, status: typing.Optional[builtins.str] = None, note: typing.Optional[builtins.str] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
         r"""
         Inserts an interval annotation. Enforces parent-child cardinality at
         insert time; raises `ValueError` on cardinality violation.
@@ -732,7 +780,7 @@ class Project:
         r"""
         Lists intervals for a tier in (start_seconds, id) order.
         """
-    def add_point(self, tier_id: builtins.int, time_seconds: builtins.float, *, label: typing.Optional[builtins.str] = None, parent_annotation_id: typing.Optional[builtins.int] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
+    def add_point(self, tier_id: builtins.int, time_seconds: builtins.float, *, label: typing.Optional[builtins.str] = None, parent_annotation_id: typing.Optional[builtins.int] = None, status: typing.Optional[builtins.str] = None, note: typing.Optional[builtins.str] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
         r"""
         Inserts a point annotation. Enforces parent-child cardinality.
         """
@@ -750,6 +798,56 @@ class Project:
         Lists references for a tier in id order. Named `references_for`
         rather than `references` (which collides with Rust's `ref` family
         of grep targets).
+        """
+    def set_rubric(self, name: builtins.str, version: builtins.int = 1, guidelines: typing.Optional[builtins.str] = None) -> Rubric:
+        r"""
+        Creates or updates the project's singleton annotation rubric.
+        """
+    def rubric(self) -> typing.Optional[Rubric]:
+        r"""
+        Reads the project's rubric, or `None` if none has been defined.
+        """
+    def set_rubric_statuses(self, statuses: typing.Sequence[tuple[builtins.str, typing.Optional[builtins.str], builtins.int]]) -> None:
+        r"""
+        Replaces the rubric's status vocabulary. `statuses` is a list of
+        `(value, description, sort_order)` tuples. Requires a rubric.
+        """
+    def rubric_statuses(self) -> builtins.list[StatusDef]:
+        r"""
+        Reads the rubric's status vocabulary in (sort_order, value) order.
+        """
+    def set_rubric_tier(self, tier_name: builtins.str, description: typing.Optional[builtins.str] = None, closed: builtins.bool = False) -> RubricTier:
+        r"""
+        Creates or updates the rubric configuration for a tier name
+        (guidelines + open/closed vocabulary). Requires a rubric.
+        """
+    def rubric_tier(self, tier_name: builtins.str) -> typing.Optional[RubricTier]:
+        r"""
+        Reads the rubric configuration for a tier name, or `None`.
+        """
+    def set_controlled_vocabulary(self, tier_name: builtins.str, entries: typing.Sequence[tuple[builtins.str, typing.Optional[builtins.str], builtins.int]]) -> None:
+        r"""
+        Replaces the controlled vocabulary for a tier name. `entries` is a
+        list of `(value, description, sort_order)` tuples. Auto-creates an
+        open rubric-tier row if needed. Requires a rubric.
+        """
+    def controlled_vocabulary(self, tier_name: builtins.str) -> builtins.list[VocabEntry]:
+        r"""
+        Reads the controlled vocabulary for a tier name.
+        """
+    def label_check(self, tier_name: builtins.str, label: typing.Optional[builtins.str] = None) -> LabelCheck:
+        r"""
+        Checks a label against a tier's controlled vocabulary.
+        """
+    def set_interval_status(self, id: builtins.int, status: typing.Optional[builtins.str] = None, note: typing.Optional[builtins.str] = None) -> None:
+        r"""
+        Sets the status + note on an interval annotation, validating the
+        status against the rubric. Either may be `None` to clear it.
+        """
+    def set_point_status(self, id: builtins.int, status: typing.Optional[builtins.str] = None, note: typing.Optional[builtins.str] = None) -> None:
+        r"""
+        Sets the status + note on a point annotation, validating the status
+        against the rubric. Either may be `None` to clear it.
         """
     def write_continuous_numeric(self, tier_id: builtins.int, samples: numpy.typing.NDArray[numpy.float64], sample_rate_hz: builtins.float) -> builtins.int:
         r"""
@@ -877,6 +975,68 @@ class Reference:
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
+class Rubric:
+    r"""
+    The project's annotation rubric (one per project): guidelines + the
+    allowed status vocabulary + per-tier controlled vocabularies. Read-only
+    view; create/update via `Project.set_rubric(...)`.
+    """
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Always 1 (the rubric is a per-project singleton).
+        """
+    @property
+    def name(self) -> builtins.str:
+        r"""
+        Human-readable rubric name.
+        """
+    @property
+    def version(self) -> builtins.int:
+        r"""
+        Monotonic version integer.
+        """
+    @property
+    def guidelines(self) -> typing.Optional[builtins.str]:
+        r"""
+        Free-text annotation guidelines, or `None`.
+        """
+    @property
+    def created_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC creation timestamp.
+        """
+    @property
+    def updated_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC timestamp of the last update.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class RubricTier:
+    r"""
+    The rubric's configuration for a tier name: guidelines + open/closed
+    controlled vocabulary. Read-only view; set via `Project.set_rubric_tier`.
+    """
+    @property
+    def tier_name(self) -> builtins.str:
+        r"""
+        Tier name this configuration applies to.
+        """
+    @property
+    def description(self) -> typing.Optional[builtins.str]:
+        r"""
+        Optional per-tier annotation guidance.
+        """
+    @property
+    def closed_vocabulary(self) -> builtins.bool:
+        r"""
+        Whether the controlled vocabulary is closed (rejects out-of-vocab).
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
 class Session:
     r"""
     A recording session — a time-bounded block during which one or more
@@ -978,6 +1138,28 @@ class Speaker:
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
+class StatusDef:
+    r"""
+    One allowed annotation-status value defined by the rubric. Read-only view.
+    """
+    @property
+    def value(self) -> builtins.str:
+        r"""
+        The status string stored on annotations.
+        """
+    @property
+    def description(self) -> typing.Optional[builtins.str]:
+        r"""
+        Optional description of what the status means.
+        """
+    @property
+    def sort_order(self) -> builtins.int:
+        r"""
+        Display ordering (ascending).
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
 class Tier:
     r"""
     One annotation tier: the header row in `tier`. Annotation rows
@@ -1032,6 +1214,28 @@ class Tier:
     def created_at(self) -> builtins.str:
         r"""
         ISO 8601 UTC creation timestamp.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class VocabEntry:
+    r"""
+    One controlled-vocabulary entry (an allowed label) for a tier. Read-only.
+    """
+    @property
+    def value(self) -> builtins.str:
+        r"""
+        The allowed label value.
+        """
+    @property
+    def description(self) -> typing.Optional[builtins.str]:
+        r"""
+        Optional gloss / description of the label.
+        """
+    @property
+    def sort_order(self) -> builtins.int:
+        r"""
+        Display ordering (ascending).
         """
     def __repr__(self) -> builtins.str: ...
 
