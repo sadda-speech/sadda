@@ -2373,73 +2373,75 @@ impl SaddaApp {
             cancel = true;
         }
 
-        // Block a commit that the closed vocabulary would reject; the inline
-        // warning already explains why, and we keep the window open so the
-        // edit isn't lost.
         if commit {
-            if let Some(le) = self.label_edit.as_ref() {
-                if le.closed && is_out_of_vocab(&le.vocab, &le.text) {
-                    commit = false;
-                }
-            }
-        }
+            // Snapshot the edited values (immutable borrow), then apply via
+            // the project. The engine validates the label against the *live*
+            // controlled vocabulary — so a closed-tier rejection is a clear
+            // banner error, and the window stays open so the edit isn't lost.
+            // (We deliberately do NOT pre-block on the cached `le.vocab`,
+            // which can be stale if the rubric changed while the window was
+            // open — that silently dropped valid labels.)
+            let le = self.label_edit.as_ref().expect("checked above");
+            let kind = le.kind;
+            let tier_id = le.tier_id;
+            let annotation_id = le.annotation_id;
+            let new_label = (!le.text.is_empty()).then(|| le.text.clone());
+            let new_status = le.status.clone();
+            let new_note = (!le.note.is_empty()).then(|| le.note.clone());
 
-        if commit {
-            let le = self.label_edit.take().expect("checked above");
-            let AppState::ProjectLoaded { project, .. } = &self.app_state else {
-                return;
-            };
-            let new_label = (!le.text.is_empty()).then_some(le.text);
-            let new_status = le.status;
-            let new_note = (!le.note.is_empty()).then_some(le.note);
-            // Re-fetch the base row at commit so we preserve any non-edited
-            // fields that might have changed elsewhere (resize, move) since
-            // the window opened.
-            let result: Result<(), String> = match le.kind {
-                LabelEditKind::Interval => match project.intervals(le.tier_id) {
-                    Ok(rows) => match rows.into_iter().find(|r| r.id == le.annotation_id) {
-                        Some(existing) => project
-                            .update_interval(
-                                le.annotation_id,
-                                &sadda_engine::IntervalSpec {
-                                    tier_id: le.tier_id,
-                                    start_seconds: existing.start_seconds,
-                                    end_seconds: existing.end_seconds,
-                                    label: new_label,
-                                    parent_annotation_id: existing.parent_annotation_id,
-                                    status: new_status,
-                                    note: new_note,
-                                    extra: existing.extra,
-                                },
-                            )
-                            .map_err(|e| format!("Failed to save annotation: {e}")),
-                        None => Ok(()), // deleted concurrently
+            let result: Result<(), String> = match &self.app_state {
+                AppState::ProjectLoaded { project, .. } => match kind {
+                    LabelEditKind::Interval => match project.intervals(tier_id) {
+                        Ok(rows) => match rows.into_iter().find(|r| r.id == annotation_id) {
+                            // Re-fetch the base row so non-edited fields
+                            // (bounds, parent, extra) survive concurrent edits.
+                            Some(existing) => project
+                                .update_interval(
+                                    annotation_id,
+                                    &sadda_engine::IntervalSpec {
+                                        tier_id,
+                                        start_seconds: existing.start_seconds,
+                                        end_seconds: existing.end_seconds,
+                                        label: new_label,
+                                        parent_annotation_id: existing.parent_annotation_id,
+                                        status: new_status,
+                                        note: new_note,
+                                        extra: existing.extra,
+                                    },
+                                )
+                                .map_err(|e| format!("Failed to save annotation: {e}")),
+                            None => Ok(()), // deleted concurrently
+                        },
+                        Err(e) => Err(format!("Failed to reload interval: {e}")),
                     },
-                    Err(e) => Err(format!("Failed to reload interval: {e}")),
-                },
-                LabelEditKind::Point => match project.points(le.tier_id) {
-                    Ok(rows) => match rows.into_iter().find(|r| r.id == le.annotation_id) {
-                        Some(existing) => project
-                            .update_point(
-                                le.annotation_id,
-                                &sadda_engine::PointSpec {
-                                    tier_id: le.tier_id,
-                                    time_seconds: existing.time_seconds,
-                                    label: new_label,
-                                    parent_annotation_id: existing.parent_annotation_id,
-                                    status: new_status,
-                                    note: new_note,
-                                    extra: existing.extra,
-                                },
-                            )
-                            .map_err(|e| format!("Failed to save annotation: {e}")),
-                        None => Ok(()),
+                    LabelEditKind::Point => match project.points(tier_id) {
+                        Ok(rows) => match rows.into_iter().find(|r| r.id == annotation_id) {
+                            Some(existing) => project
+                                .update_point(
+                                    annotation_id,
+                                    &sadda_engine::PointSpec {
+                                        tier_id,
+                                        time_seconds: existing.time_seconds,
+                                        label: new_label,
+                                        parent_annotation_id: existing.parent_annotation_id,
+                                        status: new_status,
+                                        note: new_note,
+                                        extra: existing.extra,
+                                    },
+                                )
+                                .map_err(|e| format!("Failed to save annotation: {e}")),
+                            None => Ok(()),
+                        },
+                        Err(e) => Err(format!("Failed to reload point: {e}")),
                     },
-                    Err(e) => Err(format!("Failed to reload point: {e}")),
                 },
+                _ => Ok(()),
             };
-            if let Err(msg) = result {
-                self.set_error(msg);
+            match result {
+                // Success closes the window; failure keeps it open with the
+                // reason in the banner so the user can correct the label.
+                Ok(()) => self.label_edit = None,
+                Err(msg) => self.set_error(msg),
             }
         } else if cancel {
             self.label_edit = None;
@@ -3572,6 +3574,7 @@ fn render_interval_lane(
     new_cursor: &mut Option<f64>,
     new_draft_action: &mut Option<DraftAction>,
     label_edit_request: &mut Option<LabelEdit>,
+    request_delete: &mut bool,
 ) {
     let view_range = (view_end - view_start).max(1e-6);
     let lane_width = rect.width() as f64;
@@ -3710,6 +3713,69 @@ fn render_interval_lane(
     }
 
     // ----- Mouse interaction dispatch ---------------------------------
+
+    // Right-click an interval → context menu (edit / delete). Right-click
+    // also selects the interval under the pointer, so the menu's target stays
+    // stable while it's open: this frame we use the just-clicked id, on later
+    // frames the (now-applied) selection. `hover_pos` can't be used — it moves
+    // onto the menu popup and would blank the target.
+    let mut clicked_target: Option<i64> = None;
+    if response.secondary_clicked() {
+        if let Some(p) = response.interact_pointer_pos() {
+            if let Some(r) = rows.iter().find(|r| {
+                let x0 = rect.left() + ((r.start_seconds - view_start) * x_per_second) as f32;
+                let x1 = rect.left() + ((r.end_seconds - view_start) * x_per_second) as f32;
+                p.x >= x0 && p.x <= x1 && rect.y_range().contains(p.y)
+            }) {
+                clicked_target = Some(r.id);
+                *new_selection = Some(AnnotationSelection::Interval {
+                    tier_id,
+                    annotation_id: r.id,
+                });
+            }
+        }
+    }
+    let target_id = clicked_target.or(match selection {
+        Some(AnnotationSelection::Interval {
+            tier_id: t,
+            annotation_id,
+        }) if t == tier_id => Some(annotation_id),
+        _ => None,
+    });
+    let menu_target = target_id.and_then(|id| rows.iter().find(|r| r.id == id));
+    response.context_menu(|ui| match menu_target {
+        Some(r) => {
+            ui.label(egui::RichText::new(r.label.as_deref().unwrap_or("(no label)")).strong());
+            if ui.button("Edit annotation…").clicked() {
+                *new_selection = Some(AnnotationSelection::Interval {
+                    tier_id,
+                    annotation_id: r.id,
+                });
+                *label_edit_request = Some(LabelEdit {
+                    tier_id,
+                    annotation_id: r.id,
+                    kind: LabelEditKind::Interval,
+                    text: r.label.clone().unwrap_or_default(),
+                    status: r.status.clone(),
+                    note: r.note.clone().unwrap_or_default(),
+                    just_started: true,
+                    ..Default::default()
+                });
+                ui.close();
+            }
+            if ui.button("Delete interval").clicked() {
+                *new_selection = Some(AnnotationSelection::Interval {
+                    tier_id,
+                    annotation_id: r.id,
+                });
+                *request_delete = true;
+                ui.close();
+            }
+        }
+        None => {
+            ui.label("Right-click an interval to edit or delete it");
+        }
+    });
 
     // Double-click on an interval body → start label edit.
     if response.double_clicked() {
@@ -3868,6 +3934,7 @@ fn render_point_lane(
     new_cursor: &mut Option<f64>,
     new_draft_action: &mut Option<DraftAction>,
     label_edit_request: &mut Option<LabelEdit>,
+    request_delete: &mut bool,
 ) {
     let view_range = (view_end - view_start).max(1e-6);
     let lane_width = rect.width() as f64;
@@ -3955,6 +4022,66 @@ fn render_point_lane(
     }
 
     // ----- Mouse interaction dispatch ---------------------------------
+
+    // Right-click a point → context menu (edit / delete). Right-click also
+    // selects the point, so the menu's target stays stable while open (see
+    // the interval-lane note on why `hover_pos` can't be used here).
+    let mut clicked_target: Option<i64> = None;
+    if response.secondary_clicked() {
+        if let Some(p) = response.interact_pointer_pos() {
+            if let Some(row) = rows.iter().find(|row| {
+                let x = rect.left() + ((row.time_seconds - view_start) * x_per_second) as f32;
+                (p.x - x).abs() <= POINT_HIT_ZONE_PX && rect.y_range().contains(p.y)
+            }) {
+                clicked_target = Some(row.id);
+                *new_selection = Some(AnnotationSelection::Point {
+                    tier_id,
+                    annotation_id: row.id,
+                });
+            }
+        }
+    }
+    let target_id = clicked_target.or(match selection {
+        Some(AnnotationSelection::Point {
+            tier_id: t,
+            annotation_id,
+        }) if t == tier_id => Some(annotation_id),
+        _ => None,
+    });
+    let menu_target = target_id.and_then(|id| rows.iter().find(|r| r.id == id));
+    response.context_menu(|ui| match menu_target {
+        Some(row) => {
+            ui.label(egui::RichText::new(row.label.as_deref().unwrap_or("(no label)")).strong());
+            if ui.button("Edit annotation…").clicked() {
+                *new_selection = Some(AnnotationSelection::Point {
+                    tier_id,
+                    annotation_id: row.id,
+                });
+                *label_edit_request = Some(LabelEdit {
+                    tier_id,
+                    annotation_id: row.id,
+                    kind: LabelEditKind::Point,
+                    text: row.label.clone().unwrap_or_default(),
+                    status: row.status.clone(),
+                    note: row.note.clone().unwrap_or_default(),
+                    just_started: true,
+                    ..Default::default()
+                });
+                ui.close();
+            }
+            if ui.button("Delete point").clicked() {
+                *new_selection = Some(AnnotationSelection::Point {
+                    tier_id,
+                    annotation_id: row.id,
+                });
+                *request_delete = true;
+                ui.close();
+            }
+        }
+        None => {
+            ui.label("Right-click a point to edit or delete it");
+        }
+    });
 
     // Double-click on an existing point → label edit.
     if response.double_clicked() {
@@ -5565,6 +5692,9 @@ impl SaddaApp {
         let mut new_draft_action: Option<DraftAction> = None;
         // Label-edit request: double-clicking an interval body.
         let mut label_edit_request: Option<LabelEdit> = None;
+        // Right-click "Delete" request from a lane; applied after the
+        // &project borrow ends, reusing `delete_selected_annotation`.
+        let mut request_delete = false;
         // The rubric's status vocabulary, fetched once per frame, used to
         // tint each annotation's status strip.
         let status_palette: Vec<String> = project
@@ -5650,6 +5780,7 @@ impl SaddaApp {
                                 &mut new_cursor,
                                 &mut new_draft_action,
                                 &mut label_edit_request,
+                                &mut request_delete,
                             ),
                             Err(e) => {
                                 new_error = Some(format!(
@@ -5674,6 +5805,7 @@ impl SaddaApp {
                                 &mut new_cursor,
                                 &mut new_draft_action,
                                 &mut label_edit_request,
+                                &mut request_delete,
                             ),
                             Err(e) => {
                                 new_error = Some(format!(
@@ -5758,6 +5890,11 @@ impl SaddaApp {
         });
 
         self.selected_annotation = new_selection;
+        // Right-click "Delete" acts on the just-selected annotation, reusing
+        // the same path as the Delete/Backspace key.
+        if request_delete {
+            self.delete_selected_annotation();
+        }
         if let Some(t) = new_cursor {
             self.timeline.set_cursor(t);
         }
