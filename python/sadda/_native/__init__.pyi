@@ -1216,7 +1216,11 @@ def voiced_pitch(audio: Audio, *, frame_size_seconds: builtins.float = 0.0299999
     voicing)` as three NumPy arrays. `times` is float64 seconds at frame
     centres; `frequencies` is float32 Hz; `voicing` is float32 in `[0, 1]`.
     
-    `method` selects the pitch tracker:
+    `method` selects the pitch tracker. Two algorithmic families —
+    autocorrelation and cumulative-mean-normalized-difference — covering
+    both Praat-faithful and librosa-faithful expectations:
+    
+    **Autocorrelation family:**
     - `"windowed_autocorrelation"` (default) — adopts Boersma 1993's
       window-correction idea (divides windowed-signal autocorrelation by
       window autocorrelation); fast single-peak tracker. Strict
@@ -1228,6 +1232,15 @@ def voiced_pitch(audio: Audio, *, frame_size_seconds: builtins.float = 0.0299999
       detection + Viterbi path-finder with octave-cost / octave-jump-cost
       / voiced-unvoiced-cost terms. Robust to halving / doubling /
       transient errors; Praat-validated.
+    
+    **Cumulative-mean-normalized-difference family:**
+    - `"yin"` — de Cheveigné & Kawahara 2002. Difference function +
+      CMNDF + absolute threshold. Simple and fast; independent
+      algorithmic family from autocorrelation, useful for
+      cross-validation against `"boersma"`.
+    - `"pyin"` — Mauch & Dixon 2014, librosa's default. Probabilistic
+      YIN with a beta-prior distribution over thresholds plus an HMM
+      smoothing pass. librosa-validated.
     
     `voicing_threshold` is informational here: the function returns voicing
     values for every frame so callers can apply their own threshold.

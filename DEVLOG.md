@@ -6,6 +6,70 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-28 — YIN + pYIN pitch trackers (closes deferred task #52)
+
+Adds the second algorithmic family for f0 estimation: de Cheveigné & Kawahara 2002 YIN (cumulative mean normalized difference) and Mauch & Dixon 2014 pYIN (probabilistic YIN with HMM smoothing — librosa's default). Closes the second of the C2-deferred pitch items (task #52 in the method-diversity tracker), complementing today's Boersma slice (#51).
+
+**Why both at once:** today's Boersma slice gave us a Praat-faithful autocorrelation tracker. YIN is in a genuinely different algorithmic family (CMNDF, not autocorrelation), which means disagreement between the two = a confidence signal you can't get from a single tracker alone. pYIN layered on top is what the speech-AI engineering audience reaches for first (librosa default). Both methods are validated against the same in-house fixtures via librosa goldens, mirroring the Praat-golden pattern from this morning.
+
+**Decisions** (DEVLOG-style multi-option questions, all recommended picks): YIN + pYIN together in one slice; librosa-golden + synthetic validation; full Mauch-Dixon HMM scope for pYIN (threshold distribution + HMM smoothing — not a Boersma-Viterbi-lite shortcut).
+
+### YIN (`engine::pitch::yin`)
+
+The paper's six steps, faithful to the original:
+
+1. **Difference function** `d[τ] = Σ_i (x[i] - x[i+τ])²` over the frame.
+2. **CMNDF**: `d'[0] = 1`; `d'[τ] = d[τ] · τ / Σ_{j=1..τ} d[j]` — normalises for energy growth.
+3. **Absolute threshold**: smallest τ ≥ `min_lag` such that `d'[τ] < yin_threshold` (default 0.1) **and** `d'[τ]` is a local minimum. Falls back to the global argmin if no candidate clears the threshold.
+4. **Parabolic refinement** around the chosen τ. (The paper's step 5 "best local estimate" folds into this for typical signals.)
+5. **Voicing strength = `1 - d'[τ_chosen]`**, clamped to `[0, 1]`.
+
+Frame is silently extended to `2 · max_lag` so the difference function always has at least one full second period of the lowest pitch to compare against. Mirrors the same Praat-style "extend to `3 · period_min`" rule we use for Boersma.
+
+### pYIN (`engine::pitch::pyin`)
+
+Where YIN uses a single hard threshold, pYIN integrates the threshold rule against a **beta(α=2, β=18) prior** discretized to `pyin_n_thresholds` (default 100) values. For each threshold draw, the YIN lag becomes a candidate weighted by the prior PDF; if the CMNDF doesn't actually dip below that threshold, the weight flows to the **unvoiced pool** instead of being force-assigned to an arbitrary bin (this is the bit Mauch & Dixon make explicit in §3.1 — and the same bit I had to fix on the first run, when silent input was reporting voicing=1.0 because every threshold fell back to the global argmin).
+
+Sum the per-threshold weights per unique τ → per-frame distribution `{(τ_k, p_k)}`. Distribute the unvoiced pool uniformly across an unvoiced layer to get the per-frame emission row.
+
+**HMM**: 2 × `n_bins` states. `n_bins ≈ 12 · log2(max/min) · pyin_bins_per_semitone` (default 20 bins/semitone, log-spaced from min_freq_hz to max_freq_hz). First `n_bins` are voiced; last `n_bins` are unvoiced parallel layer. Transition matrix is factorized into independent voicing and frequency components:
+
+* Voicing: `P(voiced | voiced) = P(unvoiced | unvoiced) = 1 - switch_prob`; `P(switch) = switch_prob`. Default 0.05 (librosa's value).
+* Frequency: Gaussian on semitone distance, σ = `pyin_transition_semitone_cost` (default 0.5 semitones). Centred-kernel normalisation; truncation at the grid edges loses ~ε mass.
+
+**Viterbi in log space** to avoid underflow. O(n_frames × n_bins²) — ~660 bins × 100 frames × ~660 = ~40M ops per decode, ~50ms on a modern core. Sufficient for clean speech; if profiling later shows it as a hot path, a sliding-Gaussian inner loop drops it to O(n_frames × n_bins · σ).
+
+### Validation
+
+**librosa 0.11 golden** via `tests/dsp/librosa/pitch_yin_pyin.py` against the existing `tests/clinical/fixtures/*.wav` corpus (clean, HNR-high/mid, jitter, shimmer, jitter+shimmer). Generates `tests/clinical/fixtures/pitch_yin_pyin_golden.tsv` with the per-(fixture, method) median voiced f0; committed so CI never needs librosa. Same harness pattern as Praat for Boersma.
+
+`tests/pitch_yin_pyin.rs` reads the TSV and asserts our median within:
+
+* **YIN**: 1.5 Hz for clean / HNR, 3 Hz for jitter / shimmer.
+* **pYIN**: 4 Hz for clean / HNR, 5 Hz for jitter / shimmer — wider tolerance reflects the log-bin grid quantization on both sides (our bin grid and librosa's don't necessarily align exactly).
+
+Plus **12 in-module unit tests** (six YIN, six pYIN) covering: clean 220 Hz tone, silence classification, the YIN/Boersma cross-check (independent trackers agree within 1 Hz on a clean tone), the pYIN/Boersma cross-check (within 2 Hz), pYIN HMM smoothing through a noise gap (no octave errors in voiced frames), CMNDF threshold-pick logic with constructed arrays, fallback-to-argmin behaviour, beta-PDF analytic α=2/β=18 closed-form check, edge cases (`beta_pdf(0) = beta_pdf(1) = 0`), and shorter-than-minimum-frame returning empty.
+
+### Bug caught in development
+
+Silent input was reporting voicing=1.0 at the first run. Reason: `yin_pick_lag` falls back to the global argmin when no CMNDF dip clears the threshold; my first draft routed *that* fallback weight to a voiced bin (the bin matching the argmin's frequency). For a silent frame, `yin_pick_lag` always returns the same arbitrary lag → every threshold's weight piled up on the same voiced bin → voiced_total = 1.0, unvoiced_total = 0.0 → silent frame "voiced". Fixed by checking the returned CMNDF value: if `val ≥ threshold` (i.e. the fallback fired), the threshold's weight flows to the **unvoiced pool** instead. This is what Mauch & Dixon describe in §3.1.
+
+### Three-surface coverage
+
+* **Engine**: `PitchMethod::Yin` + `PitchMethod::PYin` + `yin()` / `pyin()`.
+* **Python**: `sadda.dsp.voiced_pitch(audio, method="yin"|"pyin")`. Type stubs regenerated. Two new Python tests; the pre-existing `test_voiced_pitch_unknown_method_raises_value_error` had been using `"yin"` as the unknown method (clever choice when it landed); switched to `"crepe"` since YIN now lands.
+* **GUI**: deliberately untouched. Same backwards-compat reasoning as Boersma; pitch-tracker default flips to one of the new methods in 0.4.x.
+
+### What's sub-deferred
+
+The 2026-05-21 method-diversity entry also listed SWIPE' and CREPE under task #52. **SWIPE'** (Camacho & Harris 2008) — sub-slice; less common than YIN. **CREPE** (Kim et al. 2018) — neural; needs an ONNX bundled model under `models-bundled/`. A natural sub-slice for the next ML-models pass.
+
+### Gates
+
+Full local gate green on rust 1.95: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (engine 153→165 + the new pitch_yin_pyin integration crate's 2 tests; app unchanged at 58), stub regen + diff (docstring update only), `pytest python/tests -q` → 151 passed / 6 skipped. librosa installed briefly in `.venv` for fixture generation, uninstalled after committing the golden TSV.
+
+---
+
 ## 2026-05-28 — Faithful Boersma pitch tracker (deferred task #51 since C2)
 
 Closes the largest deferred item from the 2026-05-21 C2 entry: a faithful implementation of Boersma 1993, equivalent to Praat's `Sound: To Pitch (ac)…` with `very_accurate = false`. The pre-existing `windowed_autocorrelation` had been honestly named because it took only Boersma's window-correction idea and skipped the rest of the pipeline (no multi-candidate detection, no Viterbi, no octave-cost terms). For sadda's central audience — phoneticians coming from Praat — pitch is the single most-used measure, so this is the single highest user-visible capability gain on the deferred list.

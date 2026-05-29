@@ -134,13 +134,55 @@ def test_voiced_pitch_boersma_method_tracks_clean_tone() -> None:
         )
 
 
+def test_voiced_pitch_yin_method_tracks_clean_tone() -> None:
+    """method='yin' resolves to de Cheveigné & Kawahara 2002 YIN — the
+    canonical cumulative-mean-normalized-difference tracker. Independent
+    algorithmic family from Boersma; for a clean tone the median voiced
+    f0 should also land within 1 Hz."""
+    with tempfile.TemporaryDirectory() as td:
+        wav = Path(td) / "sine.wav"
+        _write_sine_wav(wav, freq=220.0, sample_rate=16_000, duration_s=0.6)
+        audio = sadda.load_wav(str(wav))
+        times, freqs, voicing = sadda.dsp.voiced_pitch(audio, method="yin")
+        voiced = freqs[voicing >= 0.45]
+        assert len(voiced) > 5, f"expected several voiced frames, got {len(voiced)}"
+        import numpy as _np
+
+        median_f0 = float(_np.median(voiced))
+        assert abs(median_f0 - 220.0) < 1.0, (
+            f"yin median f0 = {median_f0:.3f} Hz, expected ~220"
+        )
+
+
+def test_voiced_pitch_pyin_method_tracks_clean_tone() -> None:
+    """method='pyin' resolves to Mauch & Dixon 2014 pYIN — librosa's
+    default. Probabilistic YIN with HMM smoothing. Bin-grid quantization
+    means we allow 2 Hz tolerance vs YIN's 1 Hz."""
+    with tempfile.TemporaryDirectory() as td:
+        wav = Path(td) / "sine.wav"
+        _write_sine_wav(wav, freq=220.0, sample_rate=16_000, duration_s=0.6)
+        audio = sadda.load_wav(str(wav))
+        times, freqs, voicing = sadda.dsp.voiced_pitch(audio, method="pyin")
+        voiced = freqs[voicing >= 0.45]
+        assert len(voiced) > 5, f"expected several voiced frames, got {len(voiced)}"
+        import numpy as _np
+
+        median_f0 = float(_np.median(voiced))
+        assert abs(median_f0 - 220.0) < 2.0, (
+            f"pyin median f0 = {median_f0:.3f} Hz, expected ~220"
+        )
+
+
 def test_voiced_pitch_unknown_method_raises_value_error() -> None:
+    # "yin" used to be unknown; it landed in 0.4-prep alongside pyin.
+    # Use a still-deferred name (CREPE — neural; tracked under task #52
+    # but not in this slice) to keep this test's coverage intact.
     with tempfile.TemporaryDirectory() as td:
         wav = Path(td) / "sine.wav"
         _write_sine_wav(wav, freq=220.0, sample_rate=16_000, duration_s=0.2)
         audio = sadda.load_wav(str(wav))
         with pytest.raises(ValueError):
-            sadda.dsp.voiced_pitch(audio, method="yin")
+            sadda.dsp.voiced_pitch(audio, method="crepe")
 
 
 def test_voiced_pitch_silent_input_has_low_voicing() -> None:
