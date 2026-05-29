@@ -318,11 +318,13 @@ struct SaddaApp {
     /// Target tier for span-selection commits (boundaries / points). Set by
     /// clicking a tier's gutter name; highlighted in the strip.
     active_tier_id: Option<i64>,
-    /// Screen rect of the waveform plot's data area (between the axes),
-    /// captured each frame. The painter-based tier lanes lay out to this
-    /// exact x-range so their time axis aligns with the egui_plot lanes
-    /// (whose y-axis width is dynamic, not a fixed gutter).
-    lane_frame: Option<egui::Rect>,
+    /// `(y_axis_gutter_width, data_area_width)` of the signal plots,
+    /// measured from the waveform each frame. The painter-based tier lanes
+    /// use these *widths* (applied from their own panel's left) so their
+    /// time axis aligns with the egui_plot lanes — whose y-axis width is
+    /// dynamic. Stored as widths (not an absolute rect) so it's robust to
+    /// the tier-strip panel having a different left inset than the waveform.
+    lane_geom: Option<(f32, f32)>,
     /// A1: open provenance/citations modal. `Some` holds the snapshot
     /// of the bundle's processing runs + citations, loaded once when
     /// the modal opens.
@@ -817,7 +819,7 @@ impl SaddaApp {
             pending_tier_rename: None,
             pending_tier_delete: None,
             active_tier_id: None,
-            lane_frame: None,
+            lane_geom: None,
             provenance: None,
         }
     }
@@ -4411,10 +4413,15 @@ impl SaddaApp {
                 }
             });
 
-        // Capture the data-area screen rect so the painter-based tier
-        // lanes can align their time axis to it exactly (the egui_plot
-        // y-axis width is dynamic, so a fixed gutter would drift).
-        self.lane_frame = Some(*plot_response.transform.frame());
+        // Measure the lane geometry as WIDTHS (not absolute coords): the
+        // y-axis gutter = data-area left minus the plot widget's own left,
+        // and the data-area width. The tier lanes apply these from their
+        // own panel left, so alignment survives any panel-inset difference.
+        {
+            let frame = plot_response.transform.frame();
+            let gutter_w = frame.left() - plot_response.response.rect.left();
+            self.lane_geom = Some((gutter_w, frame.width()));
+        }
 
         apply_lane_selection_drag(
             &mut self.timeline,
@@ -4903,7 +4910,7 @@ impl SaddaApp {
         let cursor = self.timeline.cursor;
         let selection = self.timeline.selection;
         let active_tier_id = self.active_tier_id;
-        let lane_frame = self.lane_frame;
+        let lane_geom = self.lane_geom;
         let tiers = match project.tiers(Some(bundle_id)) {
             Ok(t) => t,
             Err(e) => {
@@ -4987,13 +4994,12 @@ impl SaddaApp {
                     // (row_left + SIGNAL_LEFT_GUTTER), matching where
                     // the plots' inner plot areas start.
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    // Size the gutter so the lane's left edge lands exactly
-                    // on the egui_plot data area (whose y-axis width is
-                    // dynamic). Falls back to the fixed gutter until the
-                    // waveform frame has been measured (first frame).
-                    let row_left = ui.cursor().left();
-                    let gutter_w = lane_frame
-                        .map(|f| (f.left() - row_left).max(40.0))
+                    // Gutter = the signal plots' measured y-axis width,
+                    // applied from this panel's own left, so the lane's data
+                    // area lines up with the egui_plot lanes. Falls back to
+                    // the fixed gutter until the waveform has been measured.
+                    let gutter_w = lane_geom
+                        .map(|(g, _)| g.max(40.0))
                         .unwrap_or(SIGNAL_LEFT_GUTTER);
                     // Left gutter: tier name + type hint.
                     ui.allocate_ui_with_layout(
@@ -5030,7 +5036,7 @@ impl SaddaApp {
                     // Right: time-positioned lane — width matched to the
                     // plot data area so the lane's right edge aligns too.
                     let avail = ui.available_size_before_wrap();
-                    let lane_w = lane_frame.map(|f| f.width()).unwrap_or(avail.x);
+                    let lane_w = lane_geom.map(|(_, w)| w).unwrap_or(avail.x);
                     let lane_size = egui::Vec2::new(lane_w, TIER_LANE_HEIGHT);
                     let (rect, response) =
                         ui.allocate_exact_size(lane_size, egui::Sense::click_and_drag());
