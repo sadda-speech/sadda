@@ -57,6 +57,15 @@ plugins:
           options:
             extensions:
               - tools/docs/griffe_source_links.py
+            # The public API re-exports PyO3 classes from the `_native`
+            # extension (`Project = stable(_native.Project)`). Static
+            # analysis sees those as attributes, so class methods/getters
+            # never render. Forcing runtime inspection — now that each
+            # #[pyclass] declares module="sadda._native[.<sub>]" so its
+            # __module__ resolves instead of "builtins" — makes griffe
+            # see the real classes with their members. See the 2026-05-29
+            # "class-member rendering" DEVLOG entry.
+            force_inspection: true
             docstring_style: google
             show_source: false
             show_root_heading: true

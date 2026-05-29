@@ -6,6 +6,21 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-29 — Fix: Rust-backed classes now render their members in the API docs
+
+Fixes the bug surfaced by the source-links slice 2 (entry below): no `#[pyclass]` rendered its methods/getters — every class showed as a bare attribute heading, dropping ~60 documented symbols from the reference. Root cause was two PyO3/mkdocstrings interactions: (a) `Project = stable(_native.Project)` is an *assignment*, so static analysis sees an attribute, not a class; and (b) PyO3 classes reported `__module__ = "builtins"`, so forcing runtime inspection failed with `AliasResolutionError ... pointing at builtins.Project`.
+
+Four-part fix:
+
+1. **`#[pyclass(module = "sadda._native[.<sub>]")]` on all 24 binding classes** (`crates/python/src/*.rs`). Now `_native.Project.__module__ == "sadda._native"` (and `…refdist.RefDist` → `sadda._native.refdist`), so griffe can place the inspected classes in the tree and resolve the public aliases to them. Stubs regenerate byte-identical (pyo3-stub-gen ignores `module`), so the CI stub-diff gate is unaffected; `_stability` keys stay consistent because `get_stability` derives them from `__module__` symmetrically.
+2. **Submodule registration fixed** (`lib.rs`). Submodules were created as `PyModule::new(py, "live")` → bare `__name__ = "live"`, so their *functions* reported `__module__ = "live"` and were unresolvable under inspection (`AliasResolutionError ... pointing at live.start_session`). Now created with the full dotted name (`"sadda._native.live"`), attached under the short attr via `m.add("live", &mod)`, and registered in `sys.modules` — the documented PyO3 submodule idiom. Also makes `import sadda._native.live` work and fixes `repr`/pickling.
+3. **`force_inspection: true`** in `mkdocs.yml`'s python handler. Static analysis can't see through the wrapper assignments; with (1)+(2) making the runtime tree resolvable, forcing inspection makes griffe render the real classes with their members and runtime docstrings.
+4. **Source-link resolver emits canonical `_native` keys** (`tools/docs/source_links.py`). Under inspection the griffe object handed to the extension is the *real* object (`sadda._native.f0`, `sadda._native.Project.add_bundle`), not the documented alias (`sadda.dsp.f0`). `build_map` now also registers each entry under its computed canonical `sadda._native...` path (pure-Python wrapper defs keep only the documented key, since their real object already sits there), so the extension matches either. New test covers this.
+
+Plus: **docs deps pinned** (`mkdocs-material==9.7.6`, `mkdocstrings==1.0.4`, `mkdocstrings-python==2.0.3`, `griffelib==2.0.2`) in `docs.yml` — the rendering depends on griffe's inspection behaviour, and the bug was originally introduced by an unpinned upgrade; bumps should now be deliberate.
+
+**Result:** a real local `mkdocs build --strict` renders every class with its methods/getters (Project's 48 members, RefDist 23, LiveSession 13, Model 8, the data-class getters), and the source-link count rose from 80 to **123** (methods + classes now linked: `Project.add_bundle → lib.rs:897`, f0 keeps binding+impl). Gates green: `cargo fmt`/`clippy --workspace --all-targets -D warnings`/`test --workspace` clean, stubs unchanged, 151 pytest + 24 `tools/docs/` tests pass, source-link gate 0 unresolved. Remaining nicety (not blocking): data-class getters auto-render but aren't in the explicit doc universe, so they render without source links — could expand the universe to cover them in a later pass.
+
 ## 2026-05-29 — API source-link griffe extension (slice 2) + a rendering bug it surfaced
 
 Slice 2 of the source-links feature: a griffe extension that consumes slice 1's resolver and renders the links into the built API reference. **`tools/docs/griffe_source_links.py`** — a `griffe.Extension` whose `on_object` hook looks up each object's `path` (then `canonical_path`) in `source_links.build_map(...)` and **appends an HTML "Source:" line to the object's docstring** (creating one if absent). Wired in `mkdocs.yml` under the python handler's `options.extensions`.
@@ -14,7 +29,7 @@ Why inject into the docstring rather than override a template: it renders reliab
 
 **Verified by a real local `mkdocs build --strict`**: ~80 source links in the generated HTML, including `sadda.dsp.f0` rendering **both** its binding (`crates/python/src/lib.rs:1549`) and impl (`crates/engine/src/pitch.rs:226`) links. Tests: `tools/docs/test_griffe_source_links.py` (6) cover `_render` (binding-only + binding+impl), docstring append/create, idempotency, unmapped-symbol no-op, and canonical-path fallback — without standing up mkdocs. All 23 `tools/docs/` tests pass.
 
-### ⚠ Bug surfaced (logged-not-fixed, tracked separately): Rust-backed classes render no members
+### ⚠ Bug surfaced (→ FIXED, see the entry above): Rust-backed classes render no members
 
 While checking method links I found a **pre-existing** docs defect, independent of this feature: **no Rust-backed `#[pyclass]` renders its methods/getters in the API reference.** `add_bundle`, `sample_rate`, `duration_seconds`, … all appear **0 times** in the built site. Every class (`Project`, `Audio`, `LiveSession`, `RefDist`, `Model`, …) renders as a bare *attribute heading* with only its class-level docstring; the `members:` lists in `docs/api/*.md` are silently dropped. So ≈60 of the 124 documented symbols (the Project + LiveSession method members, and all data-class getters) are missing from the published reference — and, for this feature, can't be source-linked because they aren't objects in the doc tree (slice 2 still links the ~64 that do render: top-level functions, module functions, and class headings).
 

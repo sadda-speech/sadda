@@ -13,7 +13,7 @@ use sadda_engine::ProcessingRunRow;
 use crate::engine_err_to_py;
 
 /// Python-side representation of one `recipe_run` row.
-#[pyclass(name = "Recipe")]
+#[pyclass(module = "sadda._native.recipe", name = "Recipe")]
 pub(crate) struct PyRecipe {
     /// Recipe id (primary key in `recipe_run`).
     #[pyo3(get)]
