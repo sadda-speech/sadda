@@ -283,6 +283,8 @@ struct SaddaApp {
     /// In-progress inline label edit triggered by double-clicking an
     /// interval. Commits on Enter / focus-loss; cancels on Escape.
     label_edit: Option<LabelEdit>,
+    /// Open rubric-editor window (slice S1), or `None` when closed.
+    rubric_editor: Option<RubricEditor>,
     /// E8: most recent `script-engine` output (stdout + stderr).
     /// `None` until the user clicks Run for the first time this
     /// session. Not persisted across launches — regenerable cheaply.
@@ -430,20 +432,61 @@ enum BoundaryEdge {
 /// `kind` tells the commit-time handler which engine `update_*`
 /// method to call; the base row is re-fetched at commit so
 /// non-label fields aren't snapshotted into a stale buffer.
+#[derive(Default)]
 struct LabelEdit {
     tier_id: i64,
     annotation_id: i64,
     kind: LabelEditKind,
+    /// The label text being edited.
     text: String,
-    /// Set to `true` for the first frame so the TextEdit grabs
+    /// Working copy of the annotation's status (a rubric status value), or
+    /// `None`. Populated from the row when the edit opens.
+    status: Option<String>,
+    /// Working copy of the free-text note.
+    note: String,
+    /// Set to `true` for the first frame so the label field grabs
     /// focus; cleared after.
     just_started: bool,
+    /// Guards the one-time fetch of the rubric context below (the free
+    /// lane-render fns that create a `LabelEdit` have no project handle, so
+    /// the window fills these on its first frame).
+    loaded: bool,
+    /// The tier's controlled vocabulary (allowed label values).
+    vocab: Vec<String>,
+    /// Whether the tier's vocabulary is closed (out-of-vocab rejected).
+    closed: bool,
+    /// The rubric's status vocabulary (options for the status picker).
+    statuses: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 enum LabelEditKind {
+    #[default]
     Interval,
     Point,
+}
+
+/// State for the rubric-editor window (slice S1): a working copy of the
+/// project's annotation rubric — name, guidelines, the status vocabulary,
+/// and one tier's controlled vocabulary — that the user edits and commits
+/// with "Apply". Loaded from the project once when the window opens.
+#[derive(Default)]
+struct RubricEditor {
+    /// Guards the one-time load from the project.
+    loaded: bool,
+    name: String,
+    /// Preserved across edits (full version history is a later slice).
+    version: i64,
+    guidelines: String,
+    /// Editable status rows: (value, description).
+    statuses: Vec<(String, String)>,
+    /// The tier name whose controlled vocabulary is being edited.
+    tier_name: Option<String>,
+    /// Whether the selected tier's vocabulary is closed.
+    tier_closed: bool,
+    /// Editable controlled-vocabulary rows for the selected tier:
+    /// (value, description).
+    vocab: Vec<(String, String)>,
 }
 
 /// H1: live-recording modal. State machine: Idle (configuring the
@@ -807,6 +850,7 @@ impl SaddaApp {
             playback: None,
             draft_edit: DraftEdit::None,
             label_edit: None,
+            rubric_editor: None,
             script_output: None,
             script_error: None,
             registered_commands: Vec::new(),
@@ -1386,6 +1430,8 @@ impl SaddaApp {
                     end_seconds: hi,
                     label: None,
                     parent_annotation_id: None,
+                    status: None,
+                    note: None,
                     extra: None,
                 })
                 .map(|_| ()),
@@ -1395,6 +1441,8 @@ impl SaddaApp {
                     time_seconds: lo,
                     label: None,
                     parent_annotation_id: None,
+                    status: None,
+                    note: None,
                     extra: None,
                 })
                 .and_then(|_| {
@@ -1403,6 +1451,8 @@ impl SaddaApp {
                         time_seconds: hi,
                         label: None,
                         parent_annotation_id: None,
+                        status: None,
+                        note: None,
                         extra: None,
                     })
                 })
@@ -1916,30 +1966,400 @@ impl SaddaApp {
     /// Commits on Enter / Save button; cancels on Escape / Cancel /
     /// window close. Inline overlay over the interval rect is a
     /// polish item (see the 2026-05-23 D6 DEVLOG entry).
-    fn label_edit_window(&mut self, ctx: &egui::Context) {
-        let Some(le) = self.label_edit.as_mut() else {
+    /// The rubric-editor window (slice S1): edit the project's rubric name,
+    /// guidelines, status vocabulary, and per-tier controlled vocabularies,
+    /// committing with "Apply".
+    fn rubric_editor_window(&mut self, ctx: &egui::Context) {
+        if self.rubric_editor.is_none() {
             return;
+        }
+
+        // One-time load of the current rubric into the working copy.
+        if !self
+            .rubric_editor
+            .as_ref()
+            .map(|r| r.loaded)
+            .unwrap_or(true)
+        {
+            let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+                self.rubric_editor = None;
+                return;
+            };
+            let rubric = project.rubric().ok().flatten();
+            let statuses: Vec<(String, String)> = project
+                .rubric_statuses()
+                .map(|v| {
+                    v.into_iter()
+                        .map(|s| (s.value, s.description.unwrap_or_default()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let ed = self.rubric_editor.as_mut().unwrap();
+            match rubric {
+                Some(r) => {
+                    ed.name = r.name;
+                    ed.version = r.version;
+                    ed.guidelines = r.guidelines.unwrap_or_default();
+                }
+                None => {
+                    ed.name = "Annotation rubric".into();
+                    ed.version = 1;
+                }
+            }
+            ed.statuses = statuses;
+            ed.loaded = true;
+        }
+
+        // Tier names for the controlled-vocabulary picker (active bundle).
+        let tier_names: Vec<String> = match (self.selected_bundle_id, &self.app_state) {
+            (Some(bid), AppState::ProjectLoaded { project, .. }) => project
+                .tiers(Some(bid))
+                .map(|ts| ts.into_iter().map(|t| t.name).collect())
+                .unwrap_or_default(),
+            _ => Vec::new(),
         };
+
+        let mut apply = false;
+        let mut close = false;
+        let mut load_tier: Option<String> = None;
+        let mut keep_open = true;
+        egui::Window::new("Rubric")
+            .open(&mut keep_open)
+            .resizable(true)
+            .default_width(440.0)
+            .show(ctx, |ui| {
+                let ed = self.rubric_editor.as_mut().expect("checked above");
+                ui.horizontal(|ui| {
+                    ui.label("Name:");
+                    ui.text_edit_singleline(&mut ed.name);
+                });
+                ui.label(egui::RichText::new("Guidelines").small());
+                ui.add(
+                    egui::TextEdit::multiline(&mut ed.guidelines)
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.separator();
+
+                // Status vocabulary.
+                ui.label(egui::RichText::new("Statuses").strong());
+                let mut remove_status: Option<usize> = None;
+                for (i, (val, desc)) in ed.statuses.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(val)
+                                .desired_width(110.0)
+                                .hint_text("value"),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(desc)
+                                .desired_width(200.0)
+                                .hint_text("description"),
+                        );
+                        if ui.small_button("✖").clicked() {
+                            remove_status = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = remove_status {
+                    ed.statuses.remove(i);
+                }
+                if ui.button("➕ Add status").clicked() {
+                    ed.statuses.push((String::new(), String::new()));
+                }
+                ui.separator();
+
+                // Per-tier controlled vocabulary.
+                ui.label(egui::RichText::new("Controlled vocabulary").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Tier:");
+                    let sel = ed
+                        .tier_name
+                        .clone()
+                        .unwrap_or_else(|| "(select a tier)".into());
+                    egui::ComboBox::from_id_salt("rubric_tier_pick")
+                        .selected_text(sel)
+                        .show_ui(ui, |ui| {
+                            for tn in &tier_names {
+                                let is_sel = ed.tier_name.as_deref() == Some(tn.as_str());
+                                if ui.selectable_label(is_sel, tn).clicked() {
+                                    load_tier = Some(tn.clone());
+                                }
+                            }
+                        });
+                });
+                if ed.tier_name.is_some() {
+                    ui.checkbox(
+                        &mut ed.tier_closed,
+                        "Closed vocabulary (reject out-of-vocab labels)",
+                    );
+                    let mut remove_vocab: Option<usize> = None;
+                    for (i, (val, desc)) in ed.vocab.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(val)
+                                    .desired_width(110.0)
+                                    .hint_text("label"),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(desc)
+                                    .desired_width(200.0)
+                                    .hint_text("description"),
+                            );
+                            if ui.small_button("✖").clicked() {
+                                remove_vocab = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = remove_vocab {
+                        ed.vocab.remove(i);
+                    }
+                    if ui.button("➕ Add entry").clicked() {
+                        ed.vocab.push((String::new(), String::new()));
+                    }
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if !keep_open || close {
+            self.rubric_editor = None;
+            return;
+        }
+
+        // Load a newly-picked tier's controlled vocabulary into the editor.
+        if let Some(tn) = load_tier {
+            let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+                return;
+            };
+            let vocab: Vec<(String, String)> = project
+                .controlled_vocabulary(&tn)
+                .map(|v| {
+                    v.into_iter()
+                        .map(|e| (e.value, e.description.unwrap_or_default()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let closed = project
+                .rubric_tier(&tn)
+                .ok()
+                .flatten()
+                .map(|rt| rt.closed_vocabulary)
+                .unwrap_or(false);
+            if let Some(ed) = self.rubric_editor.as_mut() {
+                ed.tier_name = Some(tn);
+                ed.vocab = vocab;
+                ed.tier_closed = closed;
+            }
+        }
+
+        // Apply: commit the working copy to the project.
+        if apply {
+            // Snapshot the editor data so we can borrow the project mutably.
+            let Some(ed) = self.rubric_editor.as_ref() else {
+                return;
+            };
+            let name = ed.name.trim().to_string();
+            let version = ed.version.max(1);
+            let guidelines = (!ed.guidelines.trim().is_empty()).then(|| ed.guidelines.clone());
+            let statuses: Vec<(String, Option<String>, i64)> = ed
+                .statuses
+                .iter()
+                .filter(|(v, _)| !v.trim().is_empty())
+                .enumerate()
+                .map(|(i, (v, d))| {
+                    (
+                        v.trim().to_string(),
+                        (!d.trim().is_empty()).then(|| d.clone()),
+                        i as i64,
+                    )
+                })
+                .collect();
+            let tier = ed.tier_name.clone();
+            let tier_closed = ed.tier_closed;
+            let vocab: Vec<(String, Option<String>, i64)> = ed
+                .vocab
+                .iter()
+                .filter(|(v, _)| !v.trim().is_empty())
+                .enumerate()
+                .map(|(i, (v, d))| {
+                    (
+                        v.trim().to_string(),
+                        (!d.trim().is_empty()).then(|| d.clone()),
+                        i as i64,
+                    )
+                })
+                .collect();
+
+            let result: Result<(), String> = (|| {
+                let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+                    return Ok(());
+                };
+                if name.is_empty() {
+                    return Err("Rubric name cannot be empty".into());
+                }
+                project
+                    .set_rubric(&name, version, guidelines.as_deref())
+                    .map_err(|e| format!("Failed to save rubric: {e}"))?;
+                let status_defs: Vec<sadda_engine::StatusDef> = statuses
+                    .iter()
+                    .map(|(v, d, o)| sadda_engine::StatusDef {
+                        value: v.clone(),
+                        description: d.clone(),
+                        sort_order: *o,
+                    })
+                    .collect();
+                project
+                    .set_rubric_statuses(&status_defs)
+                    .map_err(|e| format!("Failed to save statuses: {e}"))?;
+                if let Some(tn) = &tier {
+                    project
+                        .set_rubric_tier(tn, None, tier_closed)
+                        .map_err(|e| format!("Failed to save tier config: {e}"))?;
+                    let entries: Vec<sadda_engine::VocabEntry> = vocab
+                        .iter()
+                        .map(|(v, d, o)| sadda_engine::VocabEntry {
+                            value: v.clone(),
+                            description: d.clone(),
+                            sort_order: *o,
+                        })
+                        .collect();
+                    project
+                        .set_controlled_vocabulary(tn, &entries)
+                        .map_err(|e| format!("Failed to save vocabulary: {e}"))?;
+                }
+                Ok(())
+            })();
+            if let Err(msg) = result {
+                self.set_error(msg);
+            }
+        }
+    }
+
+    fn label_edit_window(&mut self, ctx: &egui::Context) {
+        if self.label_edit.is_none() {
+            return;
+        }
+
+        // One-time load of the rubric context (controlled vocabulary, the
+        // tier's open/closed flag, and the status options). The lane-render
+        // free fns that create a `LabelEdit` have no project handle, so the
+        // window fills these on its first frame.
+        if !self.label_edit.as_ref().map(|le| le.loaded).unwrap_or(true) {
+            let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+                self.label_edit = None;
+                return;
+            };
+            let tier_id = self.label_edit.as_ref().unwrap().tier_id;
+            let tier_name = project
+                .get_tier(tier_id)
+                .map(|t| t.name)
+                .unwrap_or_default();
+            let vocab: Vec<String> = project
+                .controlled_vocabulary(&tier_name)
+                .map(|v| v.into_iter().map(|e| e.value).collect())
+                .unwrap_or_default();
+            let closed = project
+                .rubric_tier(&tier_name)
+                .ok()
+                .flatten()
+                .map(|rt| rt.closed_vocabulary)
+                .unwrap_or(false);
+            let statuses: Vec<String> = project
+                .rubric_statuses()
+                .map(|v| v.into_iter().map(|s| s.value).collect())
+                .unwrap_or_default();
+            let le = self.label_edit.as_mut().unwrap();
+            le.vocab = vocab;
+            le.closed = closed;
+            le.statuses = statuses;
+            le.loaded = true;
+        }
+
         let mut commit = false;
         let mut cancel = false;
         let mut keep_open = true;
-        egui::Window::new("Edit label")
+        egui::Window::new("Edit annotation")
             .collapsible(false)
             .resizable(false)
             .open(&mut keep_open)
             .show(ctx, |ui| {
-                let resp = ui.text_edit_singleline(&mut le.text);
-                if le.just_started {
-                    resp.request_focus();
-                    le.just_started = false;
-                }
-                if resp.lost_focus() {
-                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        commit = true;
-                    } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        cancel = true;
+                let le = self.label_edit.as_mut().expect("checked above");
+                ui.horizontal(|ui| {
+                    ui.label("Label:");
+                    let resp = ui.text_edit_singleline(&mut le.text);
+                    if le.just_started {
+                        resp.request_focus();
+                        le.just_started = false;
                     }
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        commit = true;
+                    }
+                });
+                // Out-of-vocabulary flag (soft, unless the tier is closed).
+                if is_out_of_vocab(&le.vocab, &le.text) {
+                    let (color, msg) = if le.closed {
+                        (
+                            egui::Color32::from_rgb(220, 110, 110),
+                            "⚠ not in the closed vocabulary — will be rejected",
+                        )
+                    } else {
+                        (egui::Color32::from_rgb(210, 160, 70), "⚠ out of vocabulary")
+                    };
+                    ui.colored_label(color, msg);
                 }
+                // Controlled-vocabulary suggestion chips.
+                if !le.vocab.is_empty() {
+                    ui.label(egui::RichText::new("Vocabulary").small());
+                    let vocab = le.vocab.clone();
+                    ui.horizontal_wrapped(|ui| {
+                        for v in &vocab {
+                            if ui.selectable_label(le.text == *v, v).clicked() {
+                                le.text = v.clone();
+                            }
+                        }
+                    });
+                }
+                ui.separator();
+                // Status picker (rubric-defined). Disabled with a hint when
+                // the rubric defines no statuses yet.
+                ui.horizontal(|ui| {
+                    ui.label("Status:");
+                    if le.statuses.is_empty() {
+                        ui.label(
+                            egui::RichText::new("(no statuses in rubric)")
+                                .italics()
+                                .weak(),
+                        );
+                    } else {
+                        let selected = le.status.clone().unwrap_or_else(|| "(none)".into());
+                        let statuses = le.statuses.clone();
+                        egui::ComboBox::from_id_salt("annotation_status")
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(le.status.is_none(), "(none)").clicked() {
+                                    le.status = None;
+                                }
+                                for s in &statuses {
+                                    let is_sel = le.status.as_deref() == Some(s.as_str());
+                                    if ui.selectable_label(is_sel, s).clicked() {
+                                        le.status = Some(s.clone());
+                                    }
+                                }
+                            });
+                    }
+                });
+                // Free-text note (allowed on any status, including none).
+                ui.label(egui::RichText::new("Note").small());
+                ui.text_edit_multiline(&mut le.note);
+                ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
                         commit = true;
@@ -1952,20 +2372,29 @@ impl SaddaApp {
         if !keep_open {
             cancel = true;
         }
+
+        // Block a commit that the closed vocabulary would reject; the inline
+        // warning already explains why, and we keep the window open so the
+        // edit isn't lost.
+        if commit {
+            if let Some(le) = self.label_edit.as_ref() {
+                if le.closed && is_out_of_vocab(&le.vocab, &le.text) {
+                    commit = false;
+                }
+            }
+        }
+
         if commit {
             let le = self.label_edit.take().expect("checked above");
             let AppState::ProjectLoaded { project, .. } = &self.app_state else {
                 return;
             };
-            let new_label = if le.text.is_empty() {
-                None
-            } else {
-                Some(le.text)
-            };
-            // Re-fetch the base row at commit so we preserve any
-            // non-label fields that might have changed elsewhere
-            // (resize, move, parent_annotation_id update) since
-            // the label-edit window opened.
+            let new_label = (!le.text.is_empty()).then_some(le.text);
+            let new_status = le.status;
+            let new_note = (!le.note.is_empty()).then_some(le.note);
+            // Re-fetch the base row at commit so we preserve any non-edited
+            // fields that might have changed elsewhere (resize, move) since
+            // the window opened.
             let result: Result<(), String> = match le.kind {
                 LabelEditKind::Interval => match project.intervals(le.tier_id) {
                     Ok(rows) => match rows.into_iter().find(|r| r.id == le.annotation_id) {
@@ -1978,10 +2407,12 @@ impl SaddaApp {
                                     end_seconds: existing.end_seconds,
                                     label: new_label,
                                     parent_annotation_id: existing.parent_annotation_id,
+                                    status: new_status,
+                                    note: new_note,
                                     extra: existing.extra,
                                 },
                             )
-                            .map_err(|e| format!("Failed to save label: {e}")),
+                            .map_err(|e| format!("Failed to save annotation: {e}")),
                         None => Ok(()), // deleted concurrently
                     },
                     Err(e) => Err(format!("Failed to reload interval: {e}")),
@@ -1996,10 +2427,12 @@ impl SaddaApp {
                                     time_seconds: existing.time_seconds,
                                     label: new_label,
                                     parent_annotation_id: existing.parent_annotation_id,
+                                    status: new_status,
+                                    note: new_note,
                                     extra: existing.extra,
                                 },
                             )
-                            .map_err(|e| format!("Failed to save label: {e}")),
+                            .map_err(|e| format!("Failed to save annotation: {e}")),
                         None => Ok(()),
                     },
                     Err(e) => Err(format!("Failed to reload point: {e}")),
@@ -3099,6 +3532,30 @@ fn allocate_tier_row(
     (gutter_rect, gutter_resp, lane_rect, lane_resp)
 }
 
+/// Whether `label` is out of the controlled `vocab`: non-empty and absent.
+/// An empty label, or an empty vocabulary, is never "out of vocab".
+fn is_out_of_vocab(vocab: &[String], label: &str) -> bool {
+    !label.is_empty() && !vocab.is_empty() && !vocab.iter().any(|v| v == label)
+}
+
+/// A stable background tint for an annotation status, chosen by the status's
+/// position in the rubric's status list so progress reads at a glance.
+/// `None` (or a status not in the list) yields no tint.
+fn status_tint(status: Option<&str>, statuses: &[String]) -> Option<egui::Color32> {
+    let s = status?;
+    let idx = statuses.iter().position(|v| v == s)?;
+    // Muted, distinguishable tints; cycled if more statuses than colors.
+    const PALETTE: [egui::Color32; 6] = [
+        egui::Color32::from_rgb(120, 120, 130), // 0 — neutral / draft-ish
+        egui::Color32::from_rgb(90, 150, 100),  // 1 — green / done-ish
+        egui::Color32::from_rgb(190, 150, 70),  // 2 — amber / flagged-ish
+        egui::Color32::from_rgb(150, 100, 170), // 3 — violet
+        egui::Color32::from_rgb(90, 140, 180),  // 4 — blue
+        egui::Color32::from_rgb(180, 110, 110), // 5 — red
+    ];
+    Some(PALETTE[idx % PALETTE.len()])
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_interval_lane(
     painter: &egui::Painter,
@@ -3107,6 +3564,7 @@ fn render_interval_lane(
     view_end: f64,
     tier_id: i64,
     rows: &[sadda_engine::Interval],
+    status_palette: &[String],
     selection: Option<AnnotationSelection>,
     response: &egui::Response,
     draft: &DraftEdit,
@@ -3156,6 +3614,15 @@ fn render_interval_lane(
                 egui::Stroke::new(1.5, egui::Color32::WHITE),
                 egui::StrokeKind::Inside,
             );
+        }
+        // Status indicator: a thin colored strip along the interval's bottom
+        // edge, tinted by the annotation's rubric status (if any).
+        if let Some(tint) = status_tint(r.status.as_deref(), status_palette) {
+            let strip = egui::Rect::from_min_max(
+                egui::Pos2::new(item_rect.left(), item_rect.bottom() - 3.0),
+                egui::Pos2::new(item_rect.right(), item_rect.bottom()),
+            );
+            painter.rect_filled(strip, 0.0, tint);
         }
         if let Some(label) = &r.label {
             if !label.is_empty() && item_rect.width() > 20.0 {
@@ -3256,7 +3723,10 @@ fn render_interval_lane(
                         annotation_id: r.id,
                         kind: LabelEditKind::Interval,
                         text: r.label.clone().unwrap_or_default(),
+                        status: r.status.clone(),
+                        note: r.note.clone().unwrap_or_default(),
                         just_started: true,
+                        ..Default::default()
                     });
                     return;
                 }
@@ -3390,6 +3860,7 @@ fn render_point_lane(
     view_end: f64,
     tier_id: i64,
     rows: &[sadda_engine::Point],
+    status_palette: &[String],
     selection: Option<AnnotationSelection>,
     response: &egui::Response,
     draft: &DraftEdit,
@@ -3438,6 +3909,18 @@ fn render_point_lane(
             ],
             egui::Stroke::new(stroke_width, colour),
         );
+        // Status indicator: a small filled square at the tick's base, tinted
+        // by the point's rubric status (if any).
+        if let Some(tint) = status_tint(p.status.as_deref(), status_palette) {
+            painter.rect_filled(
+                egui::Rect::from_center_size(
+                    egui::Pos2::new(x, rect.bottom() - 3.0),
+                    egui::Vec2::splat(5.0),
+                ),
+                1.0,
+                tint,
+            );
+        }
         if let Some(label) = &p.label
             && !label.is_empty()
         {
@@ -3484,7 +3967,10 @@ fn render_point_lane(
                         annotation_id: row.id,
                         kind: LabelEditKind::Point,
                         text: row.label.clone().unwrap_or_default(),
+                        status: row.status.clone(),
+                        note: row.note.clone().unwrap_or_default(),
                         just_started: true,
+                        ..Default::default()
                     });
                     return;
                 }
@@ -3699,6 +4185,7 @@ impl eframe::App for SaddaApp {
         // Inline label-edit modal. Rendered before the menu so it
         // overlays everything; commit / cancel logic lives inside.
         self.label_edit_window(ui.ctx());
+        self.rubric_editor_window(ui.ctx());
 
         // E9 command palette. Same overlay pattern.
         self.command_palette_window(ui.ctx());
@@ -3818,8 +4305,29 @@ impl SaddaApp {
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             self.file_menu(ui);
+            self.annotate_menu(ui);
             self.view_menu(ui);
             self.help_menu(ui);
+        });
+    }
+
+    fn annotate_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Annotate", |ui| {
+            let project_open = matches!(self.app_state, AppState::ProjectLoaded { .. });
+            if ui
+                .add_enabled(project_open, egui::Button::new("Rubric…"))
+                .on_disabled_hover_text("Open or create a project first")
+                .on_hover_text(
+                    "Edit the annotation rubric: guidelines, status vocabulary, \
+                     and per-tier controlled vocabularies",
+                )
+                .clicked()
+            {
+                ui.close();
+                if self.rubric_editor.is_none() {
+                    self.rubric_editor = Some(RubricEditor::default());
+                }
+            }
         });
     }
 
@@ -5057,6 +5565,12 @@ impl SaddaApp {
         let mut new_draft_action: Option<DraftAction> = None;
         // Label-edit request: double-clicking an interval body.
         let mut label_edit_request: Option<LabelEdit> = None;
+        // The rubric's status vocabulary, fetched once per frame, used to
+        // tint each annotation's status strip.
+        let status_palette: Vec<String> = project
+            .rubric_statuses()
+            .map(|v| v.into_iter().map(|s| s.value).collect())
+            .unwrap_or_default();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             for tier in &tiers {
@@ -5128,6 +5642,7 @@ impl SaddaApp {
                                 view_end,
                                 tier.id,
                                 &rows,
+                                &status_palette,
                                 self.selected_annotation,
                                 &response,
                                 &self.draft_edit,
@@ -5151,6 +5666,7 @@ impl SaddaApp {
                                 view_end,
                                 tier.id,
                                 &rows,
+                                &status_palette,
                                 self.selected_annotation,
                                 &response,
                                 &self.draft_edit,
@@ -5393,6 +5909,8 @@ impl SaddaApp {
                             end_seconds: hi,
                             label: existing.label,
                             parent_annotation_id: existing.parent_annotation_id,
+                            status: existing.status,
+                            note: existing.note,
                             extra: existing.extra,
                         },
                     )
@@ -5427,6 +5945,8 @@ impl SaddaApp {
                             time_seconds: new_time,
                             label: existing.label,
                             parent_annotation_id: existing.parent_annotation_id,
+                            status: existing.status,
+                            note: existing.note,
                             extra: existing.extra,
                         },
                     )
@@ -6321,6 +6841,34 @@ mod layout_tests {
             "gutter width = {} (expected {SIGNAL_LEFT_GUTTER})",
             gutter.width()
         );
+    }
+}
+
+#[cfg(test)]
+mod rubric_ui_tests {
+    use super::*;
+
+    #[test]
+    fn out_of_vocab_only_flags_nonempty_unknown_labels_with_a_vocabulary() {
+        let vocab = vec!["a".to_string(), "i".to_string()];
+        // In-vocabulary, empty label, and empty vocabulary are never OOV.
+        assert!(!is_out_of_vocab(&vocab, "a"));
+        assert!(!is_out_of_vocab(&vocab, ""));
+        assert!(!is_out_of_vocab(&[], "anything"));
+        // A non-empty label absent from a non-empty vocabulary is OOV.
+        assert!(is_out_of_vocab(&vocab, "zzz"));
+    }
+
+    #[test]
+    fn status_tint_is_stable_by_position_and_none_for_unknown() {
+        let statuses = vec!["draft".to_string(), "done".to_string()];
+        assert_eq!(status_tint(None, &statuses), None);
+        assert_eq!(status_tint(Some("nope"), &statuses), None);
+        let a = status_tint(Some("draft"), &statuses).unwrap();
+        let b = status_tint(Some("done"), &statuses).unwrap();
+        // Distinct statuses get distinct tints; the same status is stable.
+        assert_ne!(a, b);
+        assert_eq!(status_tint(Some("draft"), &statuses).unwrap(), a);
     }
 }
 

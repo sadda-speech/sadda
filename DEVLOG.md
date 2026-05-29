@@ -6,6 +6,25 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-30 — Annotation workflow S1: rubric-as-data, controlled vocabulary, annotation status
+
+First *implementation* slice of the annotation suite (design entries below). Ships across all three surfaces (engine + Python + GUI), per the three-surface rule. Makes the annotation **rubric** and each annotation's **status/note** first-class, queryable data instead of prose in an external guidelines document — the concrete down payment on the "rubric-as-data → publication + repeatability" thesis.
+
+**S1 design decisions (from the AskUserQuestion round), some departing from my defaults:**
+- **Status is an arbitrary, rubric-defined set of strings** (not a fixed `draft/final/flagged` enum) — the user's call. Because the set is dynamic + user-defined, `status` can't be a SQL CHECK; it's validated in Rust against `rubric_status`. Any annotation (any status, including none) can carry a free-text **note**.
+- **One rubric per project** (singleton, `rubric.id` pinned to 1) — simpler than multi-rubric; controlled vocabulary keyed by **tier name**. (Multi-rubric/versioning deferred to S6; I kept the schema shaped so that's an additive migration.)
+- **Per-tier open/closed vocabulary** (ELAN-faithful): open (default) accepts any label but the GUI soft-flags out-of-vocab; closed rejects a non-empty out-of-vocab label at insert/update (enforced in the engine).
+
+**Schema (migration V8):** `rubric` (singleton) + `rubric_status` (the status vocabulary) + `rubric_tier` (per-tier-name guidelines + closed flag) + `controlled_vocabulary` (allowed labels per rubric_tier); `status` + `note` columns on `annotation_interval` / `annotation_point`. Audit triggers on the two annotation tables rebuilt to include the new columns (B1 discipline); the four new rubric tables are themselves audited — rubric edits are provenance.
+
+**Engine** (`Project`): set/get rubric, status vocabulary, per-tier config, controlled vocabulary; `label_check` (for autocomplete + soft-flag); `set_interval_status`/`set_point_status`. Validation: a status must be rubric-defined (or None); a closed tier rejects out-of-vocab labels. `Interval`/`Point` (+ specs) carry status/note.
+
+**Python:** status/note on `add_interval`/`add_point` + getters; the full rubric API (statuses/vocab passed as `(value, description, sort_order)` tuples, read back as `StatusDef`/`VocabEntry`/… provisional types). Stubs regenerated.
+
+**GUI:** the double-click editor became an **annotation editor** — label field with controlled-vocab suggestion chips + an out-of-vocab warning (red when the tier is closed; the commit is blocked so the edit isn't lost) + a rubric-status dropdown + a note box. A new **Annotate → Rubric…** window edits name/guidelines, the status list, and a selected tier's open/closed vocabulary. Each annotation's status shows as a small colored strip (intervals) / square (points), tinted stably by the status's position in the rubric so review progress reads at a glance.
+
+**Tests:** engine `rubric_status_note_and_controlled_vocabulary`; pytest `test_rubric.py` (singleton/statuses, status+note round-trip + validation, open/closed vocab, provisional surface); app pure-helper tests (`is_out_of_vocab`, `status_tint`). GUI window interaction itself still needs the user's visual confirmation (can't run WSLg headless), but the alignment-critical pieces are pure-function-tested. **Roadmap S2 (criteria engine) is next.**
+
 ## 2026-05-30 — GUI debuggability: `SADDA_DEBUG` aids + headless layout regression tests
 
 Built after the tier-lane alignment bug, which cost two wrong fixes because I was debugging blind (couldn't see the GUI; the breakthrough only came from hand-added `eprintln!` coordinates the user had to transcribe off a terminal that wouldn't copy). The lesson: the highest-value debugging affordances are **artifacts I can read directly** — a *file*, not a console echo. Added (`crates/app/src/debug.rs`, all gated by the `SADDA_DEBUG` env var so normal runs pay one cached bool check):
