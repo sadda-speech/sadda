@@ -6,6 +6,16 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-30 — Modal-free annotation flow: the inline Annotation panel
+
+Addresses the user's S1 feedback ("we'll need a smoother annotation flow that doesn't involve modals… an annotation column instead of the Reference column during measurement"). The double-click → floating "Edit annotation" window was a workable S1 stopgap but steals focus and hides the signal.
+
+**New Annotation panel** — a right-side column (sibling of the Reference panel, toggled by View → "Show Annotation Panel", persisted) that reflects the **current selection** and edits its label / status / note **in place**: label field with controlled-vocab suggestion chips + the out-of-vocab warning, a rubric-status dropdown, and a note box. Its working copy reloads whenever the selection changes; edits apply to the project on **Enter** (label), **status pick** (immediate), or the **Apply** button (catch-all incl. the multiline note). The engine validates against the live rubric, so a closed-vocab rejection shows in the banner and the working copy is kept for correction.
+
+**Commit-trigger care:** deliberately *not* committing on bare `lost_focus()` — that can lag a frame and land the edit on whatever annotation you clicked next. Enter / status-pick / Apply are all unambiguous same-frame actions.
+
+**Double-click now reveals the panel** (selects the annotation + opens the panel) instead of the modal — that's the modal-free primary flow. The modal is **kept reachable via the right-click "Edit annotation…"** item as a safety net while the panel gets real-world use; it'll be retired once confirmed (then right-click "Edit" routes to the panel too and the `label_edit` machinery is removed). `is_preview`-style pure logic isn't involved here; the panel reuses the (engine-tested) update path. 71 app tests pass; window interaction needs the user's visual pass.
+
 ## 2026-05-30 — Annotation workflow S2: the criteria engine (rules → proposals → accept)
 
 Second implementation slice, across all three surfaces. A **criterion** is a re-runnable rule that selects regions of interest and emits them as **proposals** onto a preview "auto" tier for review; accepted proposals promote to the target tier. This is the bridge that turns "find the regions of interest" from manual labor into declarative, shareable, re-runnable data — and (later) the generator of the campaign layer's work units.

@@ -66,6 +66,10 @@ pub struct PersistedState {
     /// shown at the bottom of the app.
     #[serde(default)]
     pub script_panel_open: bool,
+    /// S2/annotation: whether the right-side Annotation panel (inline editor
+    /// for the selected annotation's label / status / note) is shown.
+    #[serde(default)]
+    pub annotation_panel_open: bool,
     /// E8: persisted script-editor buffer. Survives relaunches so
     /// users don't lose typed scripts.
     #[serde(default)]
