@@ -287,6 +287,8 @@ struct SaddaApp {
     rubric_editor: Option<RubricEditor>,
     /// Open criteria-editor window (slice S2), or `None` when closed.
     criteria_editor: Option<CriteriaEditor>,
+    /// Working state for the inline Annotation panel (modal-free editor).
+    annotation_inspector: AnnotationInspector,
     /// E8: most recent `script-engine` output (stdout + stderr).
     /// `None` until the user clicks Run for the first time this
     /// session. Not persisted across launches — regenerable cheaply.
@@ -510,6 +512,29 @@ struct CriteriaEditor {
     description: String,
     /// Last run/accept/reject result, shown in the window.
     status_msg: Option<String>,
+}
+
+/// Working state for the inline Annotation panel (the modal-free editor): a
+/// live working copy of the currently-selected annotation's label / status /
+/// note, plus the rubric context for that tier. Reloaded whenever the
+/// selection changes; edits apply to the project on commit (Enter / focus
+/// loss / status pick / Apply).
+#[derive(Default)]
+struct AnnotationInspector {
+    /// The annotation the working copy was loaded for; used to detect a
+    /// changed selection and reload.
+    loaded_for: Option<AnnotationSelection>,
+    tier_name: String,
+    kind: LabelEditKind,
+    label: String,
+    status: Option<String>,
+    note: String,
+    /// The tier's controlled vocabulary (for suggestion chips + OOV flag).
+    vocab: Vec<String>,
+    /// Whether the tier's vocabulary is closed.
+    closed: bool,
+    /// The rubric's status vocabulary (status-picker options).
+    statuses: Vec<String>,
 }
 
 impl CriteriaEditor {
@@ -889,6 +914,7 @@ impl SaddaApp {
             label_edit: None,
             rubric_editor: None,
             criteria_editor: None,
+            annotation_inspector: AnnotationInspector::default(),
             script_output: None,
             script_error: None,
             registered_commands: Vec::new(),
@@ -2573,6 +2599,253 @@ impl SaddaApp {
         }
     }
 
+    /// The inline Annotation panel (modal-free editor): shows the selected
+    /// annotation and edits its label / status / note in place, applying on
+    /// commit (Enter / focus loss / status pick / Apply). Reloads its working
+    /// copy whenever the selection changes.
+    fn annotation_panel(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        let Some(sel) = self.selected_annotation else {
+            self.annotation_inspector.loaded_for = None;
+            ui.label(egui::RichText::new("Select an annotation in a tier lane to edit it.").weak());
+            return;
+        };
+        if self.annotation_inspector.loaded_for != Some(sel) {
+            self.load_inspector(sel);
+        }
+
+        let mut commit = false;
+        {
+            let insp = &mut self.annotation_inspector;
+            let kind_label = match insp.kind {
+                LabelEditKind::Interval => "interval",
+                LabelEditKind::Point => "point",
+            };
+            ui.label(egui::RichText::new(format!("{} · {kind_label}", insp.tier_name)).strong());
+            ui.separator();
+
+            ui.label(egui::RichText::new("Label").small());
+            // Commit on Enter (and via the Apply button below). We avoid
+            // committing on bare focus-loss: that can lag a frame and land on
+            // a different annotation if focus is lost by clicking another one.
+            let label_resp = ui.text_edit_singleline(&mut insp.label);
+            if label_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                commit = true;
+            }
+            if is_out_of_vocab(&insp.vocab, &insp.label) {
+                let (color, msg) = if insp.closed {
+                    (
+                        egui::Color32::from_rgb(220, 110, 110),
+                        "⚠ not in the closed vocabulary — will be rejected",
+                    )
+                } else {
+                    (egui::Color32::from_rgb(210, 160, 70), "⚠ out of vocabulary")
+                };
+                ui.colored_label(color, msg);
+            }
+            if !insp.vocab.is_empty() {
+                let vocab = insp.vocab.clone();
+                ui.horizontal_wrapped(|ui| {
+                    for v in &vocab {
+                        if ui.selectable_label(insp.label == *v, v).clicked() {
+                            insp.label = v.clone();
+                            commit = true;
+                        }
+                    }
+                });
+            }
+
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Status").small());
+            if insp.statuses.is_empty() {
+                ui.label(
+                    egui::RichText::new("(no statuses in rubric)")
+                        .italics()
+                        .weak(),
+                );
+            } else {
+                let selected = insp.status.clone().unwrap_or_else(|| "(none)".into());
+                let statuses = insp.statuses.clone();
+                egui::ComboBox::from_id_salt("inspector_status")
+                    .selected_text(selected)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(insp.status.is_none(), "(none)")
+                            .clicked()
+                        {
+                            insp.status = None;
+                            commit = true;
+                        }
+                        for s in &statuses {
+                            let is_sel = insp.status.as_deref() == Some(s.as_str());
+                            if ui.selectable_label(is_sel, s).clicked() {
+                                insp.status = Some(s.clone());
+                                commit = true;
+                            }
+                        }
+                    });
+            }
+
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Note").small());
+            // Multiline: Enter inserts a newline, so the note commits via the
+            // Apply button (or alongside a label-Enter / status pick).
+            ui.add(
+                egui::TextEdit::multiline(&mut insp.note)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY),
+            );
+
+            ui.add_space(6.0);
+            if ui
+                .button("Apply")
+                .on_hover_text("save label, status, and note")
+                .clicked()
+            {
+                commit = true;
+            }
+        }
+        if commit {
+            self.apply_inspector(sel);
+        }
+    }
+
+    /// Loads the selected annotation's label / status / note and its tier's
+    /// rubric context (vocabulary, closed flag, status options) into the
+    /// inspector working copy.
+    fn load_inspector(&mut self, sel: AnnotationSelection) {
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        let (tier_id, kind) = match sel {
+            AnnotationSelection::Interval { tier_id, .. } => (tier_id, LabelEditKind::Interval),
+            AnnotationSelection::Point { tier_id, .. } => (tier_id, LabelEditKind::Point),
+        };
+        let tier_name = project
+            .get_tier(tier_id)
+            .map(|t| t.name)
+            .unwrap_or_default();
+        let (label, status, note): (String, Option<String>, String) = match sel {
+            AnnotationSelection::Interval { annotation_id, .. } => project
+                .intervals(tier_id)
+                .ok()
+                .and_then(|rs| rs.into_iter().find(|r| r.id == annotation_id))
+                .map(|r| {
+                    (
+                        r.label.unwrap_or_default(),
+                        r.status,
+                        r.note.unwrap_or_default(),
+                    )
+                })
+                .unwrap_or_default(),
+            AnnotationSelection::Point { annotation_id, .. } => project
+                .points(tier_id)
+                .ok()
+                .and_then(|rs| rs.into_iter().find(|r| r.id == annotation_id))
+                .map(|r| {
+                    (
+                        r.label.unwrap_or_default(),
+                        r.status,
+                        r.note.unwrap_or_default(),
+                    )
+                })
+                .unwrap_or_default(),
+        };
+        let vocab: Vec<String> = project
+            .controlled_vocabulary(&tier_name)
+            .map(|v| v.into_iter().map(|e| e.value).collect())
+            .unwrap_or_default();
+        let closed = project
+            .rubric_tier(&tier_name)
+            .ok()
+            .flatten()
+            .map(|rt| rt.closed_vocabulary)
+            .unwrap_or(false);
+        let statuses: Vec<String> = project
+            .rubric_statuses()
+            .map(|v| v.into_iter().map(|s| s.value).collect())
+            .unwrap_or_default();
+
+        let insp = &mut self.annotation_inspector;
+        insp.loaded_for = Some(sel);
+        insp.tier_name = tier_name;
+        insp.kind = kind;
+        insp.label = label;
+        insp.status = status;
+        insp.note = note;
+        insp.vocab = vocab;
+        insp.closed = closed;
+        insp.statuses = statuses;
+    }
+
+    /// Applies the inspector working copy to the selected annotation. The
+    /// engine validates against the live rubric; on rejection the reason goes
+    /// to the banner and the working copy is left intact for correction.
+    fn apply_inspector(&mut self, sel: AnnotationSelection) {
+        let (label, status, note) = {
+            let i = &self.annotation_inspector;
+            (i.label.clone(), i.status.clone(), i.note.clone())
+        };
+        let new_label = (!label.is_empty()).then_some(label);
+        let new_status = status;
+        let new_note = (!note.is_empty()).then_some(note);
+        let result: Result<(), String> = match &self.app_state {
+            AppState::ProjectLoaded { project, .. } => match sel {
+                AnnotationSelection::Interval {
+                    tier_id,
+                    annotation_id,
+                } => match project.intervals(tier_id) {
+                    Ok(rows) => match rows.into_iter().find(|r| r.id == annotation_id) {
+                        Some(existing) => project
+                            .update_interval(
+                                annotation_id,
+                                &sadda_engine::IntervalSpec {
+                                    tier_id,
+                                    start_seconds: existing.start_seconds,
+                                    end_seconds: existing.end_seconds,
+                                    label: new_label,
+                                    parent_annotation_id: existing.parent_annotation_id,
+                                    status: new_status,
+                                    note: new_note,
+                                    extra: existing.extra,
+                                },
+                            )
+                            .map_err(|e| format!("Failed to save annotation: {e}")),
+                        None => Ok(()),
+                    },
+                    Err(e) => Err(format!("Failed to reload interval: {e}")),
+                },
+                AnnotationSelection::Point {
+                    tier_id,
+                    annotation_id,
+                } => match project.points(tier_id) {
+                    Ok(rows) => match rows.into_iter().find(|r| r.id == annotation_id) {
+                        Some(existing) => project
+                            .update_point(
+                                annotation_id,
+                                &sadda_engine::PointSpec {
+                                    tier_id,
+                                    time_seconds: existing.time_seconds,
+                                    label: new_label,
+                                    parent_annotation_id: existing.parent_annotation_id,
+                                    status: new_status,
+                                    note: new_note,
+                                    extra: existing.extra,
+                                },
+                            )
+                            .map_err(|e| format!("Failed to save annotation: {e}")),
+                        None => Ok(()),
+                    },
+                    Err(e) => Err(format!("Failed to reload point: {e}")),
+                },
+            },
+            _ => Ok(()),
+        };
+        if let Err(msg) = result {
+            self.set_error(msg);
+        }
+    }
+
     fn label_edit_window(&mut self, ctx: &egui::Context) {
         if self.label_edit.is_none() {
             return;
@@ -3915,6 +4188,7 @@ fn render_interval_lane(
     new_draft_action: &mut Option<DraftAction>,
     label_edit_request: &mut Option<LabelEdit>,
     request_delete: &mut bool,
+    open_annotation_panel: &mut bool,
 ) {
     let view_range = (view_end - view_start).max(1e-6);
     let lane_width = rect.width() as f64;
@@ -4123,23 +4397,19 @@ fn render_interval_lane(
         }
     });
 
-    // Double-click on an interval body → start label edit.
+    // Double-click on an interval body → select it and open the inline
+    // Annotation panel (the modal-free editor).
     if response.double_clicked() {
         if let Some(p) = response.interact_pointer_pos() {
             for r in rows {
                 let x0 = rect.left() + ((r.start_seconds - view_start) * x_per_second) as f32;
                 let x1 = rect.left() + ((r.end_seconds - view_start) * x_per_second) as f32;
                 if p.x >= x0 && p.x <= x1 && rect.y_range().contains(p.y) {
-                    *label_edit_request = Some(LabelEdit {
+                    *new_selection = Some(AnnotationSelection::Interval {
                         tier_id,
                         annotation_id: r.id,
-                        kind: LabelEditKind::Interval,
-                        text: r.label.clone().unwrap_or_default(),
-                        status: r.status.clone(),
-                        note: r.note.clone().unwrap_or_default(),
-                        just_started: true,
-                        ..Default::default()
                     });
+                    *open_annotation_panel = true;
                     return;
                 }
             }
@@ -4282,6 +4552,7 @@ fn render_point_lane(
     new_draft_action: &mut Option<DraftAction>,
     label_edit_request: &mut Option<LabelEdit>,
     request_delete: &mut bool,
+    open_annotation_panel: &mut bool,
 ) {
     let view_range = (view_end - view_start).max(1e-6);
     let lane_width = rect.width() as f64;
@@ -4442,16 +4713,11 @@ fn render_point_lane(
             for row in rows {
                 let x = rect.left() + ((row.time_seconds - view_start) * x_per_second) as f32;
                 if (p.x - x).abs() <= POINT_HIT_ZONE_PX && rect.y_range().contains(p.y) {
-                    *label_edit_request = Some(LabelEdit {
+                    *new_selection = Some(AnnotationSelection::Point {
                         tier_id,
                         annotation_id: row.id,
-                        kind: LabelEditKind::Point,
-                        text: row.label.clone().unwrap_or_default(),
-                        status: row.status.clone(),
-                        note: row.note.clone().unwrap_or_default(),
-                        just_started: true,
-                        ..Default::default()
                     });
+                    *open_annotation_panel = true;
                     return;
                 }
             }
@@ -4750,6 +5016,17 @@ impl eframe::App for SaddaApp {
                     .default_size(200.0)
                     .min_size(120.0)
                     .show_inside(ui, |ui| self.bundle_sidebar(ui));
+                // Inline Annotation panel (modal-free editor for the selected
+                // annotation). Shown as its own right column.
+                if self.persisted.annotation_panel_open {
+                    egui::Panel::right("annotation_panel")
+                        .resizable(true)
+                        .default_size(280.0)
+                        .min_size(200.0)
+                        .show_inside(ui, |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| self.annotation_panel(ui));
+                        });
+                }
                 // D10: right-side Reference panel. Refresh its cached data
                 // before showing it, so a changed selection lands next frame.
                 if self.persisted.reference_panel_open {
@@ -5054,6 +5331,11 @@ impl SaddaApp {
             ui.checkbox(
                 &mut self.persisted.reference_panel_open,
                 "Show Reference Panel",
+            );
+            // Inline Annotation panel (modal-free editor for the selection).
+            ui.checkbox(
+                &mut self.persisted.annotation_panel_open,
+                "Show Annotation Panel",
             );
             // E8: script-panel toggle. Persists across launches.
             ui.checkbox(&mut self.persisted.script_panel_open, "Show Script Panel");
@@ -6064,6 +6346,8 @@ impl SaddaApp {
         // Right-click "Delete" request from a lane; applied after the
         // &project borrow ends, reusing `delete_selected_annotation`.
         let mut request_delete = false;
+        // Double-click on an annotation opens the inline Annotation panel.
+        let mut open_annotation_panel = false;
         // The rubric's status vocabulary, fetched once per frame, used to
         // tint each annotation's status strip.
         let status_palette: Vec<String> = project
@@ -6151,6 +6435,7 @@ impl SaddaApp {
                                 &mut new_draft_action,
                                 &mut label_edit_request,
                                 &mut request_delete,
+                                &mut open_annotation_panel,
                             ),
                             Err(e) => {
                                 new_error = Some(format!(
@@ -6177,6 +6462,7 @@ impl SaddaApp {
                                 &mut new_draft_action,
                                 &mut label_edit_request,
                                 &mut request_delete,
+                                &mut open_annotation_panel,
                             ),
                             Err(e) => {
                                 new_error = Some(format!(
@@ -6265,6 +6551,10 @@ impl SaddaApp {
         // the same path as the Delete/Backspace key.
         if request_delete {
             self.delete_selected_annotation();
+        }
+        // Double-clicking an annotation reveals the inline editor.
+        if open_annotation_panel {
+            self.persisted.annotation_panel_open = true;
         }
         if let Some(t) = new_cursor {
             self.timeline.set_cursor(t);
