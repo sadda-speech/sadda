@@ -6,6 +6,29 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-31 — Annotation workflow S4a: the campaign `target` object (shipped) + the S4 decomposition
+
+S3 done, the roadmap is at **S4 — the campaign layer** (the PI / annotator-team layer: distribute annotation work across N annotators, track it, compile it back). Scoping it surfaced that S4-as-one-line is really three sub-slices on an unbuilt foundation, so this session **decomposed S4 and shipped its first piece (S4a)**.
+
+### The decomposition (decided this session)
+The 2026-05-30 campaign design made `target = (file, RoI, target-type, status)` the first-class unit of work and said S2 would "formalise the target object (criteria emit targets)." **It didn't** — S2 ships *proposals onto a preview `(auto)` tier*; "target" until now only meant a criterion's destination *tier name* (`target_tier`). And there is no project export/package/merge yet (only TextGrid/EAF single-tier interop), which is S4's heaviest, riskiest part. So S4 splits, dependency-ordered:
+- **S4a — the `target` object** (this slice): the work-unit table + status lifecycle + generation from a criterion's RoI selection + hand-marking. The missing foundation.
+- **S4b — assignment**: a first-class `assignment(target, annotator, role, status)` + seeded random-assign / re-randomize-remaining.
+- **S4c — distribution**: per-annotator export *sub-project* package + import/merge (disjoint union; overlap → adjudication). The hard part, deliberately last.
+
+User chose **incremental, target-first** with a **dedicated `target` table** (not "reuse proposals as targets" — a proposal is a *suggested annotation*, per-criterion-run and wiped on re-run; a target is a *persistent unit of work* with its own lifecycle; conflating them would fight the status model).
+
+### S4a, across the three surfaces
+**Engine** (migration **V11** + `corpus.rs`): a new `target` table — `(bundle_id, start_seconds, end_seconds, target_type, status, source, criterion_id, note, extra, timestamps)` + 2 indexes + 3 audit triggers (per the V3/B1 rule). A target is a temporal region on a *bundle*, not tied to a tier (matches the design's `(file, RoI, type, status)` and lets a target outlive any tier). `status ∈ {unassigned, assigned, in_progress, done, flagged}` (CHECK + a Rust `TARGET_STATUSES` const + `validate_target_status`); `source ∈ {manual, criterion}`. API: `add_target` (validates RoI `end>start` + the enums), `targets` (time-ordered), `get_target`, `update_target_status`, `set_target_note`, `delete_target` (idempotent), and the bridge `generate_targets_from_criterion(criterion_id, bundle_id)`. The generator reuses the criteria engine's **RoI query**: I refactored `criteria::evaluate` to extract `select_rois()` (select-label + within/overlaps relations + the S3 signal `where` filter) — `evaluate` now = `select_rois` + emit-per-RoI, and target generation = `select_rois` + one target per surviving interval (typed by the criterion's target tier, `source='criterion'`, `criterion_id` back-link). Regeneration **replaces** this criterion's prior targets on the bundle (mirrors `run_criterion`'s replace-proposals; S4b will make it assignment-aware so progressed work isn't discarded). `python` criteria are rejected here exactly like `run_criterion`.
+
+**Python**: a frozen `Target` pyclass (all getters) surfaced as `sadda.Target` (`provisional`); `add_target` / `targets` / `get_target` / `update_target_status` / `set_target_note` / `delete_target` / `generate_targets_from_criterion` on `Project`. Stubs regenerated (the 7 methods + the class; no other drift).
+
+**GUI**: an **Annotate → Targets…** panel (`targets_panel_window`) for the selected bundle — generate-from-a-criterion (combo + button), add-manual (start/end/type), and a live target list where each row shows its RoI/type/source via a pure, unit-tested `format_target_row`, with an inline status combo (the 5 statuses) and delete. Same read-live / apply-after-borrow shape as the criteria editor.
+
+**Decisions baked in:** target is bundle+span, tier-free; status is a fixed engine enum (distinct from S1's user-defined *annotation* `status` vocabulary — these are work-lifecycle states, not rubric labels); criterion-regen replaces; manual + criterion are the only two sources in v1 (an assignment-aware regen and an "assign whole file = all its targets" shortcut are S4b).
+
+**Gate (all green, clean session):** engine 275 lib + integration (incl. `target_crud_and_status_lifecycle`, `generate_targets_from_criterion_…`; S3's evaluate tests still green after the `select_rois` extraction), clippy clean; python 171 passed / 6 skipped (`test_targets.py`); app 73 (incl. `target_row_shows_roi_type_and_source`), clippy clean; stubs no drift. **Next: S4b — the assignment object.**
+
 ## 2026-05-31 — S3 landed: the suspected dense-read "ordering bug" was a phantom
 
 Resumed S3 in a clean session and closed it out. The two issues the prior (degraded-tooling) session logged as blocking turned out to be one real one-line test bug and one **phantom** — so S3 is now on `main`, honestly green.

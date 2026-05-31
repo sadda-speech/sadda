@@ -260,23 +260,23 @@ fn eval_time(e: &Expr, ctx: &expr::EvalCtx) -> Result<Option<f64>, String> {
     }
 }
 
-/// Evaluates `rule` against pre-fetched intervals. `select_ivs` are the
-/// select-tier intervals; `within_ivs` / `overlaps_ivs` are the relation
-/// tiers' intervals (the caller fetches whichever the rule references and
-/// passes `&[]` for unused ones). `signals` holds the pre-computed series the
-/// rule's `where`/emit expressions reference (empty for a pure S2 rule).
-/// Returns the proposals in select order.
-pub fn evaluate(
+/// Selects the regions of interest `rule` matches: the `select`-tier intervals
+/// that pass the label predicate, the `within`/`overlaps` relations, and the
+/// signal-function `where` filter (false or undefined → dropped). Returned in
+/// select order. This is the "RoI query" half of a criterion, shared by
+/// [`evaluate`] (which then emits an anchor/span per RoI) and the campaign
+/// layer's target generation (which turns each RoI into a unit of work).
+pub fn select_rois(
     rule: &CriterionRule,
     select_ivs: &[EvalInterval],
     within_ivs: &[EvalInterval],
     overlaps_ivs: &[EvalInterval],
     signals: &SignalSet,
-) -> Result<Vec<Proposal>, String> {
+) -> Result<Vec<EvalInterval>, String> {
     let select_m = rule.select.matcher()?;
     let within_m = rule.within.as_ref().map(Selector::matcher).transpose()?;
     let overlaps_m = rule.overlaps.as_ref().map(Selector::matcher).transpose()?;
-    let exprs = rule.compile_exprs()?;
+    let filter = rule.compile_exprs()?.filter;
 
     let mut out = Vec::new();
     for iv in select_ivs {
@@ -299,13 +299,13 @@ pub fn evaluate(
                 continue;
             }
         }
-        let ctx = expr::EvalCtx {
-            start: iv.start,
-            end: iv.end,
-            signals,
-        };
         // Signal-function `where` filter: drop the match on false or undefined.
-        if let Some(f) = &exprs.filter {
+        if let Some(f) = &filter {
+            let ctx = expr::EvalCtx {
+                start: iv.start,
+                end: iv.end,
+                signals,
+            };
             match f.eval(&ctx)? {
                 Some(Value::Bool(true)) => {}
                 Some(Value::Bool(false)) | None => continue,
@@ -314,6 +314,33 @@ pub fn evaluate(
                 }
             }
         }
+        out.push(iv.clone());
+    }
+    Ok(out)
+}
+
+/// Evaluates `rule` against pre-fetched intervals. `select_ivs` are the
+/// select-tier intervals; `within_ivs` / `overlaps_ivs` are the relation
+/// tiers' intervals (the caller fetches whichever the rule references and
+/// passes `&[]` for unused ones). `signals` holds the pre-computed series the
+/// rule's `where`/emit expressions reference (empty for a pure S2 rule).
+/// Returns the proposals in select order.
+pub fn evaluate(
+    rule: &CriterionRule,
+    select_ivs: &[EvalInterval],
+    within_ivs: &[EvalInterval],
+    overlaps_ivs: &[EvalInterval],
+    signals: &SignalSet,
+) -> Result<Vec<Proposal>, String> {
+    let exprs = rule.compile_exprs()?;
+
+    let mut out = Vec::new();
+    for iv in select_rois(rule, select_ivs, within_ivs, overlaps_ivs, signals)? {
+        let ctx = expr::EvalCtx {
+            start: iv.start,
+            end: iv.end,
+            signals,
+        };
         let dur = iv.end - iv.start;
         let label = rule.label.clone().or_else(|| iv.label.clone());
         match &rule.emit {

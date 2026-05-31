@@ -287,6 +287,8 @@ struct SaddaApp {
     rubric_editor: Option<RubricEditor>,
     /// Open criteria-editor window (slice S2), or `None` when closed.
     criteria_editor: Option<CriteriaEditor>,
+    /// Open targets panel (slice S4a — campaign work units), or `None`.
+    targets_panel: Option<TargetsPanel>,
     /// Working state for the inline Annotation panel (modal-free editor).
     annotation_inspector: AnnotationInspector,
     /// E8: most recent `script-engine` output (stdout + stderr).
@@ -511,6 +513,22 @@ struct CriteriaEditor {
     target_tier: String,
     description: String,
     /// Last run/accept/reject result, shown in the window.
+    status_msg: Option<String>,
+}
+
+/// State for the targets panel (slice S4a): the campaign work-unit list for the
+/// selected bundle, plus the small "generate from a criterion" and "add manual
+/// target" affordances. Targets are read live from the project each frame, so
+/// the panel only holds draft inputs and the last status line.
+#[derive(Default)]
+struct TargetsPanel {
+    /// Criterion chosen for "Generate targets from criterion" as `(id, name)`.
+    gen_criterion: Option<(i64, String)>,
+    /// Draft fields for "Add manual target".
+    new_start: String,
+    new_end: String,
+    new_type: String,
+    /// Last action result, shown in the panel.
     status_msg: Option<String>,
 }
 
@@ -917,6 +935,7 @@ impl SaddaApp {
             label_edit: None,
             rubric_editor: None,
             criteria_editor: None,
+            targets_panel: None,
             annotation_inspector: AnnotationInspector::default(),
             script_output: None,
             script_error: None,
@@ -2547,6 +2566,208 @@ impl SaddaApp {
             };
             if let Some(ed) = self.criteria_editor.as_mut() {
                 ed.status_msg = Some(msg);
+            }
+        }
+    }
+
+    /// The targets panel (slice S4a): lists the selected bundle's campaign work
+    /// units, lets the user advance each target's status or delete it, generate
+    /// targets from a saved criterion, or hand-mark a new one. Targets are read
+    /// live from the project each frame; requested mutations are applied after
+    /// the window's borrow ends, mirroring the criteria editor.
+    fn targets_panel_window(&mut self, ctx: &egui::Context) {
+        if self.targets_panel.is_none() {
+            return;
+        }
+        let bundle_id = self.selected_bundle_id;
+
+        // Read the data the panel renders BEFORE borrowing panel state, so the
+        // window closure never holds two conflicting borrows of `self`.
+        let (targets, criteria): (Vec<sadda_engine::Target>, Vec<(i64, String)>) =
+            match (bundle_id, &self.app_state) {
+                (Some(bid), AppState::ProjectLoaded { project, .. }) => (
+                    project.targets(bid).unwrap_or_default(),
+                    project
+                        .criteria()
+                        .map(|cs| cs.into_iter().map(|c| (c.id, c.name)).collect())
+                        .unwrap_or_default(),
+                ),
+                _ => (Vec::new(), Vec::new()),
+            };
+
+        let mut close = false;
+        let mut keep_open = true;
+        let mut generate = false;
+        let mut add_manual = false;
+        let mut status_change: Option<(i64, String)> = None;
+        let mut delete_id: Option<i64> = None;
+
+        egui::Window::new("Targets")
+            .open(&mut keep_open)
+            .resizable(true)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                let panel = self.targets_panel.as_mut().expect("checked above");
+                if bundle_id.is_none() {
+                    ui.label("Select a bundle to manage its targets.");
+                    return;
+                }
+
+                // Generate targets from a saved criterion.
+                ui.horizontal(|ui| {
+                    ui.label("Generate from criterion:");
+                    let label = panel
+                        .gen_criterion
+                        .as_ref()
+                        .map(|(_, n)| n.as_str())
+                        .unwrap_or("— pick —");
+                    egui::ComboBox::from_id_salt("target_gen_criterion")
+                        .selected_text(label)
+                        .show_ui(ui, |ui| {
+                            for (id, name) in &criteria {
+                                if ui
+                                    .selectable_label(
+                                        panel.gen_criterion.as_ref().map(|(i, _)| *i) == Some(*id),
+                                        name,
+                                    )
+                                    .clicked()
+                                {
+                                    panel.gen_criterion = Some((*id, name.clone()));
+                                }
+                            }
+                        });
+                    if ui
+                        .add_enabled(
+                            panel.gen_criterion.is_some(),
+                            egui::Button::new("Generate"),
+                        )
+                        .clicked()
+                    {
+                        generate = true;
+                    }
+                });
+
+                // Hand-mark a manual target.
+                ui.horizontal(|ui| {
+                    ui.label("Add manual:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut panel.new_start)
+                            .hint_text("start s")
+                            .desired_width(60.0),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut panel.new_end)
+                            .hint_text("end s")
+                            .desired_width(60.0),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut panel.new_type)
+                            .hint_text("type")
+                            .desired_width(100.0),
+                    );
+                    if ui.button("Add").clicked() {
+                        add_manual = true;
+                    }
+                });
+
+                ui.separator();
+                if targets.is_empty() {
+                    ui.label(egui::RichText::new("No targets yet.").weak());
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for t in &targets {
+                        ui.horizontal(|ui| {
+                            ui.label(format_target_row(t));
+                            let mut status = t.status.clone();
+                            egui::ComboBox::from_id_salt(("target_status", t.id))
+                                .selected_text(&status)
+                                .show_ui(ui, |ui| {
+                                    for s in sadda_engine::TARGET_STATUSES {
+                                        ui.selectable_value(&mut status, s.to_string(), s);
+                                    }
+                                });
+                            if status != t.status {
+                                status_change = Some((t.id, status));
+                            }
+                            if ui.button("🗑").on_hover_text("Delete target").clicked() {
+                                delete_id = Some(t.id);
+                            }
+                        });
+                    }
+                });
+
+                if let Some(msg) = &panel.status_msg {
+                    ui.separator();
+                    ui.label(egui::RichText::new(msg).weak());
+                }
+                ui.separator();
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+
+        if !keep_open || close {
+            self.targets_panel = None;
+            return;
+        }
+
+        // ---- Apply requests after the window's &mut self borrow ----
+        if generate {
+            let crit = self
+                .targets_panel
+                .as_ref()
+                .and_then(|p| p.gen_criterion.as_ref().map(|(i, _)| *i));
+            let msg = match (crit, bundle_id, &self.app_state) {
+                (Some(cid), Some(bid), AppState::ProjectLoaded { project, .. }) => {
+                    match project.generate_targets_from_criterion(cid, bid) {
+                        Ok(n) => format!("Generated {n} target(s)."),
+                        Err(e) => format!("Generate failed: {e}"),
+                    }
+                }
+                _ => "Pick a criterion and a bundle.".into(),
+            };
+            if let Some(p) = self.targets_panel.as_mut() {
+                p.status_msg = Some(msg);
+            }
+        }
+        if add_manual {
+            let (start, end, ttype) = self
+                .targets_panel
+                .as_ref()
+                .map(|p| (p.new_start.clone(), p.new_end.clone(), p.new_type.clone()))
+                .unwrap_or_default();
+            let msg = match (start.trim().parse::<f64>(), end.trim().parse::<f64>()) {
+                _ if ttype.trim().is_empty() => "Enter a target type.".to_string(),
+                (Ok(s), Ok(e)) => match (bundle_id, &self.app_state) {
+                    (Some(bid), AppState::ProjectLoaded { project, .. }) => {
+                        match project
+                            .add_target(&sadda_engine::TargetSpec::new(bid, s, e, ttype.trim()))
+                        {
+                            Ok(_) => "Added target.".to_string(),
+                            Err(err) => format!("Add failed: {err}"),
+                        }
+                    }
+                    _ => "Select a bundle first.".to_string(),
+                },
+                _ => "Start and end must be numbers.".to_string(),
+            };
+            if let Some(p) = self.targets_panel.as_mut() {
+                if msg == "Added target." {
+                    p.new_start.clear();
+                    p.new_end.clear();
+                    p.new_type.clear();
+                }
+                p.status_msg = Some(msg);
+            }
+        }
+        if let Some((id, status)) = status_change {
+            if let AppState::ProjectLoaded { project, .. } = &self.app_state {
+                let _ = project.update_target_status(id, &status);
+            }
+        }
+        if let Some(id) = delete_id {
+            if let AppState::ProjectLoaded { project, .. } = &self.app_state {
+                let _ = project.delete_target(id);
             }
         }
     }
@@ -4195,6 +4416,16 @@ fn format_provenance_line(processor_id: &str, started_at: &str) -> String {
     format!("↻ from criterion “{name}” · {when}")
 }
 
+/// One-line summary of a campaign target for the targets panel: its RoI, type,
+/// and origin (the status is shown separately as an editable combo). E.g.
+/// `[0.20–0.50s] phones · criterion`.
+fn format_target_row(t: &sadda_engine::Target) -> String {
+    format!(
+        "[{:.2}–{:.2}s] {} · {}",
+        t.start_seconds, t.end_seconds, t.target_type, t.source
+    )
+}
+
 /// Whether `label` is out of the controlled `vocab`: non-empty and absent.
 /// An empty label, or an empty vocabulary, is never "out of vocab".
 fn is_out_of_vocab(vocab: &[String], label: &str) -> bool {
@@ -4982,6 +5213,7 @@ impl eframe::App for SaddaApp {
         self.label_edit_window(ui.ctx());
         self.rubric_editor_window(ui.ctx());
         self.criteria_editor_window(ui.ctx());
+        self.targets_panel_window(ui.ctx());
 
         // E9 command palette. Same overlay pattern.
         self.command_palette_window(ui.ctx());
@@ -5148,6 +5380,20 @@ impl SaddaApp {
                     let mut ed = CriteriaEditor::default();
                     ed.reset_to_new();
                     self.criteria_editor = Some(ed);
+                }
+            }
+            if ui
+                .add_enabled(project_open, egui::Button::new("Targets…"))
+                .on_disabled_hover_text("Open or create a project first")
+                .on_hover_text(
+                    "Manage campaign work units: regions to annotate, generated \
+                     from a criterion or hand-marked, each with a status",
+                )
+                .clicked()
+            {
+                ui.close();
+                if self.targets_panel.is_none() {
+                    self.targets_panel = Some(TargetsPanel::default());
                 }
             }
         });
@@ -7738,6 +7984,24 @@ mod rubric_ui_tests {
         // timestamp without a fractional part is handled too.
         let line = format_provenance_line("custom.proc", "2026-05-31T00:00:00Z");
         assert_eq!(line, "↻ from criterion “custom.proc” · 2026-05-31 00:00:00");
+    }
+
+    #[test]
+    fn target_row_shows_roi_type_and_source() {
+        let t = sadda_engine::Target {
+            id: 1,
+            bundle_id: 1,
+            start_seconds: 0.2,
+            end_seconds: 0.5,
+            target_type: "phones".into(),
+            status: "in_progress".into(),
+            source: "criterion".into(),
+            criterion_id: Some(7),
+            note: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        assert_eq!(format_target_row(&t), "[0.20–0.50s] phones · criterion");
     }
 }
 

@@ -45,6 +45,7 @@ __all__ = [
     "Session",
     "Speaker",
     "StatusDef",
+    "Target",
     "Tier",
     "VocabEntry",
     "clinical",
@@ -99,6 +100,9 @@ LabelCheck = provisional(_native.LabelCheck)
 
 # S2 surface (Phase 4) — criteria engine: re-runnable rules emitting proposals.
 Criterion = provisional(_native.Criterion)
+
+# S4a surface (Phase 4) — campaign targets: the first-class unit of work.
+Target = provisional(_native.Target)
 
 # A1 surface (Phase 3) — provenance timeline + citation export.
 ProcessingRun = stable(_native.ProcessingRun)
