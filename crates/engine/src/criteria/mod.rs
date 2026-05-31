@@ -11,6 +11,10 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod expr;
+
+use expr::{Expr, SignalSet, Value};
+
 /// Float tolerance for containment/overlap comparisons (seconds).
 const EPS: f64 = 1e-9;
 
@@ -84,10 +88,12 @@ fn default_at() -> f64 {
     0.5
 }
 
-/// What to emit for each matched interval, positioned by proportion (0..1)
-/// within the match: a (sub-)span or an anchor point.
+/// What to emit for each matched interval. The proportion-based `span`/`point`
+/// (S2) place an anchor at a fraction (0..1) of the match; the expression-based
+/// `point_expr`/`span_expr` (S3) place it at a signal-function [`Expr`] — e.g.
+/// `argmax(intensity)` or `start + 30%` — evaluated over the match.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Emit {
     /// A span from `from` to `to` (proportions of the matched interval).
     /// Defaults to the whole interval (`from=0.0`, `to=1.0`).
@@ -105,13 +111,26 @@ pub enum Emit {
         #[serde(default = "default_at")]
         at: f64,
     },
+    /// A point at a Time [`Expr`] over the match (S3), e.g. `argmax(intensity)`
+    /// or `start + 20ms`. The expression's value is read as seconds.
+    PointExpr {
+        /// Expression yielding the anchor time, in seconds.
+        at: String,
+    },
+    /// A span between two Time [`Expr`]s over the match (S3).
+    SpanExpr {
+        /// Expression yielding the span start, in seconds.
+        from: String,
+        /// Expression yielding the span end, in seconds.
+        to: String,
+    },
 }
 
 impl Emit {
     /// Whether this rule emits points (vs. spans) — drives the preview tier
     /// type.
     pub fn is_point(&self) -> bool {
-        matches!(self, Emit::Point { .. })
+        matches!(self, Emit::Point { .. } | Emit::PointExpr { .. })
     }
 }
 
@@ -127,6 +146,12 @@ pub struct CriterionRule {
     /// Keep only matches overlapping an interval selected here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlaps: Option<Selector>,
+    /// Signal-function filter (S3): keep only matches for which this boolean
+    /// [`Expr`] is true — e.g. `mean(f0) > 1.2 * mean(f0, file)`. A match where
+    /// the expression is undefined (an empty reduction, e.g. f0 over a fully
+    /// unvoiced interval) is dropped, same as `false`.
+    #[serde(default, rename = "where", skip_serializing_if = "Option::is_none")]
+    pub where_expr: Option<String>,
     /// What to emit per surviving match.
     pub emit: Emit,
     /// Fixed label for the proposals; when absent the matched interval's label
@@ -158,19 +183,100 @@ pub struct Proposal {
     pub label: Option<String>,
 }
 
+/// The signal-function expressions a [`CriterionRule`] references (S3): an
+/// optional `where` filter and the emit anchor expressions, parsed once.
+struct CompiledExprs {
+    filter: Option<Expr>,
+    point_at: Option<Expr>,
+    span: Option<(Expr, Expr)>,
+}
+
+impl CriterionRule {
+    /// Parses the rule's `where` and expression-based emit anchors. Errors on a
+    /// malformed expression (an authoring error).
+    fn compile_exprs(&self) -> Result<CompiledExprs, String> {
+        let filter = self
+            .where_expr
+            .as_deref()
+            .map(Expr::parse)
+            .transpose()
+            .map_err(|e| format!("invalid `where` expression: {e}"))?;
+        let (point_at, span) = match &self.emit {
+            Emit::PointExpr { at } => (
+                Some(Expr::parse(at).map_err(|e| format!("invalid `at` expression: {e}"))?),
+                None,
+            ),
+            Emit::SpanExpr { from, to } => (
+                None,
+                Some((
+                    Expr::parse(from).map_err(|e| format!("invalid `from` expression: {e}"))?,
+                    Expr::parse(to).map_err(|e| format!("invalid `to` expression: {e}"))?,
+                )),
+            ),
+            _ => (None, None),
+        };
+        Ok(CompiledExprs {
+            filter,
+            point_at,
+            span,
+        })
+    }
+
+    /// The distinct signal names this rule references across its `where` and
+    /// emit expressions — what the caller must pre-compute into the
+    /// [`SignalSet`]. Empty for a pure S2 (proportion-only) rule.
+    pub fn referenced_signals(&self) -> Result<Vec<String>, String> {
+        let c = self.compile_exprs()?;
+        let mut out = Vec::new();
+        let mut add = |e: &Expr| {
+            for s in e.signals() {
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+        };
+        if let Some(e) = &c.filter {
+            add(e);
+        }
+        if let Some(e) = &c.point_at {
+            add(e);
+        }
+        if let Some((a, b)) = &c.span {
+            add(a);
+            add(b);
+        }
+        Ok(out)
+    }
+}
+
+/// Evaluates an anchor [`Expr`] to a time in seconds. `Ok(None)` means the
+/// expression was undefined over the match (skip it); a boolean result is an
+/// authoring error.
+fn eval_time(e: &Expr, ctx: &expr::EvalCtx) -> Result<Option<f64>, String> {
+    match e.eval(ctx)? {
+        Some(Value::Num(t)) => Ok(Some(t)),
+        Some(Value::Bool(_)) => Err("anchor expression must be a number, not a boolean".into()),
+        None => Ok(None),
+    }
+}
+
 /// Evaluates `rule` against pre-fetched intervals. `select_ivs` are the
 /// select-tier intervals; `within_ivs` / `overlaps_ivs` are the relation
 /// tiers' intervals (the caller fetches whichever the rule references and
-/// passes `&[]` for unused ones). Returns the proposals in select order.
+/// passes `&[]` for unused ones). `signals` holds the pre-computed series the
+/// rule's `where`/emit expressions reference (empty for a pure S2 rule).
+/// Returns the proposals in select order.
 pub fn evaluate(
     rule: &CriterionRule,
     select_ivs: &[EvalInterval],
     within_ivs: &[EvalInterval],
     overlaps_ivs: &[EvalInterval],
+    signals: &SignalSet,
 ) -> Result<Vec<Proposal>, String> {
     let select_m = rule.select.matcher()?;
     let within_m = rule.within.as_ref().map(Selector::matcher).transpose()?;
     let overlaps_m = rule.overlaps.as_ref().map(Selector::matcher).transpose()?;
+    let exprs = rule.compile_exprs()?;
 
     let mut out = Vec::new();
     for iv in select_ivs {
@@ -191,6 +297,21 @@ pub fn evaluate(
                 .any(|r| m.matches(r.label.as_deref()) && r.start < iv.end && iv.start < r.end);
             if !overlapping {
                 continue;
+            }
+        }
+        let ctx = expr::EvalCtx {
+            start: iv.start,
+            end: iv.end,
+            signals,
+        };
+        // Signal-function `where` filter: drop the match on false or undefined.
+        if let Some(f) = &exprs.filter {
+            match f.eval(&ctx)? {
+                Some(Value::Bool(true)) => {}
+                Some(Value::Bool(false)) | None => continue,
+                Some(Value::Num(_)) => {
+                    return Err("`where` expression must be a boolean, not a number".into());
+                }
             }
         }
         let dur = iv.end - iv.start;
@@ -214,6 +335,28 @@ pub fn evaluate(
                     label,
                 });
             }
+            Emit::PointExpr { .. } => {
+                let e = exprs.point_at.as_ref().expect("compiled point_expr");
+                if let Some(t) = eval_time(e, &ctx)? {
+                    out.push(Proposal {
+                        start: t,
+                        end: None,
+                        label,
+                    });
+                }
+            }
+            Emit::SpanExpr { .. } => {
+                let (fe, te) = exprs.span.as_ref().expect("compiled span_expr");
+                if let (Some(s), Some(e)) = (eval_time(fe, &ctx)?, eval_time(te, &ctx)?) {
+                    if e > s + EPS {
+                        out.push(Proposal {
+                            start: s,
+                            end: Some(e),
+                            label,
+                        });
+                    }
+                }
+            }
         }
     }
     Ok(out)
@@ -231,6 +374,11 @@ mod tests {
         }
     }
 
+    /// No signals — for the pure S2 (proportion-only) evaluator tests.
+    fn no_sig() -> SignalSet {
+        SignalSet::new()
+    }
+
     #[test]
     fn rule_json_round_trips() {
         let rule = CriterionRule {
@@ -245,6 +393,7 @@ mod tests {
                 label_regex: Some("stress".into()),
             }),
             overlaps: None,
+            where_expr: None,
             emit: Emit::Point { at: 0.5 },
             label: None,
         };
@@ -274,10 +423,11 @@ mod tests {
             },
             within: None,
             overlaps: None,
+            where_expr: None,
             emit: Emit::Span { from: 0.0, to: 1.0 },
             label: None,
         };
-        let out = evaluate(&rule, &rows, &[], &[]).unwrap();
+        let out = evaluate(&rule, &rows, &[], &[], &no_sig()).unwrap();
         assert_eq!(out.len(), 2); // a, i (not b)
         assert_eq!(out[0].label.as_deref(), Some("a"));
         assert_eq!(out[1].label.as_deref(), Some("i"));
@@ -299,10 +449,11 @@ mod tests {
                 label_regex: None,
             }),
             overlaps: None,
+            where_expr: None,
             emit: Emit::Span { from: 0.0, to: 1.0 },
             label: None,
         };
-        let out = evaluate(&rule, &phones, &words, &[]).unwrap();
+        let out = evaluate(&rule, &phones, &words, &[], &no_sig()).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].start, 0.0);
     }
@@ -318,10 +469,11 @@ mod tests {
             },
             within: None,
             overlaps: None,
+            where_expr: None,
             emit: Emit::Span { from: 0.2, to: 0.8 },
             label: Some("mid".into()),
         };
-        let out = evaluate(&span, &rows, &[], &[]).unwrap();
+        let out = evaluate(&span, &rows, &[], &[], &no_sig()).unwrap();
         assert_eq!(out[0].start, 1.2);
         assert_eq!(out[0].end, Some(1.8));
         assert_eq!(out[0].label.as_deref(), Some("mid")); // fixed label overrides
@@ -331,9 +483,96 @@ mod tests {
             label: None,
             ..span
         };
-        let out = evaluate(&point, &rows, &[], &[]).unwrap();
+        let out = evaluate(&point, &rows, &[], &[], &no_sig()).unwrap();
         assert_eq!(out[0].start, 1.5);
         assert_eq!(out[0].end, None);
         assert_eq!(out[0].label.as_deref(), Some("v")); // carried over
+    }
+
+    fn sampled(times: &[f64], values: &[f64]) -> expr::SampledSignal {
+        expr::SampledSignal {
+            times: times.to_vec(),
+            values: values.to_vec(),
+        }
+    }
+
+    #[test]
+    fn signal_where_filter_and_expr_point_anchor() {
+        let rows = [iv(0.0, 1.0, "a"), iv(1.0, 2.0, "a")];
+        let mut signals = SignalSet::new();
+        // intensity: quiet over the first interval, loud over the second.
+        signals.insert("intensity".into(), sampled(&[0.5, 1.5], &[-30.0, -10.0]));
+        let rule = CriterionRule::from_json(
+            r#"{"select": {"tier": "phones", "label_any": ["a"]},
+                "where": "mean(intensity) > -20",
+                "emit": {"kind": "point_expr", "at": "argmax(intensity)"}}"#,
+        )
+        .unwrap();
+        let out = evaluate(&rule, &rows, &[], &[], &signals).unwrap();
+        // Only the loud (2nd) interval survives `where`; the point lands at the
+        // intensity argmax inside it.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].start, 1.5);
+        assert_eq!(out[0].end, None);
+    }
+
+    #[test]
+    fn span_expr_with_crossing_endpoint() {
+        let rows = [iv(0.0, 2.0, "v")];
+        let mut signals = SignalSet::new();
+        // f0 rises through 150 at t=0.5 (linear between (0,100) and (1,200)).
+        signals.insert("f0".into(), sampled(&[0.0, 1.0], &[100.0, 200.0]));
+        let rule = CriterionRule::from_json(
+            r#"{"select": {"tier": "t"},
+                "emit": {"kind": "span_expr",
+                         "from": "start", "to": "first_crossing(f0, 150, rising)"}}"#,
+        )
+        .unwrap();
+        let out = evaluate(&rule, &rows, &[], &[], &signals).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].start, 0.0);
+        assert_eq!(out[0].end, Some(0.5));
+    }
+
+    #[test]
+    fn undefined_anchor_skips_the_match() {
+        // The match interval [5,6] has no f0 samples → argmax undefined → skip.
+        let rows = [iv(5.0, 6.0, "v")];
+        let mut signals = SignalSet::new();
+        signals.insert("f0".into(), sampled(&[0.0, 1.0], &[100.0, 110.0]));
+        let rule = CriterionRule::from_json(
+            r#"{"select": {"tier": "t"},
+                "emit": {"kind": "point_expr", "at": "argmax(f0)"}}"#,
+        )
+        .unwrap();
+        assert!(evaluate(&rule, &rows, &[], &[], &signals).unwrap().is_empty());
+    }
+
+    #[test]
+    fn referenced_signals_lists_where_and_emit_signals() {
+        let rule = CriterionRule::from_json(
+            r#"{"select": {"tier": "t"}, "where": "mean(f0) > 100",
+                "emit": {"kind": "point_expr", "at": "argmax(intensity)"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            rule.referenced_signals().unwrap(),
+            vec!["f0".to_string(), "intensity".to_string()]
+        );
+        // A pure S2 (proportion) rule references no signals.
+        let s2 =
+            CriterionRule::from_json(r#"{"select":{"tier":"t"},"emit":{"kind":"point"}}"#).unwrap();
+        assert!(s2.referenced_signals().unwrap().is_empty());
+    }
+
+    #[test]
+    fn snake_case_emit_tags_round_trip() {
+        let rule = CriterionRule::from_json(
+            r#"{"select":{"tier":"t"},"emit":{"kind":"span_expr","from":"start","to":"end"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(rule.emit, Emit::SpanExpr { .. }));
+        // Re-serialize and ensure the tag stays snake_case.
+        assert!(rule.to_json().unwrap().contains("span_expr"));
     }
 }

@@ -38,6 +38,7 @@ pub use corpus::{
     RubricTier, Session, SessionSpec, Speaker, SpeakerSpec, StatusDef, Tier, TierRows, TierSpec,
     TierType, VocabEntry,
 };
+pub use criteria::expr::{Expr, SampledSignal, SignalSet};
 pub use criteria::{CriterionRule, Emit, EvalInterval, Proposal, Selector};
 pub use error::{EngineError, Result};
 pub use live::{

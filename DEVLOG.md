@@ -29,6 +29,25 @@ Mid-session the tool channel degraded: command output arrived a full turn late, 
 - **A new test failing is signal about the test or the substrate, not a reason to thrash** — here it correctly fingered a real B3 bug.
 
 S2.5 on `main` is solid and verified; S3's design + expression engine are sound and parked on `s3-wip` behind the two issues above.
+## 2026-05-31 — Annotation workflow S3: signal-function criteria via a typed expression layer (shipped)
+
+Built the full typed expression layer designed in the entry below — the generalization the user asked for ("any signal, custom or pre-built"; "arbitrary functions over the reduced signal"; "arbitrary boolean"). One small typed language over two open registries (signals + reducers) now covers filters, point anchors, and span endpoints alike.
+
+**`criteria/expr.rs`** (new; `criteria.rs` → `criteria/mod.rs` to host it): a hand-rolled tokenizer + recursive-descent parser + typed evaluator, no new deps. `Value = Num(f64) | Bool`. Reducers (registry): `mean/max/min/median/std/range` → Num, `argmax/argmin` → time, `first_crossing/last_crossing(sig, threshold[, rising|falling])` → time (linear-interpolated). Each reducer takes a signal name + optional trailing scope `interval`|`file` (default interval). Keywords `start/end/duration` (seconds) fold the old proportion anchors into the language. Unit sugar: `ms` (→ s) and `%` (→ fraction of `duration`). Operators: `+ - * /`, comparisons, `and/or/not`. **Empty reduction → undefined**: a reduction over no samples (e.g. f0 across a fully-unvoiced interval) yields `None`, which propagates and makes the per-match caller **skip the match** (the user's choice). Type errors (bool where a number is needed, unknown signal/func) are hard errors. `Expr::signals()` lists referenced signal names. ~11 unit tests (arithmetic/units, comparisons/logic, interval+file reducers, crossings±direction, undefined propagation, type+parse errors, signal collection).
+
+**`criteria/mod.rs`**: `Emit` gained `point_expr {at}` / `span_expr {from,to}` (serde tag switched to `snake_case` — `span`/`point` unchanged, so **S2 stored criteria still parse**); `CriterionRule` gained `#[serde(rename="where")] where_expr`. `evaluate()` now takes `&SignalSet` and, per surviving match, applies the `where` Bool filter (false/undefined → skip) and the expression anchors (undefined → skip). `referenced_signals()` collects what the caller must compute. The pure-evaluator property is preserved exactly as S2.
+
+**`corpus.rs`**: `signal_set(bundle_id, names)` is the **open signal registry** — built-in `f0` (voiced frames only, so an unvoiced interval is an empty/undefined reduction) and `intensity` (dB-FS) computed from the bundle audio; any other name resolves to a `continuous_numeric` measure-track tier of that name (sample times reconstructed from its stored rate); unknown → error. `run_criterion` collects the rule's referenced signals, builds the set, and passes it to `evaluate`. Built only the signals a rule actually names (audio loaded lazily).
+
+**Layering (the "why a structured layer when Python exists" answer, realized):** the expression stays declarative/diffable/shareable while being general; the S2 `kind='python'` escape remains the unbounded tail. Both are now run-traced (S2.5).
+
+**Surfaces:** engine (above). Python: signal-function criteria run through the existing `run_criterion` (no new bindings — stubs unchanged); added `test_signal_function_criterion_end_to_end` (a `where mean(energy)>20` + `argmax(energy)` anchor over a `continuous_numeric` track) and `test_bad_expression_surfaces_on_run`. GUI: the criteria editor's free-text JSON body already accepts the new `where`/`point_expr`/`span_expr` syntax, so the capability is reachable today — a **guided expression builder** (widgets that emit the string) is the natural follow-on the design flagged, deferred.
+
+**Decisions baked in (from the AskUserQuestion round):** `ms`+`%` unit sugar only (Hz/dB bare); optional crossing direction; empty-RoI reduction skips the match.
+
+**Deferred:** guided GUI expression builder; user-registered custom reducers/signals (the registries are open in shape but v1 ships the built-in set); Hz/dB unit suffixes.
+
+**Gate (all green):** engine 173 lib + integration tests, clippy clean, workspace builds; python 168 passed / 6 skipped; app 72; stubs no drift. **S3 done — the annotation roadmap is now at S4 (campaign/assignment layer).**
 
 ## 2026-05-31 — Annotation workflow S2.5: criterion-run provenance (shipped)
 

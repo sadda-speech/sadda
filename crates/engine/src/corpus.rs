@@ -2260,6 +2260,98 @@ impl Project {
         format!("{target_tier} (auto)")
     }
 
+    /// Computes the `names` signals for a bundle into a
+    /// [`SignalSet`](crate::criteria::SignalSet) for the criteria expression
+    /// evaluator. The built-in names `f0` (voiced frames only) and `intensity`
+    /// (dB-FS) are computed from the bundle audio; any other name resolves to a
+    /// `continuous_numeric` measure-track tier of that name (sample times
+    /// reconstructed from its stored sample rate). An unknown name errors. This
+    /// is the open "signal registry" — built-ins plus every stored track.
+    fn signal_set(
+        &self,
+        bundle_id: i64,
+        names: &[String],
+    ) -> Result<crate::SignalSet> {
+        use crate::SampledSignal;
+        let mut set = crate::SignalSet::new();
+        let needs_audio = names.iter().any(|n| n == "f0" || n == "intensity");
+        let audio = if needs_audio {
+            Some(self.load_audio(bundle_id)?)
+        } else {
+            None
+        };
+        for name in names {
+            if set.contains_key(name) {
+                continue;
+            }
+            let sig = match name.as_str() {
+                "f0" => {
+                    let a = audio.as_ref().expect("audio loaded for f0");
+                    let config = crate::pitch::PitchConfig::default();
+                    let frames = crate::pitch::pitch(
+                        a,
+                        &config,
+                        crate::pitch::PitchMethod::WindowedAutocorrelation,
+                    );
+                    let mut times = Vec::new();
+                    let mut values = Vec::new();
+                    // Voiced frames only — an unvoiced f0 estimate is unreliable,
+                    // and excluding them makes "f0 over a fully unvoiced interval"
+                    // an empty (undefined) reduction, which skips the match.
+                    for f in frames {
+                        if f.voicing >= config.voicing_threshold {
+                            times.push(f.time_seconds);
+                            values.push(f.frequency_hz.value() as f64);
+                        }
+                    }
+                    SampledSignal { times, values }
+                }
+                "intensity" => {
+                    let a = audio.as_ref().expect("audio loaded for intensity");
+                    let mono: Vec<f32> = a.mono_samples().collect();
+                    let frames = crate::dsp::intensity(&mono, a.sample_rate, 0.025, 0.010);
+                    let times = frames.iter().map(|f| f.time_seconds).collect();
+                    // dB-FS from the public `rms` field (mirrors the engine's own
+                    // db_fs derivation) — avoids the private Decibels inner field.
+                    let values = frames
+                        .iter()
+                        .map(|f| {
+                            if f.rms > 0.0 {
+                                20.0 * (f.rms as f64).log10()
+                            } else {
+                                -200.0
+                            }
+                        })
+                        .collect();
+                    SampledSignal { times, values }
+                }
+                other => {
+                    let tier = self.tier_by_name(bundle_id, other)?.ok_or_else(|| {
+                        EngineError::Corpus(format!(
+                            "criterion references unknown signal {other:?} \
+                             (not a built-in f0/intensity, nor a continuous_numeric tier)"
+                        ))
+                    })?;
+                    let ds = self.derived_signal(tier.id)?.ok_or_else(|| {
+                        EngineError::Corpus(format!(
+                            "signal {other:?} is a tier but has no derived-signal data"
+                        ))
+                    })?;
+                    let sr = ds.sample_rate_hz.ok_or_else(|| {
+                        EngineError::Corpus(format!(
+                            "signal tier {other:?} has no sample rate (needed to place samples in time)"
+                        ))
+                    })?;
+                    let values = self.read_continuous_numeric(tier.id)?;
+                    let times = (0..values.len()).map(|i| i as f64 / sr).collect();
+                    SampledSignal { times, values }
+                }
+            };
+            set.insert(name.clone(), sig);
+        }
+        Ok(set)
+    }
+
     /// Runs a `structured` criterion against a bundle: evaluates the rule and
     /// (re)writes its proposals onto the preview tier `"<target> (auto)"`,
     /// replacing any prior proposals. Returns the proposal count. `python`
@@ -2293,8 +2385,12 @@ impl Project {
             Some(s) => self.eval_intervals(bundle_id, &s.tier)?.unwrap_or_default(),
             None => Vec::new(),
         };
-        let proposals = crate::criteria::evaluate(&rule, &select_ivs, &within_ivs, &overlaps_ivs)
-            .map_err(EngineError::Corpus)?;
+        // S3: compute the signals the rule's where/emit expressions reference.
+        let signal_names = rule.referenced_signals().map_err(EngineError::Corpus)?;
+        let signals = self.signal_set(bundle_id, &signal_names)?;
+        let proposals =
+            crate::criteria::evaluate(&rule, &select_ivs, &within_ivs, &overlaps_ivs, &signals)
+                .map_err(EngineError::Corpus)?;
         let run_id = self.record_criterion_run(&crit, bundle_id)?;
         self.set_proposals(bundle_id, &crit.target_tier, &proposals, Some(run_id))
     }
