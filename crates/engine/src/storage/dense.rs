@@ -283,4 +283,82 @@ mod tests {
         let err = write_continuous_numeric(&path, &[]).unwrap_err();
         assert!(matches!(err, EngineError::Corpus(_)));
     }
+
+    /// Regression guard for the "S3 dense-read ordering" scare (DEVLOG
+    /// 2026-05-31): a degraded session reported `read_continuous_numeric`
+    /// returning rotated/reordered samples intermittently. Parquet reads are
+    /// row-ordered, so a rotation is structurally impossible here — this test
+    /// pins that. It writes the exact `[10×10, 40×10]` series from the S3 end-
+    /// to-end test, forces *many small row groups* (so the reader yields
+    /// multiple batches that must concatenate in order), and reads it back many
+    /// times from many threads. Any rotation/reordering would fail an exact
+    /// `assert_eq` on every read.
+    #[test]
+    fn read_continuous_numeric_preserves_order_under_repeated_and_concurrent_reads() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let path = tmp_path("order_stress");
+        // The S3 series, plus a longer monotonic series to span many row groups.
+        let short: Vec<f64> = [10.0; 10].into_iter().chain([40.0; 10]).collect();
+        let long: Vec<f64> = (0..5000).map(|i| i as f64).collect();
+
+        // Force tiny row groups so the reader must stitch many batches in order.
+        let props = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .set_max_row_group_row_count(Some(7))
+            .build();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Float64,
+            false,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Float64Array::from(long.clone())) as ArrayRef],
+        )
+        .unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        // The short series via the normal writer (single row group).
+        let short_path = tmp_path("order_stress_short");
+        write_continuous_numeric(&short_path, &short).unwrap();
+
+        // Repeated sequential reads.
+        for _ in 0..200 {
+            assert_eq!(read_continuous_numeric(&path).unwrap(), long);
+            assert_eq!(read_continuous_numeric(&short_path).unwrap(), short);
+        }
+
+        // Concurrent reads from many threads sharing the same files.
+        let long = Arc::new(long);
+        let short = Arc::new(short);
+        let path = Arc::new(path);
+        let short_path = Arc::new(short_path);
+        let handles: Vec<_> = (0..16)
+            .map(|_| {
+                let (long, short, path, short_path) = (
+                    Arc::clone(&long),
+                    Arc::clone(&short),
+                    Arc::clone(&path),
+                    Arc::clone(&short_path),
+                );
+                thread::spawn(move || {
+                    for _ in 0..100 {
+                        assert_eq!(read_continuous_numeric(&path).unwrap(), *long);
+                        assert_eq!(read_continuous_numeric(&short_path).unwrap(), *short);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let _ = std::fs::remove_file(&*path);
+        let _ = std::fs::remove_file(&*short_path);
+    }
 }

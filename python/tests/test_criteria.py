@@ -160,7 +160,7 @@ def test_signal_function_criterion_end_to_end() -> None:
         proj.write_continuous_numeric(energy, np.array([10.0] * 10 + [40.0] * 10), 10.0)
         # _project adds "a" phones only in the quiet region; add one loud "a".
         phones = next(t for t in proj.tiers(bundle_id) if t.name == "phones")
-        proj.add_interval(phones, 1.2, 1.4, label="a")
+        proj.add_interval(phones.id, 1.2, 1.4, label="a")
 
         # Keep only "a" intervals whose mean energy exceeds 20; anchor at the
         # energy argmax — a signal-function criterion across both roles.

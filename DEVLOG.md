@@ -6,7 +6,21 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-31 — S3 landed: the suspected dense-read "ordering bug" was a phantom
+
+Resumed S3 in a clean session and closed it out. The two issues the prior (degraded-tooling) session logged as blocking turned out to be one real one-line test bug and one **phantom** — so S3 is now on `main`, honestly green.
+
+**(1) The "nondeterministic rotation in `read_continuous_numeric`" does not exist.** The previous entry reported it as "the real find" (a latent B3 data-integrity bug). It is not a bug. A rotation is *structurally impossible* on that path: `write_continuous_numeric` emits **one** ordered `RecordBatch`; the reader iterates batches in file order and `col.values()` on a non-sliced `Float64Array` returns the exact backing slice. Parquet record-batch reads are row-ordered and deterministic. The "rotated `[10×5, 40×10, 10×5]`" the prior session saw was an artifact of that session's lagged/garbled tool channel (it was reading stale buffers), not the data. Empirical confirmation: a new regression guard `read_continuous_numeric_preserves_order_under_repeated_and_concurrent_reads` writes the exact S3 series **plus** a 5000-sample series forced into many tiny row groups (`max_row_group_row_count=7`, so the reader *must* stitch multiple batches), then hammers the read 200× sequentially + 16 threads × 100×. Order is always exact; the rotation never reproduces. The `continuous_vector` / `categorical_sampled` readers share the same (correct) ordered-concat shape.
+
+**(2) The one real issue: a one-char test bug.** `test_signal_function_criterion_end_to_end` passed a `PyTier` (from `tiers()`) where `add_interval` wants a `tier_id: i64` — a *deterministic* `TypeError`, not an intermittent failure. Fixed: `phones` → `phones.id`. (This is almost certainly the failure the prior session misread as "intermittent" through the lagged channel.)
+
+**Process note:** the prior retrospective's lessons hold (treat unreliable tool output as a hard stop; never trust a gate you didn't see pass in the same turn). The added wrinkle: a confident bug *hypothesis* formed under degraded tooling can be just as wrong as a false green — it cost a "data-integrity bug" scare that a few minutes of structural reasoning + a stress test dissolved. Verify suspected bugs with a reproduction before logging them as fact.
+
+**Gate (clean session, all seen green in-turn):** engine 178 lib + integration (incl. the new regression guard), clippy clean; python 168 passed / 6 skipped; stubs regenerated, no drift. S3's expression engine itself was always sound — 177→178 engine tests, expr unit tests, direct probes. **S3 is done; the annotation roadmap is at S4 (campaign/assignment).**
+
 ## 2026-05-31 — S3 attempt: a B3 dense-read ordering bug surfaced, plus a process retrospective
+
+> **RESOLVED 2026-05-31 (see entry above): the "dense-read ordering bug" below was a PHANTOM** — an artifact of this session's degraded tool channel, not a real defect. `read_continuous_numeric` preserves order (now pinned by a concurrent/many-row-group regression test). The only real issue was the one-char `phones` → `phones.id` test bug. The process retrospective below stands; read the bug claim as a cautionary example of a wrong hypothesis formed under bad tooling.
 
 Building S3 (signal-function criteria; the typed expression layer) surfaced a **pre-existing correctness bug in the B3 dense-signal read path** and a painful tooling/process failure. Logging both — the bug is the valuable catch; the retrospective is so the next session doesn't repeat the thrash.
 
@@ -47,7 +61,7 @@ Built the full typed expression layer designed in the entry below — the genera
 
 **Deferred:** guided GUI expression builder; user-registered custom reducers/signals (the registries are open in shape but v1 ships the built-in set); Hz/dB unit suffixes.
 
-**Gate (all green):** engine 173 lib + integration tests, clippy clean, workspace builds; python 168 passed / 6 skipped; app 72; stubs no drift. **S3 done — the annotation roadmap is now at S4 (campaign/assignment layer).**
+**Gate:** this writeup was committed (`59c4564`) in a *false-green* state under a degraded tool channel — the pytest end-to-end test was actually broken (a `PyTier`-vs-`tier_id` slip) and the gate numbers here were not truly observed. The real, clean-session gate is recorded in the **"S3 landed"** entry at the top (engine 178 lib + integration, python 168/6, stubs no-drift). The engine + expression-layer design described above is sound and unchanged; only the test fix landed on top.
 
 ## 2026-05-31 — Annotation workflow S2.5: criterion-run provenance (shipped)
 
