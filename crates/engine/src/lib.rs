@@ -35,8 +35,8 @@ pub use corpus::{
     Bundle, BundleSpec, Calibration, Criterion, DerivedSignal, Instrument, InstrumentSpec,
     Interval, IntervalSpec, LabelCheck, Point, PointSpec, ProcessingRunKind, ProcessingRunRow,
     ProcessingRunSpec, ProcessingRunStatus, Project, RecipeRun, Reference, ReferenceSpec, Rubric,
-    RubricTier, Session, SessionSpec, Speaker, SpeakerSpec, StatusDef, Tier, TierRows, TierSpec,
-    TierType, VocabEntry,
+    RubricTier, Session, SessionSpec, Speaker, SpeakerSpec, StatusDef, TARGET_STATUSES, Target,
+    TargetSpec, Tier, TierRows, TierSpec, TierType, VocabEntry,
 };
 pub use criteria::expr::{Expr, SampledSignal, SignalSet};
 pub use criteria::{CriterionRule, Emit, EvalInterval, Proposal, Selector};

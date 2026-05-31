@@ -610,6 +610,79 @@ pub struct Criterion {
     pub updated_at: String,
 }
 
+/// A campaign **target** (slice S4a): the first-class unit of annotation work —
+/// a region of interest on a bundle that needs a particular kind of annotation,
+/// carrying a status through the campaign lifecycle. Generated from a
+/// criterion's RoI selection (`source = "criterion"`) or hand-marked
+/// (`source = "manual"`). The S4b assignment layer distributes targets; the QA
+/// dashboard reads completeness off `status`.
+#[derive(Debug, Clone)]
+pub struct Target {
+    /// Target id (primary key).
+    pub id: i64,
+    /// FK into [`crate::Bundle`] — the file this RoI lives on.
+    pub bundle_id: i64,
+    /// RoI start, in seconds.
+    pub start_seconds: f64,
+    /// RoI end, in seconds (`> start_seconds`).
+    pub end_seconds: f64,
+    /// What kind of annotation work the RoI needs (usually a tier name).
+    pub target_type: String,
+    /// Lifecycle: `unassigned` / `assigned` / `in_progress` / `done` / `flagged`.
+    pub status: String,
+    /// How the target came to exist: `manual` or `criterion`.
+    pub source: String,
+    /// The generating criterion when `source == "criterion"`; else `None`.
+    pub criterion_id: Option<i64>,
+    /// Optional free-text note (e.g. why a target was flagged).
+    pub note: Option<String>,
+    /// ISO 8601 UTC creation timestamp.
+    pub created_at: String,
+    /// ISO 8601 UTC timestamp of the last update.
+    pub updated_at: String,
+}
+
+/// Insert parameters for a [`Target`]. `status` defaults to `"unassigned"` and
+/// `source` to `"manual"` when `None`.
+#[derive(Debug, Clone, Default)]
+pub struct TargetSpec {
+    /// FK into [`crate::Bundle`].
+    pub bundle_id: i64,
+    /// RoI start, in seconds.
+    pub start_seconds: f64,
+    /// RoI end, in seconds (must be `> start_seconds`).
+    pub end_seconds: f64,
+    /// What kind of annotation work the RoI needs.
+    pub target_type: String,
+    /// Lifecycle status; `None` → `"unassigned"`.
+    pub status: Option<String>,
+    /// Origin; `None` → `"manual"`.
+    pub source: Option<String>,
+    /// Generating criterion (for `source = "criterion"`).
+    pub criterion_id: Option<i64>,
+    /// Optional note.
+    pub note: Option<String>,
+    /// Optional opaque JSON blob.
+    pub extra: Option<String>,
+}
+
+impl TargetSpec {
+    /// A manual target over `[start, end)` on `bundle_id` for `target_type`.
+    pub fn new(bundle_id: i64, start_seconds: f64, end_seconds: f64, target_type: &str) -> Self {
+        Self {
+            bundle_id,
+            start_seconds,
+            end_seconds,
+            target_type: target_type.to_owned(),
+            ..Default::default()
+        }
+    }
+}
+
+/// The valid [`Target::status`] values, in lifecycle order.
+pub const TARGET_STATUSES: [&str; 5] =
+    ["unassigned", "assigned", "in_progress", "done", "flagged"];
+
 /// Registration row for a Parquet sidecar holding a dense tier's data.
 /// Created automatically by `Project::write_continuous_numeric` /
 /// `write_continuous_vector` / `write_categorical_sampled`.
@@ -2185,6 +2258,209 @@ impl Project {
         self.conn
             .execute("DELETE FROM criterion WHERE id = ?1", [id])?;
         Ok(())
+    }
+
+    // ====================================================================
+    // Targets (slice S4a). A `target` is the first-class unit of annotation
+    // work: a region of interest on a bundle with a lifecycle status, either
+    // generated from a criterion's RoI selection or hand-marked.
+    // ====================================================================
+
+    /// Inserts a target. Validates the RoI (`end > start`) and the `status` /
+    /// `source` enums; defaults `status` to `"unassigned"` and `source` to
+    /// `"manual"`. Returns the new id.
+    pub fn add_target(&self, spec: &TargetSpec) -> Result<i64> {
+        if spec.end_seconds <= spec.start_seconds {
+            return Err(EngineError::Corpus(format!(
+                "target RoI must have end > start, got [{}, {}]",
+                spec.start_seconds, spec.end_seconds
+            )));
+        }
+        let status = spec.status.as_deref().unwrap_or("unassigned");
+        Self::validate_target_status(status)?;
+        let source = spec.source.as_deref().unwrap_or("manual");
+        if !matches!(source, "manual" | "criterion") {
+            return Err(EngineError::Corpus(format!(
+                "target source must be 'manual' or 'criterion', got {source:?}"
+            )));
+        }
+        let id: i64 = self.conn.query_row(
+            "INSERT INTO target \
+                (bundle_id, start_seconds, end_seconds, target_type, status, source, \
+                 criterion_id, note, extra) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) RETURNING id",
+            rusqlite::params![
+                spec.bundle_id,
+                spec.start_seconds,
+                spec.end_seconds,
+                spec.target_type,
+                status,
+                source,
+                spec.criterion_id,
+                spec.note,
+                spec.extra,
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// Lists a bundle's targets in time order (then id).
+    pub fn targets(&self, bundle_id: i64) -> Result<Vec<Target>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, bundle_id, start_seconds, end_seconds, target_type, status, source, \
+                    criterion_id, note, created_at, updated_at \
+             FROM target WHERE bundle_id = ?1 ORDER BY start_seconds, id",
+        )?;
+        let rows = stmt
+            .query_map([bundle_id], Self::map_target_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Reads a target by id.
+    pub fn get_target(&self, id: i64) -> Result<Option<Target>> {
+        self.conn
+            .query_row(
+                "SELECT id, bundle_id, start_seconds, end_seconds, target_type, status, source, \
+                        criterion_id, note, created_at, updated_at \
+                 FROM target WHERE id = ?1",
+                [id],
+                Self::map_target_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Moves a target through its lifecycle: sets `status` (validated) and
+    /// bumps `updated_at`. Errors if the target does not exist.
+    pub fn update_target_status(&self, id: i64, status: &str) -> Result<()> {
+        Self::validate_target_status(status)?;
+        let n = self.conn.execute(
+            "UPDATE target SET status = ?1, \
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE id = ?2",
+            rusqlite::params![status, id],
+        )?;
+        if n == 0 {
+            return Err(EngineError::Corpus(format!("no target with id {id}")));
+        }
+        Ok(())
+    }
+
+    /// Sets (or clears, with `None`) a target's note and bumps `updated_at`.
+    /// Errors if the target does not exist.
+    pub fn set_target_note(&self, id: i64, note: Option<&str>) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE target SET note = ?1, \
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE id = ?2",
+            rusqlite::params![note, id],
+        )?;
+        if n == 0 {
+            return Err(EngineError::Corpus(format!("no target with id {id}")));
+        }
+        Ok(())
+    }
+
+    /// Deletes a target by id. Idempotent.
+    pub fn delete_target(&self, id: i64) -> Result<()> {
+        self.conn.execute("DELETE FROM target WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Generates targets from a `structured` criterion's RoI selection on
+    /// `bundle_id`: each surviving select interval (after label / within /
+    /// overlaps / `where` filtering) becomes one target whose RoI is that
+    /// interval, `target_type` is the criterion's target tier, `source` is
+    /// `"criterion"`, and `criterion_id` links back. Re-running REPLACES this
+    /// criterion's prior targets on this bundle (mirrors `run_criterion`'s
+    /// replace-proposals semantics). Returns the target count.
+    ///
+    /// `python` criteria are rejected here (they run in the python/app layer),
+    /// exactly as [`run_criterion`](Self::run_criterion).
+    pub fn generate_targets_from_criterion(
+        &self,
+        criterion_id: i64,
+        bundle_id: i64,
+    ) -> Result<usize> {
+        let crit = self
+            .get_criterion(criterion_id)?
+            .ok_or_else(|| EngineError::Corpus(format!("no criterion with id {criterion_id}")))?;
+        if crit.kind != "structured" {
+            return Err(EngineError::Corpus(format!(
+                "criterion {criterion_id} is kind '{}'; only 'structured' criteria generate \
+                 targets in the engine (python criteria run in the sadda.app layer)",
+                crit.kind
+            )));
+        }
+        let rule =
+            crate::criteria::CriterionRule::from_json(&crit.body).map_err(EngineError::Corpus)?;
+        let select_ivs = self
+            .eval_intervals(bundle_id, &rule.select.tier)?
+            .ok_or_else(|| {
+                EngineError::Corpus(format!(
+                    "select tier {:?} not found on bundle {bundle_id}",
+                    rule.select.tier
+                ))
+            })?;
+        let within_ivs = match &rule.within {
+            Some(s) => self.eval_intervals(bundle_id, &s.tier)?.unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let overlaps_ivs = match &rule.overlaps {
+            Some(s) => self.eval_intervals(bundle_id, &s.tier)?.unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let signal_names = rule.referenced_signals().map_err(EngineError::Corpus)?;
+        let signals = self.signal_set(bundle_id, &signal_names)?;
+        let rois =
+            crate::criteria::select_rois(&rule, &select_ivs, &within_ivs, &overlaps_ivs, &signals)
+                .map_err(EngineError::Corpus)?;
+
+        // Replace this criterion's prior targets on this bundle. (S4b will make
+        // regeneration assignment-aware so progressed work isn't discarded.)
+        self.conn.execute(
+            "DELETE FROM target WHERE bundle_id = ?1 AND criterion_id = ?2",
+            rusqlite::params![bundle_id, criterion_id],
+        )?;
+        for roi in &rois {
+            self.add_target(&TargetSpec {
+                bundle_id,
+                start_seconds: roi.start,
+                end_seconds: roi.end,
+                target_type: crit.target_tier.clone(),
+                source: Some("criterion".into()),
+                criterion_id: Some(criterion_id),
+                ..Default::default()
+            })?;
+        }
+        Ok(rois.len())
+    }
+
+    fn validate_target_status(status: &str) -> Result<()> {
+        if !TARGET_STATUSES.contains(&status) {
+            return Err(EngineError::Corpus(format!(
+                "invalid target status {status:?}; must be one of {TARGET_STATUSES:?}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn map_target_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Target> {
+        Ok(Target {
+            id: row.get(0)?,
+            bundle_id: row.get(1)?,
+            start_seconds: row.get(2)?,
+            end_seconds: row.get(3)?,
+            target_type: row.get(4)?,
+            status: row.get(5)?,
+            source: row.get(6)?,
+            criterion_id: row.get(7)?,
+            note: row.get(8)?,
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
+        })
     }
 
     /// Finds a tier by name on a bundle, if present.
@@ -5116,6 +5392,127 @@ mod tests {
         let promoted = project.intervals(target.id).unwrap();
         assert_eq!(promoted.len(), 2);
         assert!(promoted.iter().all(|iv| iv.processing_run_id == Some(latest)));
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn target_crud_and_status_lifecycle() {
+        let root = unique_dir("targets");
+        let _ = std::fs::remove_dir_all(&root);
+        let source_wav =
+            std::env::temp_dir().join(format!("sadda_targets_{}.wav", std::process::id()));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("b", &source_wav).unwrap();
+
+        // Manual target with defaults: status='unassigned', source='manual'.
+        let id = project
+            .add_target(&TargetSpec::new(bundle_id, 0.2, 0.5, "phones"))
+            .unwrap();
+        let t = project.get_target(id).unwrap().unwrap();
+        assert_eq!(t.status, "unassigned");
+        assert_eq!(t.source, "manual");
+        assert_eq!(t.target_type, "phones");
+        assert_eq!(t.criterion_id, None);
+
+        // A second, earlier target — listing is time-ordered.
+        project
+            .add_target(&TargetSpec::new(bundle_id, 0.0, 0.1, "phones"))
+            .unwrap();
+        let listed = project.targets(bundle_id).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed[0].start_seconds < listed[1].start_seconds);
+
+        // Status lifecycle + note; bad status rejected; RoI sanity enforced.
+        project.update_target_status(id, "in_progress").unwrap();
+        project.set_target_note(id, Some("ambiguous vs rubric")).unwrap();
+        let t = project.get_target(id).unwrap().unwrap();
+        assert_eq!(t.status, "in_progress");
+        assert_eq!(t.note.as_deref(), Some("ambiguous vs rubric"));
+        assert!(project.update_target_status(id, "bogus").is_err());
+        assert!(project.update_target_status(9_999, "done").is_err());
+        assert!(
+            project
+                .add_target(&TargetSpec::new(bundle_id, 0.5, 0.5, "phones"))
+                .is_err()
+        );
+
+        // Delete is idempotent.
+        project.delete_target(id).unwrap();
+        project.delete_target(id).unwrap();
+        assert_eq!(project.targets(bundle_id).unwrap().len(), 1);
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn generate_targets_from_criterion_uses_roi_selection_and_replaces() {
+        let root = unique_dir("gen_targets");
+        let _ = std::fs::remove_dir_all(&root);
+        let source_wav =
+            std::env::temp_dir().join(format!("sadda_gen_targets_{}.wav", std::process::id()));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("b", &source_wav).unwrap();
+        let phones = project
+            .add_tier(&TierSpec::new(bundle_id, "phones", TierType::Interval))
+            .unwrap();
+        for (s, e, l) in [(0.0, 0.1, "a"), (0.1, 0.2, "b"), (0.5, 0.6, "a")] {
+            project
+                .add_interval(&IntervalSpec {
+                    tier_id: phones,
+                    start_seconds: s,
+                    end_seconds: e,
+                    label: Some(l.into()),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        // Criterion selecting "a" phones; emit is irrelevant to target RoIs.
+        let body = r#"{"select": {"tier": "phones", "label_any": ["a"]},
+                       "emit": {"kind": "span"}}"#;
+        let crit = project
+            .set_criterion("vowels", None, "structured", body, "vowel-detail")
+            .unwrap();
+
+        // Two "a" RoIs → two criterion-sourced targets, with the RoI spans and
+        // the criterion's target tier as the type.
+        let n = project
+            .generate_targets_from_criterion(crit.id, bundle_id)
+            .unwrap();
+        assert_eq!(n, 2);
+        let ts = project.targets(bundle_id).unwrap();
+        assert_eq!(ts.len(), 2);
+        assert!(ts.iter().all(|t| t.source == "criterion"
+            && t.criterion_id == Some(crit.id)
+            && t.target_type == "vowel-detail"
+            && t.status == "unassigned"));
+        assert!((ts[0].start_seconds - 0.0).abs() < 1e-9 && (ts[0].end_seconds - 0.1).abs() < 1e-9);
+        assert!((ts[1].start_seconds - 0.5).abs() < 1e-9 && (ts[1].end_seconds - 0.6).abs() < 1e-9);
+
+        // Regeneration replaces (not appends) this criterion's targets.
+        assert_eq!(
+            project
+                .generate_targets_from_criterion(crit.id, bundle_id)
+                .unwrap(),
+            2
+        );
+        assert_eq!(project.targets(bundle_id).unwrap().len(), 2);
+
+        // A python criterion can't generate targets in the engine.
+        let py = project
+            .set_criterion("py", None, "python", "def c(): pass", "x")
+            .unwrap();
+        assert!(
+            project
+                .generate_targets_from_criterion(py.id, bundle_id)
+                .is_err()
+        );
 
         let _ = std::fs::remove_file(&source_wav);
         let _ = std::fs::remove_dir_all(&root);

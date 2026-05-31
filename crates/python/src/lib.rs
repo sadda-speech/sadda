@@ -831,6 +831,89 @@ impl PyCriterion {
     }
 }
 
+/// A campaign **target** (slice S4a): the first-class unit of annotation work —
+/// a region of interest on a bundle that needs a kind of annotation, carrying a
+/// `status` through the campaign lifecycle. Generated from a criterion's RoI
+/// selection (`source = "criterion"`) or hand-marked (`source = "manual"`).
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "Target", frozen)]
+struct PyTarget {
+    inner: sadda_engine::Target,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyTarget {
+    /// Target id (primary key).
+    #[getter]
+    fn id(&self) -> i64 {
+        self.inner.id
+    }
+    /// Bundle (file) the RoI lives on.
+    #[getter]
+    fn bundle_id(&self) -> i64 {
+        self.inner.bundle_id
+    }
+    /// RoI start, in seconds.
+    #[getter]
+    fn start_seconds(&self) -> f64 {
+        self.inner.start_seconds
+    }
+    /// RoI end, in seconds.
+    #[getter]
+    fn end_seconds(&self) -> f64 {
+        self.inner.end_seconds
+    }
+    /// What kind of annotation work the RoI needs (usually a tier name).
+    #[getter]
+    fn target_type(&self) -> String {
+        self.inner.target_type.clone()
+    }
+    /// Lifecycle: `unassigned` / `assigned` / `in_progress` / `done` / `flagged`.
+    #[getter]
+    fn status(&self) -> String {
+        self.inner.status.clone()
+    }
+    /// Origin: `manual` or `criterion`.
+    #[getter]
+    fn source(&self) -> String {
+        self.inner.source.clone()
+    }
+    /// Generating criterion id when `source == "criterion"`, else `None`.
+    #[getter]
+    fn criterion_id(&self) -> Option<i64> {
+        self.inner.criterion_id
+    }
+    /// Optional free-text note.
+    #[getter]
+    fn note(&self) -> Option<String> {
+        self.inner.note.clone()
+    }
+    /// ISO 8601 UTC creation timestamp.
+    #[getter]
+    fn created_at(&self) -> String {
+        self.inner.created_at.clone()
+    }
+    /// ISO 8601 UTC timestamp of the last update.
+    #[getter]
+    fn updated_at(&self) -> String {
+        self.inner.updated_at.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Target(id={}, bundle_id={}, roi=[{}, {}], type={:?}, status={:?}, source={:?})",
+            self.inner.id,
+            self.inner.bundle_id,
+            self.inner.start_seconds,
+            self.inner.end_seconds,
+            self.inner.target_type,
+            self.inner.status,
+            self.inner.source,
+        )
+    }
+}
+
 /// Registration row for a Parquet sidecar holding a dense tier's data.
 /// Created automatically by the `Project.write_continuous_numeric` /
 /// `write_continuous_vector` / `write_categorical_sampled` methods.
@@ -1813,6 +1896,93 @@ impl PyProject {
     /// Deletes a criterion by id (idempotent).
     fn delete_criterion(&self, id: i64) -> PyResult<()> {
         self.inner.delete_criterion(id).map_err(engine_err_to_py)
+    }
+
+    /// Adds a campaign target (a region of work) on `bundle_id` over
+    /// `[start_seconds, end_seconds)` for `target_type`. `status` defaults to
+    /// `"unassigned"`; `source` to `"manual"`. Returns the new target id.
+    #[pyo3(signature = (
+        bundle_id, start_seconds, end_seconds, target_type, *,
+        status=None, source=None, criterion_id=None, note=None, extra=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_target(
+        &self,
+        bundle_id: i64,
+        start_seconds: f64,
+        end_seconds: f64,
+        target_type: &str,
+        status: Option<String>,
+        source: Option<String>,
+        criterion_id: Option<i64>,
+        note: Option<String>,
+        extra: Option<String>,
+    ) -> PyResult<i64> {
+        let spec = sadda_engine::TargetSpec {
+            bundle_id,
+            start_seconds,
+            end_seconds,
+            target_type: target_type.to_owned(),
+            status,
+            source,
+            criterion_id,
+            note,
+            extra,
+        };
+        self.inner.add_target(&spec).map_err(engine_err_to_py)
+    }
+
+    /// Lists a bundle's targets in time order.
+    fn targets(&self, bundle_id: i64) -> PyResult<Vec<PyTarget>> {
+        self.inner
+            .targets(bundle_id)
+            .map(|ts| ts.into_iter().map(|inner| PyTarget { inner }).collect())
+            .map_err(engine_err_to_py)
+    }
+
+    /// Reads a target by id, or `None`.
+    fn get_target(&self, id: i64) -> PyResult<Option<PyTarget>> {
+        self.inner
+            .get_target(id)
+            .map(|opt| opt.map(|inner| PyTarget { inner }))
+            .map_err(engine_err_to_py)
+    }
+
+    /// Sets a target's lifecycle `status` (one of `unassigned` / `assigned` /
+    /// `in_progress` / `done` / `flagged`). Raises if the target is missing or
+    /// the status is invalid.
+    fn update_target_status(&self, id: i64, status: &str) -> PyResult<()> {
+        self.inner
+            .update_target_status(id, status)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Sets (or clears, with `None`) a target's note.
+    #[pyo3(signature = (id, note=None))]
+    fn set_target_note(&self, id: i64, note: Option<&str>) -> PyResult<()> {
+        self.inner
+            .set_target_note(id, note)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Deletes a target by id (idempotent).
+    fn delete_target(&self, id: i64) -> PyResult<()> {
+        self.inner.delete_target(id).map_err(engine_err_to_py)
+    }
+
+    /// Generates targets from a `structured` criterion's RoI selection on
+    /// `bundle_id` — one target per surviving select interval, typed by the
+    /// criterion's target tier and back-linked via `criterion_id`. Replaces
+    /// this criterion's prior targets on the bundle. Returns the count.
+    /// `python` criteria are rejected (run them in `sadda.criteria`).
+    fn generate_targets_from_criterion(
+        &self,
+        criterion_id: i64,
+        bundle_id: i64,
+    ) -> PyResult<usize> {
+        self.inner
+            .generate_targets_from_criterion(criterion_id, bundle_id)
+            .map_err(engine_err_to_py)
     }
 
     /// Runs a `structured` criterion against a bundle, (re)writing its
@@ -2927,6 +3097,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVocabEntry>()?;
     m.add_class::<PyLabelCheck>()?;
     m.add_class::<PyCriterion>()?;
+    m.add_class::<PyTarget>()?;
     m.add_class::<PyDerivedSignal>()?;
     m.add_class::<PyFormantFrame>()?;
     m.add_class::<PyLtas>()?;

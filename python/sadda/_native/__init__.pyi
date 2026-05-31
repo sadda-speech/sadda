@@ -29,6 +29,7 @@ __all__ = [
     "Session",
     "Speaker",
     "StatusDef",
+    "Target",
     "Tier",
     "VocabEntry",
     "abi",
@@ -934,6 +935,42 @@ class Project:
         r"""
         Deletes a criterion by id (idempotent).
         """
+    def add_target(self, bundle_id: builtins.int, start_seconds: builtins.float, end_seconds: builtins.float, target_type: builtins.str, *, status: typing.Optional[builtins.str] = None, source: typing.Optional[builtins.str] = None, criterion_id: typing.Optional[builtins.int] = None, note: typing.Optional[builtins.str] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
+        r"""
+        Adds a campaign target (a region of work) on `bundle_id` over
+        `[start_seconds, end_seconds)` for `target_type`. `status` defaults to
+        `"unassigned"`; `source` to `"manual"`. Returns the new target id.
+        """
+    def targets(self, bundle_id: builtins.int) -> builtins.list[Target]:
+        r"""
+        Lists a bundle's targets in time order.
+        """
+    def get_target(self, id: builtins.int) -> typing.Optional[Target]:
+        r"""
+        Reads a target by id, or `None`.
+        """
+    def update_target_status(self, id: builtins.int, status: builtins.str) -> None:
+        r"""
+        Sets a target's lifecycle `status` (one of `unassigned` / `assigned` /
+        `in_progress` / `done` / `flagged`). Raises if the target is missing or
+        the status is invalid.
+        """
+    def set_target_note(self, id: builtins.int, note: typing.Optional[builtins.str] = None) -> None:
+        r"""
+        Sets (or clears, with `None`) a target's note.
+        """
+    def delete_target(self, id: builtins.int) -> None:
+        r"""
+        Deletes a target by id (idempotent).
+        """
+    def generate_targets_from_criterion(self, criterion_id: builtins.int, bundle_id: builtins.int) -> builtins.int:
+        r"""
+        Generates targets from a `structured` criterion's RoI selection on
+        `bundle_id` — one target per surviving select interval, typed by the
+        criterion's target tier and back-linked via `criterion_id`. Replaces
+        this criterion's prior targets on the bundle. Returns the count.
+        `python` criteria are rejected (run them in `sadda.criteria`).
+        """
     def run_criterion(self, id: builtins.int, bundle_id: builtins.int) -> builtins.int:
         r"""
         Runs a `structured` criterion against a bundle, (re)writing its
@@ -1273,6 +1310,71 @@ class StatusDef:
     def sort_order(self) -> builtins.int:
         r"""
         Display ordering (ascending).
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class Target:
+    r"""
+    A campaign **target** (slice S4a): the first-class unit of annotation work —
+    a region of interest on a bundle that needs a kind of annotation, carrying a
+    `status` through the campaign lifecycle. Generated from a criterion's RoI
+    selection (`source = "criterion"`) or hand-marked (`source = "manual"`).
+    """
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Target id (primary key).
+        """
+    @property
+    def bundle_id(self) -> builtins.int:
+        r"""
+        Bundle (file) the RoI lives on.
+        """
+    @property
+    def start_seconds(self) -> builtins.float:
+        r"""
+        RoI start, in seconds.
+        """
+    @property
+    def end_seconds(self) -> builtins.float:
+        r"""
+        RoI end, in seconds.
+        """
+    @property
+    def target_type(self) -> builtins.str:
+        r"""
+        What kind of annotation work the RoI needs (usually a tier name).
+        """
+    @property
+    def status(self) -> builtins.str:
+        r"""
+        Lifecycle: `unassigned` / `assigned` / `in_progress` / `done` / `flagged`.
+        """
+    @property
+    def source(self) -> builtins.str:
+        r"""
+        Origin: `manual` or `criterion`.
+        """
+    @property
+    def criterion_id(self) -> typing.Optional[builtins.int]:
+        r"""
+        Generating criterion id when `source == "criterion"`, else `None`.
+        """
+    @property
+    def note(self) -> typing.Optional[builtins.str]:
+        r"""
+        Optional free-text note.
+        """
+    @property
+    def created_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC creation timestamp.
+        """
+    @property
+    def updated_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC timestamp of the last update.
         """
     def __repr__(self) -> builtins.str: ...
 
