@@ -149,6 +149,44 @@ def test_python_escape_run_is_also_traced() -> None:
         assert ivs and all(iv.processing_run_id == runs[0].id for iv in ivs)
 
 
+def test_signal_function_criterion_end_to_end() -> None:
+    import numpy as np
+
+    with tempfile.TemporaryDirectory() as td:
+        proj, bundle_id = _project(Path(td))
+        # A continuous_numeric "energy" track at 10 Hz over 0..2s: quiet (10)
+        # over the first second, loud (40) over the second.
+        energy = proj.add_tier(bundle_id, "energy", "continuous_numeric")
+        proj.write_continuous_numeric(energy, np.array([10.0] * 10 + [40.0] * 10), 10.0)
+        # _project adds "a" phones only in the quiet region; add one loud "a".
+        phones = next(t for t in proj.tiers(bundle_id) if t.name == "phones")
+        proj.add_interval(phones, 1.2, 1.4, label="a")
+
+        # Keep only "a" intervals whose mean energy exceeds 20; anchor at the
+        # energy argmax — a signal-function criterion across both roles.
+        body = (
+            '{"select": {"tier": "phones", "label_any": ["a"]},'
+            ' "where": "mean(energy) > 20",'
+            ' "emit": {"kind": "point_expr", "at": "argmax(energy)"}}'
+        )
+        crit = proj.set_criterion("loud vowels", "structured", body, "landmarks")
+        assert proj.run_criterion(crit.id, bundle_id) == 1  # only the loud "a"
+
+        preview = next(t for t in proj.tiers(bundle_id) if t.name == "landmarks (auto)")
+        pts = proj.points(preview.id)
+        assert len(pts) == 1
+        assert 1.2 <= pts[0].time_seconds <= 1.4
+
+
+def test_bad_expression_surfaces_on_run() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        proj, bundle_id = _project(Path(td))
+        body = '{"select": {"tier": "phones"}, "where": "mean(", "emit": {"kind": "span"}}'
+        crit = proj.set_criterion("bad", "structured", body, "x")
+        with pytest.raises((ValueError, RuntimeError)):
+            proj.run_criterion(crit.id, bundle_id)
+
+
 def test_s2_surface_is_provisional() -> None:
     from sadda._stability import get_stability
 
