@@ -14,6 +14,7 @@ pub mod migrations;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 
 use crate::Audio;
 use crate::error::{EngineError, Result};
@@ -405,6 +406,10 @@ pub struct Interval {
     pub status: Option<String>,
     /// Free-text note, settable on an annotation of any status (incl. none).
     pub note: Option<String>,
+    /// Provenance link to the [`processing_run`](ProcessingRunRow) that
+    /// produced this annotation (e.g. a criterion run), or `None` for a
+    /// hand-made annotation. Write-once at insert; see [`Project::set_proposals`].
+    pub processing_run_id: Option<i64>,
     /// Freeform JSON payload.
     pub extra: Option<String>,
 }
@@ -427,6 +432,11 @@ pub struct IntervalSpec {
     pub status: Option<String>,
     /// Free-text note.
     pub note: Option<String>,
+    /// Provenance link to the producing [`processing_run`](ProcessingRunRow),
+    /// or `None`. Honoured by [`Project::add_interval`]; left untouched by
+    /// [`Project::update_interval`] (an annotation's origin doesn't change
+    /// when its label/status is edited).
+    pub processing_run_id: Option<i64>,
     /// JSON `extra` payload.
     pub extra: Option<String>,
 }
@@ -449,6 +459,9 @@ pub struct Point {
     pub status: Option<String>,
     /// Free-text note, settable on an annotation of any status (incl. none).
     pub note: Option<String>,
+    /// Provenance link to the [`processing_run`](ProcessingRunRow) that
+    /// produced this annotation, or `None` for a hand-made one.
+    pub processing_run_id: Option<i64>,
     /// JSON `extra` payload.
     pub extra: Option<String>,
 }
@@ -468,6 +481,10 @@ pub struct PointSpec {
     pub status: Option<String>,
     /// Free-text note.
     pub note: Option<String>,
+    /// Provenance link to the producing [`processing_run`](ProcessingRunRow),
+    /// or `None`. Honoured by [`Project::add_point`]; left untouched by
+    /// [`Project::update_point`].
+    pub processing_run_id: Option<i64>,
     /// JSON `extra` payload.
     pub extra: Option<String>,
 }
@@ -669,7 +686,7 @@ pub struct ProcessingRunRow {
     pub id: i64,
     /// Bundle the run targeted.
     pub bundle_id: i64,
-    /// `'dsp_algorithm'` | `'ml_model'` | `'clinical_measure'` | `'plugin'` | `'live_recording'`.
+    /// `'dsp_algorithm'` | `'ml_model'` | `'clinical_measure'` | `'plugin'` | `'live_recording'` | `'criterion_run'`.
     pub kind: String,
     /// Reverse-DNS identifier of the processor (e.g. `sadda.io.eaf.import`).
     pub processor_id: String,
@@ -703,6 +720,10 @@ pub enum ProcessingRunKind {
     Plugin,
     /// Live microphone capture committed to a bundle.
     LiveRecording,
+    /// A criterion run — the execution of an annotation criterion that
+    /// materializes proposals onto a preview tier. See
+    /// [`Project::run_criterion`] / [`Project::record_criterion_run`].
+    CriterionRun,
 }
 
 impl ProcessingRunKind {
@@ -715,6 +736,7 @@ impl ProcessingRunKind {
             Self::ClinicalMeasure => "clinical_measure",
             Self::Plugin => "plugin",
             Self::LiveRecording => "live_recording",
+            Self::CriterionRun => "criterion_run",
         }
     }
 }
@@ -1545,8 +1567,8 @@ impl Project {
         let id: i64 = self.conn.query_row(
             "INSERT INTO annotation_interval \
                 (tier_id, start_seconds, end_seconds, label, parent_annotation_id, \
-                 status, note, extra) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING id",
+                 status, note, processing_run_id, extra) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) RETURNING id",
             rusqlite::params![
                 spec.tier_id,
                 spec.start_seconds,
@@ -1555,6 +1577,7 @@ impl Project {
                 spec.parent_annotation_id,
                 spec.status,
                 spec.note,
+                spec.processing_run_id,
                 spec.extra,
             ],
             |row| row.get(0),
@@ -1628,7 +1651,7 @@ impl Project {
     pub fn intervals(&self, tier_id: i64) -> Result<Vec<Interval>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, tier_id, start_seconds, end_seconds, label, parent_annotation_id, \
-                    status, note, extra \
+                    status, note, processing_run_id, extra \
              FROM annotation_interval WHERE tier_id = ?1 ORDER BY start_seconds, id",
         )?;
         let rows = stmt
@@ -1642,7 +1665,8 @@ impl Project {
                     parent_annotation_id: row.get(5)?,
                     status: row.get(6)?,
                     note: row.get(7)?,
-                    extra: row.get(8)?,
+                    processing_run_id: row.get(8)?,
+                    extra: row.get(9)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1662,8 +1686,9 @@ impl Project {
         self.validate_annotation(&tier.name, spec.label.as_deref(), spec.status.as_deref())?;
         let id: i64 = self.conn.query_row(
             "INSERT INTO annotation_point \
-                (tier_id, time_seconds, label, parent_annotation_id, status, note, extra) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING id",
+                (tier_id, time_seconds, label, parent_annotation_id, status, note, \
+                 processing_run_id, extra) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING id",
             rusqlite::params![
                 spec.tier_id,
                 spec.time_seconds,
@@ -1671,6 +1696,7 @@ impl Project {
                 spec.parent_annotation_id,
                 spec.status,
                 spec.note,
+                spec.processing_run_id,
                 spec.extra,
             ],
             |row| row.get(0),
@@ -1734,7 +1760,8 @@ impl Project {
     /// Lists points for a tier in (time_seconds, id) order.
     pub fn points(&self, tier_id: i64) -> Result<Vec<Point>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, tier_id, time_seconds, label, parent_annotation_id, status, note, extra \
+            "SELECT id, tier_id, time_seconds, label, parent_annotation_id, status, note, \
+                    processing_run_id, extra \
              FROM annotation_point WHERE tier_id = ?1 ORDER BY time_seconds, id",
         )?;
         let rows = stmt
@@ -1747,7 +1774,8 @@ impl Project {
                     parent_annotation_id: row.get(4)?,
                     status: row.get(5)?,
                     note: row.get(6)?,
-                    extra: row.get(7)?,
+                    processing_run_id: row.get(7)?,
+                    extra: row.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -2267,7 +2295,8 @@ impl Project {
         };
         let proposals = crate::criteria::evaluate(&rule, &select_ivs, &within_ivs, &overlaps_ivs)
             .map_err(EngineError::Corpus)?;
-        self.set_proposals(bundle_id, &crit.target_tier, &proposals)
+        let run_id = self.record_criterion_run(&crit, bundle_id)?;
+        self.set_proposals(bundle_id, &crit.target_tier, &proposals, Some(run_id))
     }
 
     /// (Re)writes `proposals` onto the preview tier `"<target> (auto)"`,
@@ -2277,11 +2306,16 @@ impl Project {
     /// preview tier is just cleared. This is the shared materialization step
     /// for both the engine's structured `run_criterion` and the python-escape
     /// executor in the python/app layer.
+    ///
+    /// `processing_run_id` stamps each written proposal with its provenance
+    /// link (the [`record_criterion_run`](Self::record_criterion_run) row);
+    /// pass `None` for unattributed proposals.
     pub fn set_proposals(
         &self,
         bundle_id: i64,
         target_tier: &str,
         proposals: &[crate::criteria::Proposal],
+        processing_run_id: Option<i64>,
     ) -> Result<usize> {
         let preview_name = Self::preview_tier_name(target_tier);
         if proposals.is_empty() {
@@ -2309,6 +2343,7 @@ impl Project {
                     tier_id: preview_id,
                     time_seconds: p.start,
                     label: p.label.clone(),
+                    processing_run_id,
                     ..Default::default()
                 })?;
             } else {
@@ -2317,6 +2352,7 @@ impl Project {
                     start_seconds: p.start,
                     end_seconds: p.end.unwrap_or(p.start),
                     label: p.label.clone(),
+                    processing_run_id,
                     ..Default::default()
                 })?;
             }
@@ -2324,11 +2360,48 @@ impl Project {
         Ok(proposals.len())
     }
 
+    /// Records a `processing_run` of kind `criterion_run` for an execution of
+    /// `criterion` against `bundle_id`, and returns its id. The run's
+    /// `parameters` JSON captures the criterion id, name, kind, a SHA-256 of
+    /// its body (so "which *version* of the criterion ran" is recoverable),
+    /// and the singleton rubric id when a rubric exists (rubric *versioning*
+    /// lands in S6 — see the V10 migration note). Both the structured
+    /// `run_criterion` and the python-escape executor go through this so a
+    /// criterion run is a first-class, queryable fact for either kind.
+    pub fn record_criterion_run(&self, criterion: &Criterion, bundle_id: i64) -> Result<i64> {
+        let body_sha256 = {
+            let mut hasher = Sha256::new();
+            hasher.update(criterion.body.as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+        let rubric_id: Option<i64> = self
+            .conn
+            .query_row("SELECT id FROM rubric WHERE id = 1", [], |row| row.get(0))
+            .optional()?;
+        let parameters = serde_json::json!({
+            "criterion_id": criterion.id,
+            "criterion_name": criterion.name,
+            "criterion_kind": criterion.kind,
+            "body_sha256": body_sha256,
+            "rubric_id": rubric_id,
+        })
+        .to_string();
+        let mut spec = ProcessingRunSpec::new(
+            bundle_id,
+            ProcessingRunKind::CriterionRun,
+            format!("sadda.criteria.{}", criterion.name),
+        );
+        spec.parameters = Some(parameters);
+        self.record_processing_run(&spec)
+    }
+
     /// Promotes all proposals on `"<target> (auto)"` to the target tier
     /// (created if needed), then clears the preview tier. Each promoted row
     /// is validated against the target tier's rubric (e.g. a closed
     /// vocabulary), so an out-of-vocab proposal label surfaces an error.
-    /// Returns the number promoted.
+    /// The proposal's `processing_run_id` provenance link is carried onto the
+    /// promoted row, so accepting a proposal doesn't lose the trace of which
+    /// criterion produced it. Returns the number promoted.
     pub fn accept_proposals(&self, bundle_id: i64, target_tier: &str) -> Result<usize> {
         let preview_name = Self::preview_tier_name(target_tier);
         let Some(preview) = self.tier_by_name(bundle_id, &preview_name)? else {
@@ -2343,6 +2416,7 @@ impl Project {
                         tier_id: target_id,
                         time_seconds: p.time_seconds,
                         label: p.label,
+                        processing_run_id: p.processing_run_id,
                         ..Default::default()
                     })?;
                     promoted += 1;
@@ -2355,6 +2429,7 @@ impl Project {
                         start_seconds: iv.start_seconds,
                         end_seconds: iv.end_seconds,
                         label: iv.label,
+                        processing_run_id: iv.processing_run_id,
                         ..Default::default()
                     })?;
                     promoted += 1;
@@ -3317,6 +3392,35 @@ impl Project {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Reads a single `processing_run` by id, if present. Drives provenance
+    /// display — e.g. resolving an annotation's `processing_run_id` to the
+    /// criterion run that produced it.
+    pub fn get_processing_run(&self, id: i64) -> Result<Option<ProcessingRunRow>> {
+        self.conn
+            .query_row(
+                "SELECT id, bundle_id, kind, processor_id, processor_version, \
+                        parameters, output_tier_ids, started_at, finished_at, status \
+                 FROM processing_run WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok(ProcessingRunRow {
+                        id: row.get(0)?,
+                        bundle_id: row.get(1)?,
+                        kind: row.get(2)?,
+                        processor_id: row.get(3)?,
+                        processor_version: row.get(4)?,
+                        parameters: row.get(5)?,
+                        output_tier_ids: row.get(6)?,
+                        started_at: row.get(7)?,
+                        finished_at: row.get(8)?,
+                        status: row.get(9)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     /// Returns the literature citations for every cited processor that
@@ -4339,6 +4443,7 @@ mod tests {
                     status: None,
                     note: None,
                     extra: None,
+                    ..Default::default()
                 })
                 .unwrap();
         }
@@ -4839,6 +4944,82 @@ mod tests {
         assert_eq!(project.run_criterion(crit.id, bundle_id).unwrap(), 1);
         assert_eq!(project.clear_proposals(bundle_id, "landmarks").unwrap(), 1);
         assert!(project.points(preview.id).unwrap().is_empty());
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn criterion_run_records_provenance_and_survives_accept() {
+        let root = unique_dir("crit_prov");
+        let _ = std::fs::remove_dir_all(&root);
+        let source_wav =
+            std::env::temp_dir().join(format!("sadda_crit_prov_{}.wav", std::process::id()));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("b", &source_wav).unwrap();
+        let phones = project
+            .add_tier(&TierSpec::new(bundle_id, "phones", TierType::Interval))
+            .unwrap();
+        for (s, e, l) in [(0.0, 0.1, "a"), (0.1, 0.2, "a")] {
+            project
+                .add_interval(&IntervalSpec {
+                    tier_id: phones,
+                    start_seconds: s,
+                    end_seconds: e,
+                    label: Some(l.into()),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        // Emit a span over every "a" onto the "vowels" target tier.
+        let body = r#"{"select": {"tier": "phones", "label_any": ["a"]},
+                       "emit": {"kind": "span"}}"#;
+        let crit = project
+            .set_criterion("vowels", None, "structured", body, "vowels")
+            .unwrap();
+
+        // No runs before; running records exactly one criterion_run.
+        assert!(project.processing_runs(bundle_id).unwrap().is_empty());
+        assert_eq!(project.run_criterion(crit.id, bundle_id).unwrap(), 2);
+
+        let runs = project.processing_runs(bundle_id).unwrap();
+        assert_eq!(runs.len(), 1);
+        let run = &runs[0];
+        assert_eq!(run.kind, "criterion_run");
+        assert_eq!(run.processor_id, "sadda.criteria.vowels");
+        // parameters capture the criterion id + a body checksum (repeatability).
+        let params: serde_json::Value =
+            serde_json::from_str(run.parameters.as_deref().unwrap()).unwrap();
+        assert_eq!(params["criterion_id"], crit.id);
+        assert_eq!(params["criterion_kind"], "structured");
+        assert!(params["body_sha256"].as_str().unwrap().len() == 64);
+
+        // get_processing_run resolves the same row.
+        assert_eq!(project.get_processing_run(run.id).unwrap().unwrap().id, run.id);
+        assert!(project.get_processing_run(99_999).unwrap().is_none());
+
+        // Each preview proposal carries the run link.
+        let preview = project.tier_by_name(bundle_id, "vowels (auto)").unwrap().unwrap();
+        let proposals = project.intervals(preview.id).unwrap();
+        assert_eq!(proposals.len(), 2);
+        assert!(proposals.iter().all(|iv| iv.processing_run_id == Some(run.id)));
+
+        // Re-running records a *second* run; the proposals now point at it.
+        assert_eq!(project.run_criterion(crit.id, bundle_id).unwrap(), 2);
+        let runs = project.processing_runs(bundle_id).unwrap();
+        assert_eq!(runs.len(), 2);
+        let latest = runs[1].id;
+        let proposals = project.intervals(preview.id).unwrap();
+        assert!(proposals.iter().all(|iv| iv.processing_run_id == Some(latest)));
+
+        // Accept: the provenance link survives promotion onto the target tier.
+        assert_eq!(project.accept_proposals(bundle_id, "vowels").unwrap(), 2);
+        let target = project.tier_by_name(bundle_id, "vowels").unwrap().unwrap();
+        let promoted = project.intervals(target.id).unwrap();
+        assert_eq!(promoted.len(), 2);
+        assert!(promoted.iter().all(|iv| iv.processing_run_id == Some(latest)));
 
         let _ = std::fs::remove_file(&source_wav);
         let _ = std::fs::remove_dir_all(&root);
