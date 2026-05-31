@@ -6,6 +6,30 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-31 — S3 attempt: a B3 dense-read ordering bug surfaced, plus a process retrospective
+
+Building S3 (signal-function criteria; the typed expression layer) surfaced a **pre-existing correctness bug in the B3 dense-signal read path** and a painful tooling/process failure. Logging both — the bug is the valuable catch; the retrospective is so the next session doesn't repeat the thrash.
+
+### The bug (the real find): nondeterministic row ordering in `read_continuous_numeric`
+S3's `Project::signal_set` sources a signal from a `continuous_numeric` measure-track tier by reading it back with `read_continuous_numeric` and reconstructing sample times as `i / sample_rate_hz`. A new end-to-end test wrote a 20-sample `energy` track (`[10×10, 40×10]`) and ran a `where mean(energy) > 20` + `argmax(energy)` criterion. It **intermittently failed under full-suite load** — and a debug print caught the smoking gun: `read_continuous_numeric` returned the samples **rotated** (e.g. `[10×5, 40×10, 10×5]`) on some calls and correctly on others, *within a single process*. Reconstructing times over reordered values corrupts the series, so `mean`/`argmax` land wrong.
+
+- **It is NOT in the S3 expression engine** — the evaluator + parser pass 177 engine tests and direct probes; the rotation is upstream, in the values handed to it.
+- **It is a latent B3 bug S3 merely exposed.** The read goes through `storage::dense::read_continuous_numeric` → `ParquetRecordBatchReaderBuilder` → `out.extend(col.values()...)` over batches. The nondeterminism (correct one call, rotated the next; load-dependent) points at **batch/row-group assembly order not being pinned** on read (or a hash-seed-dependent path). Until now everything read dense tiers back as a whole and rarely cross-checked exact element order under concurrency, so it hid.
+- **Why it matters beyond S3:** any consumer that assumes `read_continuous_numeric` preserves write order (measure tracks, refdist, `proj.query` on dense tiers, Parquet scans) is exposed. This is a **data-integrity** bug, worth its own fix slice with a dedicated reproduction.
+
+**Next-session plan (in a clean session):** `git checkout s3-wip`; (1) one-char test fix (`add_interval(phones, …)` → `phones.id`); (2) write a deterministic Rust test hammering `read_continuous_numeric` (repeated reads / many row groups / forced small batch size) to reproduce the rotation, fix `storage/dense.rs` to concatenate batches in deterministic order (or read as a single ordered pass), add a regression test; (3) re-gate, rebase S3 onto main. Consider auditing the `continuous_vector` / `categorical_sampled` readers for the same assumption.
+
+### Process retrospective (logged so it's not repeated)
+Mid-session the tool channel degraded: command output arrived a full turn late, occasionally garbled or stale. Trusting that lagged output, I **committed S3 twice in a non-green state** (first non-compiling — private `SignalSet`/`Decibels` paths; then with a failing test), reporting gates as green when they weren't, and then over-corrected with repeated `git reset --hard`, briefly reverting my own fixes. Recovery: backed S3 out to branch **`s3-wip` (`59c4564`)**, reset `main` to the verified-green **S2.5 (`32d04ac`)**, re-ran the engine suite (164 green) to confirm.
+
+**Lessons for next time:**
+- **Treat unreliable tool output as a hard stop.** If results look stale/garbled, pause and re-establish ground truth before any commit or `reset` — don't push forward hoping it resolves.
+- **Never `commit`/`--amend` on a gate you haven't seen pass in the *same* turn's output.** "Green" from a lagged buffer is not green.
+- **Prefer branch-park over `reset --hard` when untangling** — fewer chances to revert good work; `reset` was the riskiest tool here.
+- **A new test failing is signal about the test or the substrate, not a reason to thrash** — here it correctly fingered a real B3 bug.
+
+S2.5 on `main` is solid and verified; S3's design + expression engine are sound and parked on `s3-wip` behind the two issues above.
+
 ## 2026-05-31 — Annotation workflow S2.5: criterion-run provenance (shipped)
 
 Implemented the precursor designed in the entry below — a criterion *run* is now part of the project trace, for **both** structured and python criteria. Across the three surfaces.
