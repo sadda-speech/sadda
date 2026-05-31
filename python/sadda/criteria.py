@@ -60,4 +60,7 @@ def run_criterion(proj: Project, criterion_id: int, bundle_id: int) -> int:
             "a python criterion body must define a `criterion(proj, bundle_id)` function"
         )
     proposals = [_normalize(p) for p in fn(proj, bundle_id)]
-    return proj.set_proposals(bundle_id, crit.target_tier, proposals)
+    # Trace the python run exactly like a structured one: record the
+    # criterion_run first, then stamp each proposal with its provenance link.
+    run_id = proj.record_criterion_run(criterion_id, bundle_id)
+    return proj.set_proposals(bundle_id, crit.target_tier, proposals, run_id)

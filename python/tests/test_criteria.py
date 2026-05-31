@@ -99,6 +99,56 @@ def test_criteria_executor_dispatches_structured() -> None:
         assert criteria.run_criterion(proj, crit.id, bundle_id) == 3
 
 
+def test_structured_run_records_provenance_and_survives_accept() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        proj, bundle_id = _project(Path(td))
+        body = '{"select": {"tier": "phones", "label_any": ["a"]}, "emit": {"kind": "point"}}'
+        crit = proj.set_criterion("vowels", "structured", body, "landmarks")
+
+        assert proj.processing_runs(bundle_id) == []
+        proj.run_criterion(crit.id, bundle_id)
+
+        runs = proj.processing_runs(bundle_id)
+        assert len(runs) == 1
+        run = runs[0]
+        assert run.kind == "criterion_run"
+        assert run.processor_id == "sadda.criteria.vowels"
+        assert proj.get_processing_run(run.id).id == run.id
+        assert proj.get_processing_run(99_999) is None
+
+        # Each proposal carries the run link...
+        preview = next(t for t in proj.tiers(bundle_id) if t.name == "landmarks (auto)")
+        pts = proj.points(preview.id)
+        assert pts and all(p.processing_run_id == run.id for p in pts)
+
+        # ...and it survives promotion onto the target tier.
+        proj.accept_proposals(bundle_id, "landmarks")
+        target = next(t for t in proj.tiers(bundle_id) if t.name == "landmarks")
+        promoted = proj.points(target.id)
+        assert promoted and all(p.processing_run_id == run.id for p in promoted)
+
+
+def test_python_escape_run_is_also_traced() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        proj, bundle_id = _project(Path(td))
+        body = (
+            "def criterion(proj, bundle_id):\n"
+            "    phones = next(t for t in proj.tiers(bundle_id) if t.name == 'phones')\n"
+            "    return [(iv.start_seconds, iv.end_seconds, 'vowel')\n"
+            "            for iv in proj.intervals(phones.id) if iv.label == 'a']\n"
+        )
+        crit = proj.set_criterion("py vowels", "python", body, "vowels")
+        criteria.run_criterion(proj, crit.id, bundle_id)
+
+        # The executor records a criterion_run for the python path too.
+        runs = proj.processing_runs(bundle_id)
+        assert len(runs) == 1 and runs[0].kind == "criterion_run"
+        ivs = proj.intervals(
+            next(t for t in proj.tiers(bundle_id) if t.name == "vowels (auto)").id
+        )
+        assert ivs and all(iv.processing_run_id == runs[0].id for iv in ivs)
+
+
 def test_s2_surface_is_provisional() -> None:
     from sadda._stability import get_stability
 

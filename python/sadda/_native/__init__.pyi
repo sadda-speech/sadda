@@ -432,6 +432,12 @@ class Interval:
         Free-text note, or `None`.
         """
     @property
+    def processing_run_id(self) -> typing.Optional[builtins.int]:
+        r"""
+        Provenance link to the producing `ProcessingRun` (e.g. a criterion
+        run), or `None` for a hand-made annotation.
+        """
+    @property
     def extra(self) -> typing.Optional[builtins.str]:
         r"""
         JSON `extra` payload.
@@ -594,6 +600,12 @@ class Point:
         Free-text note, or `None`.
         """
     @property
+    def processing_run_id(self) -> typing.Optional[builtins.int]:
+        r"""
+        Provenance link to the producing `ProcessingRun` (e.g. a criterion
+        run), or `None` for a hand-made annotation.
+        """
+    @property
     def extra(self) -> typing.Optional[builtins.str]:
         r"""
         JSON `extra` payload.
@@ -716,6 +728,11 @@ class Project:
         r"""
         Returns a bundle's processing-run timeline (provenance), oldest
         first.
+        """
+    def get_processing_run(self, id: builtins.int) -> typing.Optional[ProcessingRun]:
+        r"""
+        Reads a single `ProcessingRun` by id, or `None`. Resolves an
+        annotation's `processing_run_id` to the run that produced it.
         """
     def citations(self, bundle_id: builtins.int) -> builtins.list[Citation]:
         r"""
@@ -923,12 +940,21 @@ class Project:
         proposals onto the preview tier. Returns the proposal count.
         `python` criteria are run via `sadda.criteria.run_criterion`.
         """
-    def set_proposals(self, bundle_id: builtins.int, target_tier: builtins.str, proposals: typing.Sequence[tuple[builtins.float, typing.Optional[builtins.float], typing.Optional[builtins.str]]]) -> builtins.int:
+    def set_proposals(self, bundle_id: builtins.int, target_tier: builtins.str, proposals: typing.Sequence[tuple[builtins.float, typing.Optional[builtins.float], typing.Optional[builtins.str]]], processing_run_id: typing.Optional[builtins.int] = None) -> builtins.int:
         r"""
         (Re)writes proposals onto the preview tier `"<target> (auto)"`,
         replacing prior ones. `proposals` is a list of
         `(start, end_or_None, label_or_None)` tuples — `end=None` for a point.
-        Used by the python-escape criterion executor.
+        `processing_run_id` stamps each proposal with its provenance link (the
+        row returned by `record_criterion_run`); pass `None` for unattributed
+        proposals. Used by the python-escape criterion executor.
+        """
+    def record_criterion_run(self, criterion_id: builtins.int, bundle_id: builtins.int) -> builtins.int:
+        r"""
+        Records a `processing_run` of kind `criterion_run` for an execution of
+        criterion `criterion_id` against `bundle_id`, returning its id. The
+        python-escape executor calls this before `set_proposals` so a python
+        criterion's run is traced exactly like a structured one.
         """
     def accept_proposals(self, bundle_id: builtins.int, target_tier: builtins.str) -> builtins.int:
         r"""

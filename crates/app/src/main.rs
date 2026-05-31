@@ -535,6 +535,9 @@ struct AnnotationInspector {
     closed: bool,
     /// The rubric's status vocabulary (status-picker options).
     statuses: Vec<String>,
+    /// Provenance one-liner when the annotation came from a criterion run
+    /// (its `processing_run_id` resolved to a `criterion_run`), else `None`.
+    provenance: Option<String>,
 }
 
 impl CriteriaEditor {
@@ -1497,6 +1500,7 @@ impl SaddaApp {
                     status: None,
                     note: None,
                     extra: None,
+                    ..Default::default()
                 })
                 .map(|_| ()),
             TierType::Point => project
@@ -1508,6 +1512,7 @@ impl SaddaApp {
                     status: None,
                     note: None,
                     extra: None,
+                    ..Default::default()
                 })
                 .and_then(|_| {
                     project.add_point(&sadda_engine::PointSpec {
@@ -1518,6 +1523,7 @@ impl SaddaApp {
                         status: None,
                         note: None,
                         extra: None,
+                        ..Default::default()
                     })
                 })
                 .map(|_| ()),
@@ -2622,6 +2628,18 @@ impl SaddaApp {
                 LabelEditKind::Point => "point",
             };
             ui.label(egui::RichText::new(format!("{} · {kind_label}", insp.tier_name)).strong());
+            if let Some(prov) = &insp.provenance {
+                ui.label(
+                    egui::RichText::new(prov)
+                        .small()
+                        .italics()
+                        .color(egui::Color32::from_rgb(150, 120, 190)),
+                )
+                .on_hover_text(
+                    "This annotation was produced by a criterion run (its provenance \
+                     link). Editing it doesn't change that origin.",
+                );
+            }
             ui.separator();
 
             ui.label(egui::RichText::new("Label").small());
@@ -2725,32 +2743,40 @@ impl SaddaApp {
             .get_tier(tier_id)
             .map(|t| t.name)
             .unwrap_or_default();
-        let (label, status, note): (String, Option<String>, String) = match sel {
-            AnnotationSelection::Interval { annotation_id, .. } => project
-                .intervals(tier_id)
-                .ok()
-                .and_then(|rs| rs.into_iter().find(|r| r.id == annotation_id))
-                .map(|r| {
-                    (
-                        r.label.unwrap_or_default(),
-                        r.status,
-                        r.note.unwrap_or_default(),
-                    )
-                })
-                .unwrap_or_default(),
-            AnnotationSelection::Point { annotation_id, .. } => project
-                .points(tier_id)
-                .ok()
-                .and_then(|rs| rs.into_iter().find(|r| r.id == annotation_id))
-                .map(|r| {
-                    (
-                        r.label.unwrap_or_default(),
-                        r.status,
-                        r.note.unwrap_or_default(),
-                    )
-                })
-                .unwrap_or_default(),
-        };
+        let (label, status, note, run_id): (String, Option<String>, String, Option<i64>) =
+            match sel {
+                AnnotationSelection::Interval { annotation_id, .. } => project
+                    .intervals(tier_id)
+                    .ok()
+                    .and_then(|rs| rs.into_iter().find(|r| r.id == annotation_id))
+                    .map(|r| {
+                        (
+                            r.label.unwrap_or_default(),
+                            r.status,
+                            r.note.unwrap_or_default(),
+                            r.processing_run_id,
+                        )
+                    })
+                    .unwrap_or_default(),
+                AnnotationSelection::Point { annotation_id, .. } => project
+                    .points(tier_id)
+                    .ok()
+                    .and_then(|rs| rs.into_iter().find(|r| r.id == annotation_id))
+                    .map(|r| {
+                        (
+                            r.label.unwrap_or_default(),
+                            r.status,
+                            r.note.unwrap_or_default(),
+                            r.processing_run_id,
+                        )
+                    })
+                    .unwrap_or_default(),
+            };
+        // Resolve a criterion-run link to a provenance one-liner.
+        let provenance = run_id
+            .and_then(|id| project.get_processing_run(id).ok().flatten())
+            .filter(|run| run.kind == "criterion_run")
+            .map(|run| format_provenance_line(&run.processor_id, &run.started_at));
         let vocab: Vec<String> = project
             .controlled_vocabulary(&tier_name)
             .map(|v| v.into_iter().map(|e| e.value).collect())
@@ -2776,6 +2802,7 @@ impl SaddaApp {
         insp.vocab = vocab;
         insp.closed = closed;
         insp.statuses = statuses;
+        insp.provenance = provenance;
     }
 
     /// Applies the inspector working copy to the selected annotation. The
@@ -2807,6 +2834,7 @@ impl SaddaApp {
                                     parent_annotation_id: existing.parent_annotation_id,
                                     status: new_status,
                                     note: new_note,
+                                    processing_run_id: existing.processing_run_id,
                                     extra: existing.extra,
                                 },
                             )
@@ -2830,6 +2858,7 @@ impl SaddaApp {
                                     parent_annotation_id: existing.parent_annotation_id,
                                     status: new_status,
                                     note: new_note,
+                                    processing_run_id: existing.processing_run_id,
                                     extra: existing.extra,
                                 },
                             )
@@ -3009,6 +3038,7 @@ impl SaddaApp {
                                         parent_annotation_id: existing.parent_annotation_id,
                                         status: new_status,
                                         note: new_note,
+                                        processing_run_id: existing.processing_run_id,
                                         extra: existing.extra,
                                     },
                                 )
@@ -3029,6 +3059,7 @@ impl SaddaApp {
                                         parent_annotation_id: existing.parent_annotation_id,
                                         status: new_status,
                                         note: new_note,
+                                        processing_run_id: existing.processing_run_id,
                                         extra: existing.extra,
                                     },
                                 )
@@ -4144,6 +4175,24 @@ const PREVIEW_TIER_SUFFIX: &str = " (auto)";
 /// Whether a tier name is a criteria-engine preview tier (holds proposals).
 fn is_preview_tier(name: &str) -> bool {
     name.ends_with(PREVIEW_TIER_SUFFIX)
+}
+
+/// A one-line provenance label for an annotation produced by a criterion run,
+/// from the run's `processor_id` (`sadda.criteria.<name>`) and `started_at`
+/// ISO timestamp. The `sadda.criteria.` prefix is stripped to the criterion
+/// name; the timestamp is trimmed to whole seconds (drops the `T`, the
+/// fractional part, and the trailing `Z`).
+fn format_provenance_line(processor_id: &str, started_at: &str) -> String {
+    let name = processor_id
+        .strip_prefix("sadda.criteria.")
+        .unwrap_or(processor_id);
+    let when = started_at
+        .split_once('.')
+        .map(|(head, _frac)| head)
+        .unwrap_or(started_at)
+        .trim_end_matches('Z')
+        .replace('T', " ");
+    format!("↻ from criterion “{name}” · {when}")
 }
 
 /// Whether `label` is out of the controlled `vocab`: non-empty and absent.
@@ -6709,6 +6758,7 @@ impl SaddaApp {
                             parent_annotation_id: existing.parent_annotation_id,
                             status: existing.status,
                             note: existing.note,
+                            processing_run_id: existing.processing_run_id,
                             extra: existing.extra,
                         },
                     )
@@ -6745,6 +6795,7 @@ impl SaddaApp {
                             parent_annotation_id: existing.parent_annotation_id,
                             status: existing.status,
                             note: existing.note,
+                            processing_run_id: existing.processing_run_id,
                             extra: existing.extra,
                         },
                     )
@@ -7676,6 +7727,17 @@ mod rubric_ui_tests {
         // Distinct statuses get distinct tints; the same status is stable.
         assert_ne!(a, b);
         assert_eq!(status_tint(Some("draft"), &statuses).unwrap(), a);
+    }
+
+    #[test]
+    fn provenance_line_strips_prefix_and_trims_timestamp() {
+        let line =
+            format_provenance_line("sadda.criteria.vowel midpoints", "2026-05-31T12:34:56.789Z");
+        assert_eq!(line, "↻ from criterion “vowel midpoints” · 2026-05-31 12:34:56");
+        // A processor_id without the expected prefix is shown verbatim; a
+        // timestamp without a fractional part is handled too.
+        let line = format_provenance_line("custom.proc", "2026-05-31T00:00:00Z");
+        assert_eq!(line, "↻ from criterion “custom.proc” · 2026-05-31 00:00:00");
     }
 }
 

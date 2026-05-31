@@ -441,6 +441,12 @@ impl PyInterval {
     fn note(&self) -> Option<String> {
         self.inner.note.clone()
     }
+    /// Provenance link to the producing `ProcessingRun` (e.g. a criterion
+    /// run), or `None` for a hand-made annotation.
+    #[getter]
+    fn processing_run_id(&self) -> Option<i64> {
+        self.inner.processing_run_id
+    }
     /// JSON `extra` payload.
     #[getter]
     fn extra(&self) -> Option<String> {
@@ -504,6 +510,12 @@ impl PyPoint {
     #[getter]
     fn note(&self) -> Option<String> {
         self.inner.note.clone()
+    }
+    /// Provenance link to the producing `ProcessingRun` (e.g. a criterion
+    /// run), or `None` for a hand-made annotation.
+    #[getter]
+    fn processing_run_id(&self) -> Option<i64> {
+        self.inner.processing_run_id
     }
     /// JSON `extra` payload.
     #[getter]
@@ -1249,6 +1261,15 @@ impl PyProject {
             .map_err(engine_err_to_py)
     }
 
+    /// Reads a single `ProcessingRun` by id, or `None`. Resolves an
+    /// annotation's `processing_run_id` to the run that produced it.
+    fn get_processing_run(&self, id: i64) -> PyResult<Option<PyProcessingRun>> {
+        self.inner
+            .get_processing_run(id)
+            .map(|opt| opt.map(|inner| PyProcessingRun { inner }))
+            .map_err(engine_err_to_py)
+    }
+
     /// Returns the literature citations for the analyses a bundle used,
     /// deduplicated by processor and ordered by first use. Uncited
     /// processors (imports, recording) are omitted.
@@ -1539,6 +1560,7 @@ impl PyProject {
             status,
             note,
             extra,
+            ..Default::default()
         };
         self.inner.add_interval(&spec).map_err(engine_err_to_py)
     }
@@ -1575,6 +1597,7 @@ impl PyProject {
             status,
             note,
             extra,
+            ..Default::default()
         };
         self.inner.add_point(&spec).map_err(engine_err_to_py)
     }
@@ -1804,19 +1827,42 @@ impl PyProject {
     /// (Re)writes proposals onto the preview tier `"<target> (auto)"`,
     /// replacing prior ones. `proposals` is a list of
     /// `(start, end_or_None, label_or_None)` tuples — `end=None` for a point.
-    /// Used by the python-escape criterion executor.
+    /// `processing_run_id` stamps each proposal with its provenance link (the
+    /// row returned by `record_criterion_run`); pass `None` for unattributed
+    /// proposals. Used by the python-escape criterion executor.
+    #[pyo3(signature = (bundle_id, target_tier, proposals, processing_run_id=None))]
     fn set_proposals(
         &self,
         bundle_id: i64,
         target_tier: &str,
         proposals: Vec<(f64, Option<f64>, Option<String>)>,
+        processing_run_id: Option<i64>,
     ) -> PyResult<usize> {
         let props: Vec<sadda_engine::Proposal> = proposals
             .into_iter()
             .map(|(start, end, label)| sadda_engine::Proposal { start, end, label })
             .collect();
         self.inner
-            .set_proposals(bundle_id, target_tier, &props)
+            .set_proposals(bundle_id, target_tier, &props, processing_run_id)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Records a `processing_run` of kind `criterion_run` for an execution of
+    /// criterion `criterion_id` against `bundle_id`, returning its id. The
+    /// python-escape executor calls this before `set_proposals` so a python
+    /// criterion's run is traced exactly like a structured one.
+    fn record_criterion_run(&self, criterion_id: i64, bundle_id: i64) -> PyResult<i64> {
+        let crit = self
+            .inner
+            .get_criterion(criterion_id)
+            .map_err(engine_err_to_py)?
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "no criterion with id {criterion_id}"
+                ))
+            })?;
+        self.inner
+            .record_criterion_run(&crit, bundle_id)
             .map_err(engine_err_to_py)
     }
 

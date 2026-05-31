@@ -6,6 +6,54 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-31 — Annotation workflow S2.5: criterion-run provenance (shipped)
+
+Implemented the precursor designed in the entry below — a criterion *run* is now part of the project trace, for **both** structured and python criteria. Across the three surfaces.
+
+**Engine** (migration **V10** + `corpus.rs`): a new `processing_run.kind` value `'criterion_run'` (table rebuilt via the V6 CHECK-widening pattern; audit triggers reattached) + a per-row `processing_run_id` FK on `annotation_interval`/`annotation_point` (audit triggers rebuilt per the B1 discipline). `record_criterion_run(&Criterion, bundle_id)` records the run — `processor_id = "sadda.criteria.<name>"`, `parameters` = `{criterion_id, criterion_name, criterion_kind, body_sha256, rubric_id}` (the body checksum makes "which *version* ran" recoverable; `rubric_id` is the singleton, ready for S6 versioning). `run_criterion` records the run then passes its id to `set_proposals`, which now takes `processing_run_id: Option<i64>` and stamps each written proposal; `accept_proposals` copies the link onto promoted rows so it survives promotion. New reader `get_processing_run(id)`.
+
+**Decisions made during build:**
+- **Provenance is write-once.** `update_interval`/`update_point` deliberately do *not* touch `processing_run_id` — an annotation's *origin* doesn't change when you edit its label/status. So no clobbering on edit; the column is set only at insert. (Edit call-sites in the app still thread the existing value through, harmlessly.)
+- **`status` stays untouched** — the dead S2-sketch idea of `status='auto'` is gone (S1 made `status` a user vocabulary). The preview `(auto)` tier + the run link carry "this is auto."
+- **Run `output_tier_ids` left empty** — the per-row link is the canonical provenance; wiring the preview-tier id onto the run would need an extra round-trip for marginal value. Deferred.
+
+**Python**: `processing_run_id` getter on `Interval`/`Point`; `record_criterion_run(criterion_id, bundle_id)` + `get_processing_run(id)` bindings; `set_proposals` gained the optional `processing_run_id`; the python-escape executor (`sadda.criteria.run_criterion`) now records the run before materializing, so a python run is traced exactly like a structured one. Stubs regenerated.
+
+**GUI**: the inline Annotation panel shows a provenance one-liner (`↻ from criterion "name" · <timestamp>`) when the selected annotation has a `criterion_run` link, via a pure, unit-tested `format_provenance_line` (derives the name from `processor_id`, trims the timestamp — no serde_json dep added).
+
+**Tests** (all green): engine `criterion_run_records_provenance_and_survives_accept` (run recorded once, params captured, link on proposals, second run re-points, link survives accept) + the migration version bump; pytest `test_structured_run_records_provenance_and_survives_accept` + `test_python_escape_run_is_also_traced`; app `provenance_line_strips_prefix_and_trims_timestamp`. Engine 164 lib + integration, python 166, app 72; clippy clean; stub diff clean after regen. **Next: S3 — the typed expression layer (scope TBD: full vs interval-first).**
+
+## 2026-05-31 — Design: signal-function criteria (S3) generalized to a typed expression layer + the S2.5 provenance precursor
+
+Design session (logged-not-built) ahead of the next annotation-suite slice. Started scoping **S3 — signal-function criteria** (declarative wrappers over the DSP/clinical measures so a criterion can place anchors / filter on a signal), and the user pushed every enumerated choice toward *generality*: "any signal, pre-built or custom"; "arbitrary functions over the reduced signal source"; "arbitrary boolean function." That reframing collapses the three menus into one mechanism.
+
+### The synthesis: one typed expression layer over open registries
+Every fixed slot in the S2 rule is really a place for a *computed value*:
+- emit point `at: 0.5` → a **Time** expression (`argmax(intensity over interval)`)
+- span `from/to` proportions → **Time** expressions at each endpoint (`[start, first_crossing(intensity, -20dB, rising)]`)
+- (new) `where` filter → a **Bool** expression (`mean(f0 over interval) > 1.2 * mean(f0 over file)`)
+
+So "arbitrary function over a reduced signal" and "arbitrary boolean" are the **same feature**: a small **typed expression language** whose results are `Time` / `Scalar` / `Bool`, evaluated over an RoI. One mechanism fills all three roles. It rests on two **open registries** (this is how "any signal, custom or pre-built" is satisfied without enumerating a catalog):
+- **Signal registry** — a signal is *anything resolving to a time-series `(times[], values[])` for a bundle*: built-in DSP (`f0`, `intensity`), **any stored `continuous_numeric`/measure-track tier by name** (cluster-D tracks — formants/HNR/custom), and later registered custom providers. The evaluator never knows *how* a signal was produced.
+- **Reducer registry** — named `series-over-scope → value` fns: `mean/max/min/median/std/range` (→ Scalar), `argmax/argmin/first_crossing/last_crossing` (→ Time). Open by registration.
+
+**Representation decision (AskUserQuestion):** the expression is a **string mini-language** (`mean(f0 over interval) > 1.2 * mean(f0 over file)`) parsed by a small hand-rolled Pratt parser (~150 lines, no new deps) — most natural to author, diffs cleanly as text, shareable verbatim; GUI offers a guided builder that emits the string + a raw field. (Considered + rejected: a JSON AST — verbose to hand-write; the `evalexpr` crate — new dep, not Time/Scalar/Bool-typed.) `evaluate()` stays **pure**: Project pre-computes the referenced signal series and passes a `SignalSet` in; the evaluator reduces over slices — unit-testable with hand-built series exactly like S2.
+
+### Why a structured layer at all, when S2 already has a Python escape — the diffability question
+The user asked, correctly: isn't Python *also* diffable/shareable/repeatable — doesn't a Python run become part of the project trace? Traced the code. Honest answer is **"yes for the source, partially for the run, and the *guarantees* differ":**
+- **Python source is fully first-class** — a `kind='python'` criterion's `body` lives in the **audited** `criterion` table (V9 triggers), so it's versioned/diffable and ships inside the project. Not a second-class citizen for capture.
+- **The *run* is NOT yet traced — for either kind.** `run_criterion → set_proposals` records **no `processing_run`**, and proposals carry no criterion/rubric back-link (only `start,end,label`). So "this annotation came from criterion C, run at T" is *not a stored fact today.* This **contradicts the S2 design entry** (which intended `status=auto` + criterion id + an `auto_annotation` ProcessingRun) — an implemented-vs-designed gap, orthogonal to structured-vs-Python.
+- **Even once runs are traced, the guarantees differ** — and this is the real case for the expression layer: structured criteria are **self-contained over the engine's own measures** (deterministic; re-run needs only sadda), have **decomposable provenance** (engine knows *which measure+config* placed each anchor), and **diff semantically** (threshold 150→160, reviewable by a non-programmer). Python can `import scipy`/read files/hit the network (repeatable only *modulo an unpinned environment*), can be non-deterministic, is **opaque** to provenance, and diffs only *textually*. So the goal is not "structured instead of Python" — it's to move as much as possible into the strong-guarantee layer, leaving Python for the irreducible tail. (Later option: even Python criteria could *declare* the signals they consume, for partial provenance.)
+
+### The S2.5 precursor — "criterion-run provenance" (decided: split out before S3)
+Shipping signal-function criteria whose pitch is *reproducible measurement* while not recording *which criterion/measure produced each anchor* would undercut the slice, so the trace gap lands first, as its own slice, benefiting both criterion kinds. Two design calls, both resolved:
+1. **Don't overload S1's `status`** — S1 made `status` a user-defined rubric vocabulary, so the old "status=auto" is dead. Provenance is a per-row **`processing_run_id`** FK on `annotation_interval`/`annotation_point`; "came from a criterion" = the preview `(auto)` tier + that link. The link **survives promotion** (`accept_proposals` copies it onto promoted target rows).
+2. **Rubric *versioning* stays S6** — no version column today (singleton `rubric.id=1`). The run records `rubric_id` in its `parameters` JSON now; S6's versioning adds a `version` field there. Schema-ready, not over-built.
+
+**S2.5 build shape:** V10 migration (add `'criterion_run'` to `processing_run.kind` CHECK via the V6 table-rebuild pattern; add `processing_run_id` to both annotation tables; audit triggers rebuilt per B1 discipline) + engine recording in `run_criterion`/the python path (`processing_run` kind=`criterion_run`, `processor_id`=criterion, `parameters`={criterion_id, body_hash, rubric_id}), `set_proposals` stamps the link, `accept_proposals` carries it over, readers (`processing_runs(bundle_id)`/`get_processing_run`/provenance on `Interval`/`Point`) + Python + GUI (Annotation panel shows "from criterion C, run at T") + tests. Three-surface rule applies.
+
+**Roadmap now:** S2.5 (criterion-run provenance) → **S3 (the typed expression layer)** → S4 (campaign/assignment) per the 2026-05-30 integrated roadmap. S3 v1 scope (full typed layer vs interval-only-first) still TBD — to be settled when S3 starts.
+
 ## 2026-05-30 — Modal-free annotation flow: the inline Annotation panel
 
 Addresses the user's S1 feedback ("we'll need a smoother annotation flow that doesn't involve modals… an annotation column instead of the Reference column during measurement"). The double-click → floating "Edit annotation" window was a workable S1 stopgap but steals focus and hides the signal.
