@@ -3,6 +3,7 @@
 //! the Python, UniFFI, and desktop-app crates.
 #![warn(missing_docs)]
 
+pub mod agreement;
 pub mod audio;
 pub mod citation;
 pub mod clinical;
@@ -35,10 +36,11 @@ pub use corpus::{
     ASSIGNMENT_ROLES, ASSIGNMENT_STATUSES, Assignment, AssignmentSpec, Bundle, BundleSpec,
     Calibration, Criterion, DerivedSignal, ExportSummary, ImportSummary, Instrument, InstrumentSpec,
     Interval, IntervalSpec, LabelCheck, Point, PointSpec, ProcessingRunKind, ProcessingRunRow,
-    ProcessingRunSpec, ProcessingRunStatus, Project, RecipeRun, Reference, ReferenceSpec, Rubric,
-    RubricTier, Session, SessionSpec, Speaker, SpeakerSpec, StatusDef, TARGET_STATUSES, Target,
-    TargetSpec, Tier, TierRows, TierSpec, TierType, VocabEntry,
+    ProcessingRunSpec, ProcessingRunStatus, Project, ProgressCounts, RecipeRun, Reference,
+    ReferenceSpec, Rubric, RubricTier, Session, SessionSpec, Speaker, SpeakerSpec, StatusDef,
+    TARGET_STATUSES, Target, TargetSpec, Tier, TierRows, TierSpec, TierType, VocabEntry,
 };
+pub use agreement::{AgreementOptions, AgreementReport};
 pub use criteria::expr::{Expr, SampledSignal, SignalSet};
 pub use criteria::{CriterionRule, Emit, EvalInterval, Proposal, Selector};
 pub use error::{EngineError, Result};

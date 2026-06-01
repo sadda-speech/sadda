@@ -536,6 +536,9 @@ struct TargetsPanel {
     /// S4c — merge_tiers inputs: comma-separated source tier names + destination.
     merge_sources: String,
     merge_dest: String,
+    /// S5 — the two tiers selected for the agreement comparison, as `(id, name)`.
+    compare_a: Option<(i64, String)>,
+    compare_b: Option<(i64, String)>,
     /// Last action result, shown in the panel.
     status_msg: Option<String>,
 }
@@ -2612,6 +2615,26 @@ impl SaddaApp {
         for a in assigns {
             assigns_by_target.entry(a.target_id).or_default().push(a);
         }
+        // S5 — compare-tier choices (interval/point tiers) + progress readout.
+        let (tier_choices, progress): (Vec<(i64, String)>, Option<sadda_engine::ProgressCounts>) =
+            match (bundle_id, &self.app_state) {
+                (Some(bid), AppState::ProjectLoaded { project, .. }) => (
+                    project
+                        .tiers(Some(bid))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|t| {
+                            matches!(
+                                t.r#type,
+                                sadda_engine::TierType::Interval | sadda_engine::TierType::Point
+                            )
+                        })
+                        .map(|t| (t.id, t.name))
+                        .collect(),
+                    project.target_progress(bid).ok(),
+                ),
+                _ => (Vec::new(), None),
+            };
 
         let mut close = false;
         let mut keep_open = true;
@@ -2622,6 +2645,8 @@ impl SaddaApp {
         let mut export_pkg = false;
         let mut import_pkg = false;
         let mut merge = false;
+        let mut compare = false;
+        let mut next_kind: Option<&'static str> = None;
         let mut status_change: Option<(i64, String)> = None;
         let mut delete_id: Option<i64> = None;
 
@@ -2761,6 +2786,60 @@ impl SaddaApp {
                     );
                     if ui.button("Merge").clicked() {
                         merge = true;
+                    }
+                });
+
+                // S5 — agreement + work queue.
+                ui.separator();
+                if let Some(p) = &progress {
+                    ui.label(format_target_progress(p));
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Next to do")
+                        .on_hover_text("Jump to the next unassigned/assigned target")
+                        .clicked()
+                    {
+                        next_kind = Some("todo");
+                    }
+                    if ui.button("Next flagged").clicked() {
+                        next_kind = Some("flagged");
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Compare:");
+                    let combo = |ui: &mut egui::Ui,
+                                 salt: &str,
+                                 slot: &mut Option<(i64, String)>,
+                                 choices: &[(i64, String)]| {
+                        let text = slot.as_ref().map(|(_, n)| n.as_str()).unwrap_or("— tier —");
+                        egui::ComboBox::from_id_salt(salt)
+                            .selected_text(text)
+                            .show_ui(ui, |ui| {
+                                for (id, name) in choices {
+                                    if ui
+                                        .selectable_label(
+                                            slot.as_ref().map(|(i, _)| *i) == Some(*id),
+                                            name,
+                                        )
+                                        .clicked()
+                                    {
+                                        *slot = Some((*id, name.clone()));
+                                    }
+                                }
+                            });
+                    };
+                    combo(ui, "compare_a", &mut panel.compare_a, &tier_choices);
+                    ui.label("vs");
+                    combo(ui, "compare_b", &mut panel.compare_b, &tier_choices);
+                    if ui
+                        .add_enabled(
+                            panel.compare_a.is_some() && panel.compare_b.is_some(),
+                            egui::Button::new("Compare"),
+                        )
+                        .clicked()
+                    {
+                        compare = true;
                     }
                 });
 
@@ -2988,6 +3067,46 @@ impl SaddaApp {
                 _ => "Select a bundle first.".to_string(),
             };
             if let Some(p) = self.targets_panel.as_mut() {
+                p.status_msg = Some(msg);
+            }
+        }
+        if compare {
+            let ids = self
+                .targets_panel
+                .as_ref()
+                .and_then(|p| match (&p.compare_a, &p.compare_b) {
+                    (Some((a, _)), Some((b, _))) => Some((*a, *b)),
+                    _ => None,
+                });
+            let msg = match (ids, bundle_id, &self.app_state) {
+                (Some((a, b)), Some(bid), AppState::ProjectLoaded { project, .. }) => {
+                    Some(match project.compare_tiers(bid, a, b, None) {
+                        Ok(r) => format_agreement_report(&r),
+                        Err(e) => format!("Compare failed: {e}"),
+                    })
+                }
+                _ => Some("Pick two tiers to compare.".to_string()),
+            };
+            if let (Some(p), Some(msg)) = (self.targets_panel.as_mut(), msg) {
+                p.status_msg = Some(msg);
+            }
+        }
+        if let Some(kind) = next_kind {
+            let statuses: Vec<String> = match kind {
+                "flagged" => vec!["flagged".into()],
+                _ => vec!["unassigned".into(), "assigned".into()],
+            };
+            let msg = match (bundle_id, &self.app_state) {
+                (Some(bid), AppState::ProjectLoaded { project, .. }) => {
+                    Some(match project.next_target(bid, &statuses) {
+                        Ok(Some(t)) => format!("Next {kind}: {}", format_target_row(&t)),
+                        Ok(None) => format!("No {kind} targets."),
+                        Err(e) => format!("Lookup failed: {e}"),
+                    })
+                }
+                _ => None,
+            };
+            if let (Some(p), Some(msg)) = (self.targets_panel.as_mut(), msg) {
                 p.status_msg = Some(msg);
             }
         }
@@ -4679,6 +4798,35 @@ fn format_export_summary(s: &sadda_engine::ExportSummary) -> String {
         s.assignments,
         s.annotator,
         s.path.display()
+    )
+}
+
+/// Campaign progress one-liner for the targets panel (slice S5).
+fn format_target_progress(p: &sadda_engine::ProgressCounts) -> String {
+    format!(
+        "Progress: {}/{} done · {} in progress · {} flagged · {} to do",
+        p.done,
+        p.total,
+        p.in_progress,
+        p.flagged,
+        p.unassigned + p.assigned
+    )
+}
+
+/// Compact agreement readout for the targets panel (slice S5): κ + label
+/// agreement, unit match counts, boundary deviation/tolerance, and frame κ.
+fn format_agreement_report(r: &sadda_engine::AgreementReport) -> String {
+    format!(
+        "κ={:.2} ({:.0}% labels) · {} matched / {}+{} extra · Δbound {:.0}ms ({:.0}% ≤{:.0}ms) · frame κ={:.2}",
+        r.cohen_kappa,
+        r.percent_label_agreement * 100.0,
+        r.n_matched,
+        r.n_only_a,
+        r.n_only_b,
+        r.mean_abs_boundary_diff * 1000.0,
+        r.boundary_within_tolerance * 100.0,
+        r.boundary_tolerance_seconds * 1000.0,
+        r.frame_kappa,
     )
 }
 
@@ -8315,6 +8463,42 @@ mod rubric_ui_tests {
         assert_eq!(
             format_import_summary(&imp),
             "Imported “alice”: 2 bundle(s) matched, 3 tier(s) / 40 annotation(s) landed, 5 assignment(s) done"
+        );
+    }
+
+    #[test]
+    fn progress_and_agreement_lines_read_naturally() {
+        let p = sadda_engine::ProgressCounts {
+            total: 10,
+            unassigned: 2,
+            assigned: 1,
+            in_progress: 1,
+            done: 5,
+            flagged: 1,
+        };
+        assert_eq!(
+            format_target_progress(&p),
+            "Progress: 5/10 done · 1 in progress · 1 flagged · 3 to do"
+        );
+        let r = sadda_engine::AgreementReport {
+            tier_type: "interval".into(),
+            n_a: 3,
+            n_b: 3,
+            n_matched: 3,
+            n_only_a: 0,
+            n_only_b: 0,
+            percent_label_agreement: 2.0 / 3.0,
+            cohen_kappa: 0.5,
+            mean_abs_boundary_diff: 0.012,
+            boundary_within_tolerance: 0.75,
+            boundary_tolerance_seconds: 0.020,
+            frame_percent_agreement: 0.9,
+            frame_kappa: 0.6,
+            frame_step_seconds: 0.010,
+        };
+        assert_eq!(
+            format_agreement_report(&r),
+            "κ=0.50 (67% labels) · 3 matched / 0+0 extra · Δbound 12ms (75% ≤20ms) · frame κ=0.60"
         );
     }
 }

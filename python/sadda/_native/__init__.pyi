@@ -8,6 +8,7 @@ import os
 import pathlib
 import typing
 __all__ = [
+    "AgreementReport",
     "Assignment",
     "Audio",
     "Bundle",
@@ -25,6 +26,7 @@ __all__ = [
     "PerturbationReport",
     "Point",
     "ProcessingRun",
+    "ProgressCounts",
     "Project",
     "Reference",
     "Rubric",
@@ -64,6 +66,85 @@ __all__ = [
     "version",
     "voiced_pitch",
 ]
+
+@typing.final
+class AgreementReport:
+    r"""
+    Inter-annotation agreement between two tiers (slice S5) — the result of
+    `Project.compare_tiers`. Percentages are fractions in [0, 1]; κ is in
+    (-inf, 1]. Frame fields are 0.0 for point comparisons.
+    """
+    @property
+    def tier_type(self) -> builtins.str:
+        r"""
+        `"interval"` or `"point"`.
+        """
+    @property
+    def n_a(self) -> builtins.int:
+        r"""
+        Unit count on side A.
+        """
+    @property
+    def n_b(self) -> builtins.int:
+        r"""
+        Unit count on side B.
+        """
+    @property
+    def n_matched(self) -> builtins.int:
+        r"""
+        Units matched 1:1.
+        """
+    @property
+    def n_only_a(self) -> builtins.int:
+        r"""
+        Units only in A (deletions).
+        """
+    @property
+    def n_only_b(self) -> builtins.int:
+        r"""
+        Units only in B (insertions).
+        """
+    @property
+    def percent_label_agreement(self) -> builtins.float:
+        r"""
+        Fraction of matched pairs whose labels agree.
+        """
+    @property
+    def cohen_kappa(self) -> builtins.float:
+        r"""
+        Cohen's κ over matched labels.
+        """
+    @property
+    def mean_abs_boundary_diff(self) -> builtins.float:
+        r"""
+        Mean absolute boundary/time deviation (seconds) over matched pairs.
+        """
+    @property
+    def boundary_within_tolerance(self) -> builtins.float:
+        r"""
+        Fraction of matched boundaries/instants within the tolerance.
+        """
+    @property
+    def boundary_tolerance_seconds(self) -> builtins.float:
+        r"""
+        The boundary tolerance used (seconds).
+        """
+    @property
+    def frame_percent_agreement(self) -> builtins.float:
+        r"""
+        Frame-based fraction of agreeing frames (intervals only).
+        """
+    @property
+    def frame_kappa(self) -> builtins.float:
+        r"""
+        Frame-based Cohen's κ (intervals only).
+        """
+    @property
+    def frame_step_seconds(self) -> builtins.float:
+        r"""
+        The frame step used (seconds).
+        """
+    def __repr__(self) -> builtins.str: ...
 
 @typing.final
 class Assignment:
@@ -788,6 +869,44 @@ class ProcessingRun:
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
+class ProgressCounts:
+    r"""
+    A bundle's target counts by status (slice S5) — the campaign progress
+    readout from `Project.target_progress`.
+    """
+    @property
+    def total(self) -> builtins.int:
+        r"""
+        All targets on the bundle.
+        """
+    @property
+    def unassigned(self) -> builtins.int:
+        r"""
+        `unassigned` targets.
+        """
+    @property
+    def assigned(self) -> builtins.int:
+        r"""
+        `assigned` targets.
+        """
+    @property
+    def in_progress(self) -> builtins.int:
+        r"""
+        `in_progress` targets.
+        """
+    @property
+    def done(self) -> builtins.int:
+        r"""
+        `done` targets.
+        """
+    @property
+    def flagged(self) -> builtins.int:
+        r"""
+        `flagged` targets.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
 class Project:
     r"""
     A sadda project: a directory holding audio, derived signals, attachments,
@@ -1144,6 +1263,23 @@ class Project:
         `bundle_id` (time-ordered), creating the destination and replacing its
         contents. All sources must share one type (interval/point). Returns the
         number of annotations written.
+        """
+    def compare_tiers(self, bundle_id: builtins.int, tier_a_id: builtins.int, tier_b_id: builtins.int, *, boundary_tolerance_seconds: builtins.float = 0.02, frame_step_seconds: builtins.float = 0.01) -> AgreementReport:
+        r"""
+        Compares two tiers on `bundle_id` for agreement (slice S5): unit-based
+        label κ, boundary deviation/tolerance, insertions/deletions, and — for
+        interval tiers — a frame-based label κ/agreement. Returns an
+        `AgreementReport`. Powers inter-annotator agreement, auto-vs-gold, and
+        rubric-version impact alike.
+        """
+    def target_progress(self, bundle_id: builtins.int) -> ProgressCounts:
+        r"""
+        Counts a bundle's targets by status — the campaign progress readout.
+        """
+    def next_target(self, bundle_id: builtins.int, statuses: typing.Sequence[builtins.str]) -> typing.Optional[Target]:
+        r"""
+        The next target on `bundle_id` whose status is in `statuses` (time
+        order) — the work-queue navigator. `None` when none match.
         """
     def run_criterion(self, id: builtins.int, bundle_id: builtins.int) -> builtins.int:
         r"""

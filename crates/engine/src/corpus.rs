@@ -774,6 +774,24 @@ pub struct ImportSummary {
     pub assignments_marked_done: usize,
 }
 
+/// A bundle's target counts by status — the campaign progress readout
+/// (slice S5). `total` equals the sum of the per-status fields.
+#[derive(Debug, Clone, Default)]
+pub struct ProgressCounts {
+    /// All targets on the bundle.
+    pub total: usize,
+    /// `status = 'unassigned'`.
+    pub unassigned: usize,
+    /// `status = 'assigned'`.
+    pub assigned: usize,
+    /// `status = 'in_progress'`.
+    pub in_progress: usize,
+    /// `status = 'done'`.
+    pub done: usize,
+    /// `status = 'flagged'`.
+    pub flagged: usize,
+}
+
 /// Registration row for a Parquet sidecar holding a dense tier's data.
 /// Created automatically by `Project::write_continuous_numeric` /
 /// `write_continuous_vector` / `write_categorical_sampled`.
@@ -3123,6 +3141,106 @@ impl Project {
             }
         }
         Ok(())
+    }
+
+    // ====================================================================
+    // Agreement + work queue (slice S5). One comparison engine, three uses
+    // (inter-annotator, auto-vs-gold, rubric-version impact); plus the
+    // campaign progress readout and a next-target navigator.
+    // ====================================================================
+
+    /// Compares two tiers on `bundle_id` and reports their agreement (see
+    /// [`crate::agreement`]): unit-based label κ, boundary deviation/tolerance,
+    /// insertions/deletions, and — for interval tiers — a frame-based label
+    /// κ/agreement. The tiers must belong to `bundle_id`, share a type, and be
+    /// interval or point tiers. `opts = None` uses the defaults (20 ms boundary
+    /// tolerance, 10 ms frame step).
+    pub fn compare_tiers(
+        &self,
+        bundle_id: i64,
+        tier_a_id: i64,
+        tier_b_id: i64,
+        opts: Option<crate::agreement::AgreementOptions>,
+    ) -> Result<crate::agreement::AgreementReport> {
+        let ta = self.get_tier(tier_a_id)?;
+        let tb = self.get_tier(tier_b_id)?;
+        for t in [&ta, &tb] {
+            if t.bundle_id != bundle_id {
+                return Err(EngineError::Corpus(format!(
+                    "compare_tiers: tier {} is not on bundle {bundle_id}",
+                    t.id
+                )));
+            }
+        }
+        if ta.r#type != tb.r#type {
+            return Err(EngineError::Corpus(format!(
+                "compare_tiers: tier types differ ({:?} vs {:?})",
+                ta.r#type, tb.r#type
+            )));
+        }
+        let opts = opts.unwrap_or_default();
+        let report = match ta.r#type {
+            TierType::Interval => {
+                let to_seg = |ivs: Vec<Interval>| -> Vec<crate::agreement::Segment> {
+                    ivs.into_iter()
+                        .map(|i| crate::agreement::Segment {
+                            start: i.start_seconds,
+                            end: i.end_seconds,
+                            label: i.label,
+                        })
+                        .collect()
+                };
+                let a = to_seg(self.intervals(tier_a_id)?);
+                let b = to_seg(self.intervals(tier_b_id)?);
+                crate::agreement::compare_intervals(&a, &b, &opts)
+            }
+            TierType::Point => {
+                let to_mark = |pts: Vec<Point>| -> Vec<crate::agreement::Mark> {
+                    pts.into_iter()
+                        .map(|p| crate::agreement::Mark {
+                            time: p.time_seconds,
+                            label: p.label,
+                        })
+                        .collect()
+                };
+                let a = to_mark(self.points(tier_a_id)?);
+                let b = to_mark(self.points(tier_b_id)?);
+                crate::agreement::compare_points(&a, &b, &opts)
+            }
+            other => {
+                return Err(EngineError::Corpus(format!(
+                    "compare_tiers: unsupported tier type {other:?} (interval/point only)"
+                )));
+            }
+        };
+        Ok(report)
+    }
+
+    /// Counts a bundle's targets by status — the campaign progress readout.
+    pub fn target_progress(&self, bundle_id: i64) -> Result<ProgressCounts> {
+        let mut pc = ProgressCounts::default();
+        for t in self.targets(bundle_id)? {
+            pc.total += 1;
+            match t.status.as_str() {
+                "unassigned" => pc.unassigned += 1,
+                "assigned" => pc.assigned += 1,
+                "in_progress" => pc.in_progress += 1,
+                "done" => pc.done += 1,
+                "flagged" => pc.flagged += 1,
+                _ => {}
+            }
+        }
+        Ok(pc)
+    }
+
+    /// The next target on `bundle_id` whose status is in `statuses`, in time
+    /// order (the work-queue navigator: e.g. `["unassigned","assigned"]` for
+    /// "next to do", `["flagged"]` for "next flagged"). `None` when none match.
+    pub fn next_target(&self, bundle_id: i64, statuses: &[String]) -> Result<Option<Target>> {
+        Ok(self
+            .targets(bundle_id)?
+            .into_iter()
+            .find(|t| statuses.iter().any(|s| s == &t.status)))
     }
 
     /// Finds a tier by name on a bundle, if present.
@@ -6614,6 +6732,104 @@ mod tests {
             project
                 .merge_tiers(bundle_id, &["nope".into()], "phones")
                 .is_err()
+        );
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn compare_tiers_reports_agreement_and_guards_types() {
+        let root = unique_dir("compare");
+        let _ = std::fs::remove_dir_all(&root);
+        let source_wav =
+            std::env::temp_dir().join(format!("sadda_compare_{}.wav", std::process::id()));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("b", &source_wav).unwrap();
+        let alice = project
+            .add_tier(&TierSpec::new(bundle_id, "phones [alice]", TierType::Interval))
+            .unwrap();
+        let bob = project
+            .add_tier(&TierSpec::new(bundle_id, "phones [bob]", TierType::Interval))
+            .unwrap();
+        // Same spans; bob disagrees on the last label.
+        for (tier, flip) in [(alice, false), (bob, true)] {
+            for (k, (s, e, l)) in [(0.0, 0.1, "a"), (0.1, 0.2, "b"), (0.2, 0.3, "a")]
+                .into_iter()
+                .enumerate()
+            {
+                let label = if flip && k == 2 { "c" } else { l };
+                project
+                    .add_interval(&IntervalSpec {
+                        tier_id: tier,
+                        start_seconds: s,
+                        end_seconds: e,
+                        label: Some(label.into()),
+                        ..Default::default()
+                    })
+                    .unwrap();
+            }
+        }
+        let r = project.compare_tiers(bundle_id, alice, bob, None).unwrap();
+        assert_eq!(r.tier_type, "interval");
+        assert_eq!((r.n_matched, r.n_only_a, r.n_only_b), (3, 0, 0));
+        assert!((r.percent_label_agreement - 2.0 / 3.0).abs() < 1e-9);
+        assert!(r.mean_abs_boundary_diff < 1e-9);
+
+        // A point tier can't be compared against an interval tier.
+        let pt = project
+            .add_tier(&TierSpec::new(bundle_id, "marks", TierType::Point))
+            .unwrap();
+        assert!(project.compare_tiers(bundle_id, alice, pt, None).is_err());
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn target_progress_and_next_target_drive_the_work_queue() {
+        let root = unique_dir("workqueue");
+        let _ = std::fs::remove_dir_all(&root);
+        let source_wav =
+            std::env::temp_dir().join(format!("sadda_workqueue_{}.wav", std::process::id()));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("b", &source_wav).unwrap();
+        let t0 = project
+            .add_target(&TargetSpec::new(bundle_id, 0.0, 0.1, "phones"))
+            .unwrap();
+        let t1 = project
+            .add_target(&TargetSpec::new(bundle_id, 0.2, 0.3, "phones"))
+            .unwrap();
+        let _t2 = project
+            .add_target(&TargetSpec::new(bundle_id, 0.4, 0.5, "phones"))
+            .unwrap();
+        project.update_target_status(t0, "done").unwrap();
+        project.update_target_status(t1, "flagged").unwrap();
+
+        let p = project.target_progress(bundle_id).unwrap();
+        assert_eq!((p.total, p.done, p.flagged, p.unassigned), (3, 1, 1, 1));
+
+        // Next to-do (unassigned) is the third target; next flagged is t1.
+        let todo = project
+            .next_target(bundle_id, &["unassigned".into()])
+            .unwrap()
+            .unwrap();
+        assert!((todo.start_seconds - 0.4).abs() < 1e-9);
+        let flagged = project
+            .next_target(bundle_id, &["flagged".into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(flagged.id, t1);
+        // Nothing in_progress.
+        assert!(
+            project
+                .next_target(bundle_id, &["in_progress".into()])
+                .unwrap()
+                .is_none()
         );
 
         let _ = std::fs::remove_file(&source_wav);

@@ -1072,6 +1072,158 @@ impl PyImportSummary {
     }
 }
 
+/// Inter-annotation agreement between two tiers (slice S5) — the result of
+/// `Project.compare_tiers`. Percentages are fractions in [0, 1]; κ is in
+/// (-inf, 1]. Frame fields are 0.0 for point comparisons.
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "AgreementReport", frozen)]
+struct PyAgreementReport {
+    inner: sadda_engine::AgreementReport,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyAgreementReport {
+    /// `"interval"` or `"point"`.
+    #[getter]
+    fn tier_type(&self) -> String {
+        self.inner.tier_type.clone()
+    }
+    /// Unit count on side A.
+    #[getter]
+    fn n_a(&self) -> usize {
+        self.inner.n_a
+    }
+    /// Unit count on side B.
+    #[getter]
+    fn n_b(&self) -> usize {
+        self.inner.n_b
+    }
+    /// Units matched 1:1.
+    #[getter]
+    fn n_matched(&self) -> usize {
+        self.inner.n_matched
+    }
+    /// Units only in A (deletions).
+    #[getter]
+    fn n_only_a(&self) -> usize {
+        self.inner.n_only_a
+    }
+    /// Units only in B (insertions).
+    #[getter]
+    fn n_only_b(&self) -> usize {
+        self.inner.n_only_b
+    }
+    /// Fraction of matched pairs whose labels agree.
+    #[getter]
+    fn percent_label_agreement(&self) -> f64 {
+        self.inner.percent_label_agreement
+    }
+    /// Cohen's κ over matched labels.
+    #[getter]
+    fn cohen_kappa(&self) -> f64 {
+        self.inner.cohen_kappa
+    }
+    /// Mean absolute boundary/time deviation (seconds) over matched pairs.
+    #[getter]
+    fn mean_abs_boundary_diff(&self) -> f64 {
+        self.inner.mean_abs_boundary_diff
+    }
+    /// Fraction of matched boundaries/instants within the tolerance.
+    #[getter]
+    fn boundary_within_tolerance(&self) -> f64 {
+        self.inner.boundary_within_tolerance
+    }
+    /// The boundary tolerance used (seconds).
+    #[getter]
+    fn boundary_tolerance_seconds(&self) -> f64 {
+        self.inner.boundary_tolerance_seconds
+    }
+    /// Frame-based fraction of agreeing frames (intervals only).
+    #[getter]
+    fn frame_percent_agreement(&self) -> f64 {
+        self.inner.frame_percent_agreement
+    }
+    /// Frame-based Cohen's κ (intervals only).
+    #[getter]
+    fn frame_kappa(&self) -> f64 {
+        self.inner.frame_kappa
+    }
+    /// The frame step used (seconds).
+    #[getter]
+    fn frame_step_seconds(&self) -> f64 {
+        self.inner.frame_step_seconds
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AgreementReport(type={:?}, matched={}/{}+{}, label_agree={:.3}, kappa={:.3}, frame_kappa={:.3})",
+            self.inner.tier_type,
+            self.inner.n_matched,
+            self.inner.n_only_a,
+            self.inner.n_only_b,
+            self.inner.percent_label_agreement,
+            self.inner.cohen_kappa,
+            self.inner.frame_kappa,
+        )
+    }
+}
+
+/// A bundle's target counts by status (slice S5) — the campaign progress
+/// readout from `Project.target_progress`.
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "ProgressCounts", frozen)]
+struct PyProgressCounts {
+    inner: sadda_engine::ProgressCounts,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyProgressCounts {
+    /// All targets on the bundle.
+    #[getter]
+    fn total(&self) -> usize {
+        self.inner.total
+    }
+    /// `unassigned` targets.
+    #[getter]
+    fn unassigned(&self) -> usize {
+        self.inner.unassigned
+    }
+    /// `assigned` targets.
+    #[getter]
+    fn assigned(&self) -> usize {
+        self.inner.assigned
+    }
+    /// `in_progress` targets.
+    #[getter]
+    fn in_progress(&self) -> usize {
+        self.inner.in_progress
+    }
+    /// `done` targets.
+    #[getter]
+    fn done(&self) -> usize {
+        self.inner.done
+    }
+    /// `flagged` targets.
+    #[getter]
+    fn flagged(&self) -> usize {
+        self.inner.flagged
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ProgressCounts(total={}, done={}, in_progress={}, assigned={}, unassigned={}, flagged={})",
+            self.inner.total,
+            self.inner.done,
+            self.inner.in_progress,
+            self.inner.assigned,
+            self.inner.unassigned,
+            self.inner.flagged,
+        )
+    }
+}
+
 /// Registration row for a Parquet sidecar holding a dense tier's data.
 /// Created automatically by the `Project.write_continuous_numeric` /
 /// `write_continuous_vector` / `write_categorical_sampled` methods.
@@ -2267,6 +2419,50 @@ impl PyProject {
             .map_err(engine_err_to_py)
     }
 
+    /// Compares two tiers on `bundle_id` for agreement (slice S5): unit-based
+    /// label κ, boundary deviation/tolerance, insertions/deletions, and — for
+    /// interval tiers — a frame-based label κ/agreement. Returns an
+    /// `AgreementReport`. Powers inter-annotator agreement, auto-vs-gold, and
+    /// rubric-version impact alike.
+    #[pyo3(signature = (
+        bundle_id, tier_a_id, tier_b_id, *,
+        boundary_tolerance_seconds=0.020, frame_step_seconds=0.010,
+    ))]
+    fn compare_tiers(
+        &self,
+        bundle_id: i64,
+        tier_a_id: i64,
+        tier_b_id: i64,
+        boundary_tolerance_seconds: f64,
+        frame_step_seconds: f64,
+    ) -> PyResult<PyAgreementReport> {
+        let opts = sadda_engine::AgreementOptions {
+            boundary_tolerance_seconds,
+            frame_step_seconds,
+        };
+        self.inner
+            .compare_tiers(bundle_id, tier_a_id, tier_b_id, Some(opts))
+            .map(|inner| PyAgreementReport { inner })
+            .map_err(engine_err_to_py)
+    }
+
+    /// Counts a bundle's targets by status — the campaign progress readout.
+    fn target_progress(&self, bundle_id: i64) -> PyResult<PyProgressCounts> {
+        self.inner
+            .target_progress(bundle_id)
+            .map(|inner| PyProgressCounts { inner })
+            .map_err(engine_err_to_py)
+    }
+
+    /// The next target on `bundle_id` whose status is in `statuses` (time
+    /// order) — the work-queue navigator. `None` when none match.
+    fn next_target(&self, bundle_id: i64, statuses: Vec<String>) -> PyResult<Option<PyTarget>> {
+        self.inner
+            .next_target(bundle_id, &statuses)
+            .map(|opt| opt.map(|inner| PyTarget { inner }))
+            .map_err(engine_err_to_py)
+    }
+
     /// Runs a `structured` criterion against a bundle, (re)writing its
     /// proposals onto the preview tier. Returns the proposal count.
     /// `python` criteria are run via `sadda.criteria.run_criterion`.
@@ -3383,6 +3579,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAssignment>()?;
     m.add_class::<PyExportSummary>()?;
     m.add_class::<PyImportSummary>()?;
+    m.add_class::<PyAgreementReport>()?;
+    m.add_class::<PyProgressCounts>()?;
     m.add_class::<PyDerivedSignal>()?;
     m.add_class::<PyFormantFrame>()?;
     m.add_class::<PyLtas>()?;
