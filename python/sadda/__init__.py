@@ -24,6 +24,7 @@ from sadda._stability import (
 )
 
 __all__ = [
+    "Assignment",
     "Audio",
     "Bundle",
     "Calibration",
@@ -103,6 +104,9 @@ Criterion = provisional(_native.Criterion)
 
 # S4a surface (Phase 4) — campaign targets: the first-class unit of work.
 Target = provisional(_native.Target)
+
+# S4b surface (Phase 4) — assignments: distribute targets to annotators.
+Assignment = provisional(_native.Assignment)
 
 # A1 surface (Phase 3) — provenance timeline + citation export.
 ProcessingRun = stable(_native.ProcessingRun)

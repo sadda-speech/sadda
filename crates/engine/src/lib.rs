@@ -32,7 +32,8 @@ pub use clinical::{
     PerturbationReport, abi, avqi, cpps, gne, h1_h2, hfno, hnr, hnr_d, perturbation,
 };
 pub use corpus::{
-    Bundle, BundleSpec, Calibration, Criterion, DerivedSignal, Instrument, InstrumentSpec,
+    ASSIGNMENT_ROLES, ASSIGNMENT_STATUSES, Assignment, AssignmentSpec, Bundle, BundleSpec,
+    Calibration, Criterion, DerivedSignal, Instrument, InstrumentSpec,
     Interval, IntervalSpec, LabelCheck, Point, PointSpec, ProcessingRunKind, ProcessingRunRow,
     ProcessingRunSpec, ProcessingRunStatus, Project, RecipeRun, Reference, ReferenceSpec, Rubric,
     RubricTier, Session, SessionSpec, Speaker, SpeakerSpec, StatusDef, TARGET_STATUSES, Target,

@@ -528,6 +528,11 @@ struct TargetsPanel {
     new_start: String,
     new_end: String,
     new_type: String,
+    /// S4b — annotator typed in for the per-target "Assign" button.
+    assign_annotator: String,
+    /// S4b — comma-separated roster + seed for "Assign randomly".
+    roster: String,
+    seed: String,
     /// Last action result, shown in the panel.
     status_msg: Option<String>,
 }
@@ -2583,22 +2588,34 @@ impl SaddaApp {
 
         // Read the data the panel renders BEFORE borrowing panel state, so the
         // window closure never holds two conflicting borrows of `self`.
-        let (targets, criteria): (Vec<sadda_engine::Target>, Vec<(i64, String)>) =
-            match (bundle_id, &self.app_state) {
-                (Some(bid), AppState::ProjectLoaded { project, .. }) => (
-                    project.targets(bid).unwrap_or_default(),
-                    project
-                        .criteria()
-                        .map(|cs| cs.into_iter().map(|c| (c.id, c.name)).collect())
-                        .unwrap_or_default(),
-                ),
-                _ => (Vec::new(), Vec::new()),
-            };
+        let (targets, criteria, assigns): (
+            Vec<sadda_engine::Target>,
+            Vec<(i64, String)>,
+            Vec<sadda_engine::Assignment>,
+        ) = match (bundle_id, &self.app_state) {
+            (Some(bid), AppState::ProjectLoaded { project, .. }) => (
+                project.targets(bid).unwrap_or_default(),
+                project
+                    .criteria()
+                    .map(|cs| cs.into_iter().map(|c| (c.id, c.name)).collect())
+                    .unwrap_or_default(),
+                project.assignments(bid).unwrap_or_default(),
+            ),
+            _ => (Vec::new(), Vec::new(), Vec::new()),
+        };
+        // Group assignments by their target for the per-row summary.
+        let mut assigns_by_target: std::collections::HashMap<i64, Vec<sadda_engine::Assignment>> =
+            std::collections::HashMap::new();
+        for a in assigns {
+            assigns_by_target.entry(a.target_id).or_default().push(a);
+        }
 
         let mut close = false;
         let mut keep_open = true;
         let mut generate = false;
         let mut add_manual = false;
+        let mut random_assign = false;
+        let mut assign_one: Option<i64> = None;
         let mut status_change: Option<(i64, String)> = None;
         let mut delete_id: Option<i64> = None;
 
@@ -2670,6 +2687,37 @@ impl SaddaApp {
                     }
                 });
 
+                // S4b — assignment: one annotator for the per-row Assign button,
+                // plus seeded random distribution across a comma-separated roster.
+                ui.horizontal(|ui| {
+                    ui.label("Annotator:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut panel.assign_annotator)
+                            .hint_text("name")
+                            .desired_width(110.0),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Assign randomly:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut panel.roster)
+                            .hint_text("alice, bob, …")
+                            .desired_width(150.0),
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut panel.seed)
+                            .hint_text("seed")
+                            .desired_width(60.0),
+                    );
+                    if ui
+                        .button("Assign randomly")
+                        .on_hover_text("Distribute unassigned targets across the roster (seeded)")
+                        .clicked()
+                    {
+                        random_assign = true;
+                    }
+                });
+
                 ui.separator();
                 if targets.is_empty() {
                     ui.label(egui::RichText::new("No targets yet.").weak());
@@ -2689,10 +2737,24 @@ impl SaddaApp {
                             if status != t.status {
                                 status_change = Some((t.id, status));
                             }
+                            if ui
+                                .add_enabled(
+                                    !panel.assign_annotator.trim().is_empty(),
+                                    egui::Button::new("Assign"),
+                                )
+                                .on_hover_text("Assign the annotator above to this target")
+                                .clicked()
+                            {
+                                assign_one = Some(t.id);
+                            }
                             if ui.button("🗑").on_hover_text("Delete target").clicked() {
                                 delete_id = Some(t.id);
                             }
                         });
+                        let summary = format_assignment_summary(
+                            assigns_by_target.get(&t.id).map(Vec::as_slice).unwrap_or(&[]),
+                        );
+                        ui.label(egui::RichText::new(summary).weak().small());
                     }
                 });
 
@@ -2757,6 +2819,54 @@ impl SaddaApp {
                     p.new_end.clear();
                     p.new_type.clear();
                 }
+                p.status_msg = Some(msg);
+            }
+        }
+        if let Some(target_id) = assign_one {
+            let annotator = self
+                .targets_panel
+                .as_ref()
+                .map(|p| p.assign_annotator.trim().to_string())
+                .unwrap_or_default();
+            let msg = match &self.app_state {
+                AppState::ProjectLoaded { project, .. } if !annotator.is_empty() => {
+                    match project.add_assignment(&sadda_engine::AssignmentSpec::new(
+                        target_id, &annotator,
+                    )) {
+                        Ok(_) => format!("Assigned to {annotator}."),
+                        Err(e) => format!("Assign failed: {e}"),
+                    }
+                }
+                _ => "Enter an annotator.".into(),
+            };
+            if let Some(p) = self.targets_panel.as_mut() {
+                p.status_msg = Some(msg);
+            }
+        }
+        if random_assign {
+            let (roster, seed) = self
+                .targets_panel
+                .as_ref()
+                .map(|p| (p.roster.clone(), p.seed.clone()))
+                .unwrap_or_default();
+            let names: Vec<String> = roster
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let msg = match (names.is_empty(), seed.trim().parse::<i64>(), bundle_id, &self.app_state)
+            {
+                (true, _, _, _) => "Enter a roster (comma-separated).".to_string(),
+                (_, Err(_), _, _) => "Seed must be an integer.".to_string(),
+                (_, Ok(s), Some(bid), AppState::ProjectLoaded { project, .. }) => {
+                    match project.assign_targets_randomly(bid, &names, s, None) {
+                        Ok(n) => format!("Randomly assigned {n} target(s)."),
+                        Err(e) => format!("Assign failed: {e}"),
+                    }
+                }
+                _ => "Select a bundle first.".to_string(),
+            };
+            if let Some(p) = self.targets_panel.as_mut() {
                 p.status_msg = Some(msg);
             }
         }
@@ -4424,6 +4534,19 @@ fn format_target_row(t: &sadda_engine::Target) -> String {
         "[{:.2}–{:.2}s] {} · {}",
         t.start_seconds, t.end_seconds, t.target_type, t.source
     )
+}
+
+/// One-line "who's on this target" summary for the targets panel (slice S4b):
+/// `→ alice(primary), bob(secondary)`, or `— unassigned` when empty.
+fn format_assignment_summary(assignments: &[sadda_engine::Assignment]) -> String {
+    if assignments.is_empty() {
+        return "— unassigned".to_string();
+    }
+    let who: Vec<String> = assignments
+        .iter()
+        .map(|a| format!("{}({})", a.annotator, a.role))
+        .collect();
+    format!("→ {}", who.join(", "))
 }
 
 /// Whether `label` is out of the controlled `vocab`: non-empty and absent.
@@ -8002,6 +8125,26 @@ mod rubric_ui_tests {
             updated_at: String::new(),
         };
         assert_eq!(format_target_row(&t), "[0.20–0.50s] phones · criterion");
+    }
+
+    #[test]
+    fn assignment_summary_lists_annotators_or_unassigned() {
+        assert_eq!(format_assignment_summary(&[]), "— unassigned");
+        let mk = |annotator: &str, role: &str| sadda_engine::Assignment {
+            id: 1,
+            target_id: 1,
+            annotator: annotator.into(),
+            role: role.into(),
+            status: "assigned".into(),
+            seed: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let a = [mk("alice", "primary"), mk("bob", "secondary")];
+        assert_eq!(
+            format_assignment_summary(&a),
+            "→ alice(primary), bob(secondary)"
+        );
     }
 }
 
