@@ -6450,8 +6450,9 @@ impl SaddaApp {
             let project_open = matches!(self.app_state, AppState::ProjectLoaded { .. });
             let bundle_selected = project_open && self.selected_bundle_id.is_some();
             if ui
-                .add_enabled(project_open, egui::Button::new("Open Bundle…"))
+                .add_enabled(project_open, egui::Button::new("Add Bundle…"))
                 .on_disabled_hover_text("Open or create a project first")
+                .on_hover_text("Import a WAV recording into this project as a new bundle")
                 .clicked()
             {
                 ui.close();
@@ -6784,7 +6785,7 @@ impl SaddaApp {
         if bundles.is_empty() {
             ui.label(egui::RichText::new("(no bundles yet)").italics());
             ui.add_space(8.0);
-            ui.label(egui::RichText::new("Add one via File → Open Bundle…").weak());
+            ui.label(egui::RichText::new("Add one via File → Add Bundle…").weak());
             return;
         }
         let selected = self.selected_bundle_id;
