@@ -6,6 +6,27 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-01 — Annotation workflow S5: the agreement engine + work-queue (shipped)
+
+S4 (the campaign layer) is complete, so S5 adds the **QA core**: the comparison/agreement engine and the annotator throughput/work-queue. Built both together (user's call) with the agreement engine reporting **both** the unit-based and frame-based paradigms (method diversity).
+
+**The "one comparison engine, three uses" realised** (`agreement.rs`, a pure module like `dsp/` — no `Project` coupling, unit-tested): `compare_intervals` / `compare_points` over plain `Segment` / `Mark` lists. The same engine serves inter-annotator agreement (the `"phones [alice]"` vs `"phones [bob]"` tiers S4c import produces), auto-criteria-vs-gold (a preview `(auto)` tier vs a manual tier), and rubric-version impact (S6) — all "compare two label sequences over one time base".
+- **Unit-based** (forced-alignment tradition): greedy max-overlap 1:1 matching → **Cohen's κ** (Cohen 1960, cited) + % label agreement over matched pairs + mean boundary deviation + % boundaries within tolerance (default 20 ms) + insertions/deletions for unmatched units.
+- **Frame-based** (diarization tradition): sample a fixed grid (default 10 ms), compare the per-frame label each side assigns (a `∅` category for gaps) → frame κ + agreement. No matching; robust to divergent segmentation. Reported alongside the unit metrics because they answer different questions.
+- κ degenerate-case conventions documented (no pairs → 0; single-category → 1 iff perfect else 0). Points get nearest-1:1 matching + time deviation; frame metrics are N/A (0.0).
+
+**Work queue** (`corpus.rs`): `target_progress(bundle) → ProgressCounts` (targets by status) and `next_target(bundle, statuses) → Option<Target>` (time-ordered — `["unassigned","assigned"]` = next-to-do, `["flagged"]` = next-flagged). Flag/status itself reuses S4a's `update_target_status` (`'flagged'` is already a target status).
+
+**Engine wrapper:** `Project::compare_tiers(bundle, a_id, b_id, opts)` adapts stored interval/point tiers into the pure engine; guards that both tiers are on the bundle, share a type, and are interval/point.
+
+**Python**: `compare_tiers` (kwargs `boundary_tolerance_seconds` / `frame_step_seconds`) → `AgreementReport`; `target_progress` → `ProgressCounts`; `next_target`. Both result types provisional `sadda.*`. Stubs regenerated (additive).
+
+**GUI**: the Targets… panel gained a QA section — a progress line (`format_target_progress`), **Next to do** / **Next flagged** buttons (`next_target`), and a **Compare** A-vs-B tier picker showing a compact report via the pure `format_agreement_report` (κ, label %, match counts, boundary Δ/tolerance, frame κ). Both helpers unit-tested.
+
+**Deferred:** multi-rater (Fleiss' κ; we do two-rater Cohen); a dedicated adjudication *view* (side-by-side diff with accept-from-A/B) beyond the numeric report; the rubric-version-impact use awaits S6 versioning; a real waveform jump on "next-target" (the button reports it as a status line for now).
+
+**Gate (all green):** engine 290 lib + integration (agreement.rs 8 unit + `compare_tiers_…`, `target_progress_…`), clippy clean; python 181 passed / 6 skipped (`test_agreement.py`); app 76 (incl. `progress_and_agreement_lines_read_naturally`), clippy clean; stubs no drift. **Next: S6 (compile + QA dashboard + rubric versioning + impact tracking), then S7 (PI lab-notebook).**
+
 ## 2026-06-01 — Annotation workflow S4c: per-annotator package export / import / merge (shipped)
 
 The last piece of the campaign layer, and the one I'd flagged as heaviest: **distribution**. Local-first / no-server → hand-off is a *package*, not a shared web app. The PI exports each annotator a self-contained slice, they work offline, the PI imports it back. Across the three surfaces.

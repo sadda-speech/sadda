@@ -24,6 +24,7 @@ from sadda._stability import (
 )
 
 __all__ = [
+    "AgreementReport",
     "Assignment",
     "Audio",
     "Bundle",
@@ -39,6 +40,7 @@ __all__ = [
     "LabelCheck",
     "Point",
     "ProcessingRun",
+    "ProgressCounts",
     "Project",
     "ProvisionalAPIWarning",
     "Reference",
@@ -113,6 +115,10 @@ Assignment = provisional(_native.Assignment)
 # S4c surface (Phase 4) — per-annotator package export / import summaries.
 ExportSummary = provisional(_native.ExportSummary)
 ImportSummary = provisional(_native.ImportSummary)
+
+# S5 surface (Phase 4) — agreement engine + campaign progress.
+AgreementReport = provisional(_native.AgreementReport)
+ProgressCounts = provisional(_native.ProgressCounts)
 
 # A1 surface (Phase 3) — provenance timeline + citation export.
 ProcessingRun = stable(_native.ProcessingRun)
