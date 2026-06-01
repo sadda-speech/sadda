@@ -792,6 +792,49 @@ pub struct ProgressCounts {
     pub flagged: usize,
 }
 
+/// One annotator's assignment counts across the project (slice S6) — the
+/// completeness side of the QA dashboard.
+#[derive(Debug, Clone, Default)]
+pub struct AnnotatorProgress {
+    /// The annotator.
+    pub annotator: String,
+    /// Assignments still `assigned` (not started).
+    pub assigned: usize,
+    /// Assignments `in_progress`.
+    pub in_progress: usize,
+    /// Assignments `done`.
+    pub done: usize,
+}
+
+/// QA findings for one tier (slice S6) — the sanity side of the dashboard.
+#[derive(Debug, Clone, Default)]
+pub struct QaReport {
+    /// The tier inspected.
+    pub tier_id: i64,
+    /// Total annotations on the tier.
+    pub n_annotations: usize,
+    /// Annotations whose non-empty label is absent from the tier's controlled
+    /// vocabulary (0 when the tier has no vocabulary).
+    pub out_of_vocab: usize,
+    /// Annotations with an empty / missing label.
+    pub missing_label: usize,
+    /// Interval pairs that overlap in time (boundary sanity; always 0 for
+    /// point tiers).
+    pub overlaps: usize,
+}
+
+/// Pairwise agreement between two annotators' versions of a tier (slice S6) —
+/// the accuracy side of the dashboard, computed from the S5 agreement engine.
+#[derive(Debug, Clone)]
+pub struct PairAgreement {
+    /// First annotator (from the `"<tier> [annotator]"` tier name).
+    pub annotator_a: String,
+    /// Second annotator.
+    pub annotator_b: String,
+    /// Their agreement.
+    pub report: crate::agreement::AgreementReport,
+}
+
 /// Registration row for a Parquet sidecar holding a dense tier's data.
 /// Created automatically by `Project::write_continuous_numeric` /
 /// `write_continuous_vector` / `write_categorical_sampled`.
@@ -3241,6 +3284,138 @@ impl Project {
             .targets(bundle_id)?
             .into_iter()
             .find(|t| statuses.iter().any(|s| s == &t.status)))
+    }
+
+    // ====================================================================
+    // QA dashboard (slice S6a). Compile the campaign state: completeness from
+    // assignments/targets, accuracy from the agreement engine, and per-tier
+    // QA (vocabulary / boundary) sanity — all read-only aggregation.
+    // ====================================================================
+
+    /// Project-wide target counts by status (the dashboard completeness
+    /// headline) — [`target_progress`](Self::target_progress) summed over every
+    /// bundle.
+    pub fn project_target_progress(&self) -> Result<ProgressCounts> {
+        let mut acc = ProgressCounts::default();
+        for b in self.bundles()? {
+            let p = self.target_progress(b.id)?;
+            acc.total += p.total;
+            acc.unassigned += p.unassigned;
+            acc.assigned += p.assigned;
+            acc.in_progress += p.in_progress;
+            acc.done += p.done;
+            acc.flagged += p.flagged;
+        }
+        Ok(acc)
+    }
+
+    /// Per-annotator assignment counts across the whole project, in annotator
+    /// order — "who has how much left", the completeness breakdown.
+    pub fn assignment_progress(&self) -> Result<Vec<AnnotatorProgress>> {
+        use std::collections::BTreeMap;
+        let mut by: BTreeMap<String, AnnotatorProgress> = BTreeMap::new();
+        for b in self.bundles()? {
+            for a in self.assignments(b.id)? {
+                let e = by.entry(a.annotator.clone()).or_default();
+                e.annotator = a.annotator;
+                match a.status.as_str() {
+                    "assigned" => e.assigned += 1,
+                    "in_progress" => e.in_progress += 1,
+                    "done" => e.done += 1,
+                    _ => {}
+                }
+            }
+        }
+        Ok(by.into_values().collect())
+    }
+
+    /// QA findings for a tier: out-of-vocabulary labels (against the tier's
+    /// controlled vocabulary), empty/missing labels, and — for interval tiers —
+    /// the number of overlapping interval pairs. Reference / dense tiers report
+    /// zero counts.
+    pub fn tier_qa(&self, tier_id: i64) -> Result<QaReport> {
+        let tier = self.get_tier(tier_id)?;
+        let vocab: Vec<String> = self
+            .controlled_vocabulary(&tier.name)?
+            .into_iter()
+            .map(|v| v.value)
+            .collect();
+        let is_oov = |label: &Option<String>| -> bool {
+            match label {
+                Some(l) if !l.is_empty() => !vocab.is_empty() && !vocab.iter().any(|v| v == l),
+                _ => false,
+            }
+        };
+        let is_missing = |label: &Option<String>| label.as_deref().unwrap_or("").is_empty();
+
+        let mut report = QaReport {
+            tier_id,
+            ..Default::default()
+        };
+        match tier.r#type {
+            TierType::Interval => {
+                let ivs = self.intervals(tier_id)?;
+                report.n_annotations = ivs.len();
+                report.out_of_vocab = ivs.iter().filter(|i| is_oov(&i.label)).count();
+                report.missing_label = ivs.iter().filter(|i| is_missing(&i.label)).count();
+                // Overlap count: every interval pair sharing positive time.
+                let spans: Vec<(f64, f64)> =
+                    ivs.iter().map(|i| (i.start_seconds, i.end_seconds)).collect();
+                let mut overlaps = 0;
+                for i in 0..spans.len() {
+                    for j in (i + 1)..spans.len() {
+                        let lo = spans[i].0.max(spans[j].0);
+                        let hi = spans[i].1.min(spans[j].1);
+                        if hi - lo > 1e-9 {
+                            overlaps += 1;
+                        }
+                    }
+                }
+                report.overlaps = overlaps;
+            }
+            TierType::Point => {
+                let pts = self.points(tier_id)?;
+                report.n_annotations = pts.len();
+                report.out_of_vocab = pts.iter().filter(|p| is_oov(&p.label)).count();
+                report.missing_label = pts.iter().filter(|p| is_missing(&p.label)).count();
+            }
+            _ => {}
+        }
+        Ok(report)
+    }
+
+    /// Pairwise inter-annotator agreement over every `"<base_tier> [annotator]"`
+    /// tier on `bundle_id` (the per-annotator tiers the S4c import produces).
+    /// Returns one [`PairAgreement`] per annotator pair, in annotator order.
+    pub fn agreement_summary(
+        &self,
+        bundle_id: i64,
+        base_tier_name: &str,
+    ) -> Result<Vec<PairAgreement>> {
+        let prefix = format!("{base_tier_name} [");
+        let mut variants: Vec<(String, i64)> = Vec::new();
+        for t in self.tiers(Some(bundle_id))? {
+            if let Some(rest) = t.name.strip_prefix(&prefix) {
+                if let Some(annotator) = rest.strip_suffix(']') {
+                    variants.push((annotator.to_string(), t.id));
+                }
+            }
+        }
+        variants.sort();
+        let mut out = Vec::new();
+        for i in 0..variants.len() {
+            for j in (i + 1)..variants.len() {
+                let (ref a_name, a_id) = variants[i];
+                let (ref b_name, b_id) = variants[j];
+                let report = self.compare_tiers(bundle_id, a_id, b_id, None)?;
+                out.push(PairAgreement {
+                    annotator_a: a_name.clone(),
+                    annotator_b: b_name.clone(),
+                    report,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Finds a tier by name on a bundle, if present.
@@ -6831,6 +7006,88 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dashboard_compiles_completeness_qa_and_agreement() {
+        let root = unique_dir("dashboard");
+        let _ = std::fs::remove_dir_all(&root);
+        let source_wav =
+            std::env::temp_dir().join(format!("sadda_dash_{}.wav", std::process::id()));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("b", &source_wav).unwrap();
+
+        // Completeness: two targets, one assigned-done to alice, one in-progress to bob.
+        let t0 = project
+            .add_target(&TargetSpec::new(bundle_id, 0.0, 0.1, "phones"))
+            .unwrap();
+        let t1 = project
+            .add_target(&TargetSpec::new(bundle_id, 0.2, 0.3, "phones"))
+            .unwrap();
+        let a0 = project.add_assignment(&AssignmentSpec::new(t0, "alice")).unwrap();
+        let a1 = project.add_assignment(&AssignmentSpec::new(t1, "bob")).unwrap();
+        project.update_assignment_status(a0, "done").unwrap();
+        project.update_assignment_status(a1, "in_progress").unwrap();
+
+        let pp = project.project_target_progress().unwrap();
+        assert_eq!((pp.total, pp.assigned), (2, 2));
+        let prog = project.assignment_progress().unwrap();
+        assert_eq!(prog.len(), 2);
+        assert_eq!(prog[0].annotator, "alice"); // sorted
+        assert_eq!(prog[0].done, 1);
+        assert_eq!(prog[1].annotator, "bob");
+        assert_eq!(prog[1].in_progress, 1);
+
+        // QA: a tier with a closed vocab, one out-of-vocab + one missing label
+        // + one overlapping pair.
+        let phones = project
+            .add_tier(&TierSpec::new(bundle_id, "phones", TierType::Interval))
+            .unwrap();
+        project.set_rubric("r", 1, None).unwrap();
+        project
+            .set_controlled_vocabulary("phones", &[VocabEntry { value: "a".into(), ..Default::default() }])
+            .unwrap();
+        for (s, e, l) in [(0.0, 0.1, Some("a")), (0.1, 0.2, Some("zzz")), (0.15, 0.25, None)] {
+            project
+                .add_interval(&IntervalSpec {
+                    tier_id: phones,
+                    start_seconds: s,
+                    end_seconds: e,
+                    label: l.map(|x| x.to_string()),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let qa = project.tier_qa(phones).unwrap();
+        assert_eq!(qa.n_annotations, 3);
+        assert_eq!(qa.out_of_vocab, 1); // "zzz"
+        assert_eq!(qa.missing_label, 1); // the None
+        assert_eq!(qa.overlaps, 1); // [0.1,0.2) vs [0.15,0.25)
+
+        // Agreement summary over per-annotator tiers.
+        for (annot, last) in [("alice", "a"), ("bob", "b")] {
+            let tid = project
+                .add_tier(&TierSpec::new(bundle_id, format!("vowels [{annot}]"), TierType::Interval))
+                .unwrap();
+            project
+                .add_interval(&IntervalSpec {
+                    tier_id: tid,
+                    start_seconds: 0.0,
+                    end_seconds: 0.1,
+                    label: Some(last.into()),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let pairs = project.agreement_summary(bundle_id, "vowels").unwrap();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!((pairs[0].annotator_a.as_str(), pairs[0].annotator_b.as_str()), ("alice", "bob"));
+        assert_eq!(pairs[0].report.n_matched, 1);
 
         let _ = std::fs::remove_file(&source_wav);
         let _ = std::fs::remove_dir_all(&root);

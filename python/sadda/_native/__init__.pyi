@@ -9,6 +9,7 @@ import pathlib
 import typing
 __all__ = [
     "AgreementReport",
+    "AnnotatorProgress",
     "Assignment",
     "Audio",
     "Bundle",
@@ -23,11 +24,13 @@ __all__ = [
     "Interval",
     "LabelCheck",
     "Ltas",
+    "PairAgreement",
     "PerturbationReport",
     "Point",
     "ProcessingRun",
     "ProgressCounts",
     "Project",
+    "QaReport",
     "Reference",
     "Rubric",
     "RubricTier",
@@ -143,6 +146,34 @@ class AgreementReport:
     def frame_step_seconds(self) -> builtins.float:
         r"""
         The frame step used (seconds).
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class AnnotatorProgress:
+    r"""
+    One annotator's assignment counts across the project (slice S6) — from
+    `Project.assignment_progress`.
+    """
+    @property
+    def annotator(self) -> builtins.str:
+        r"""
+        The annotator.
+        """
+    @property
+    def assigned(self) -> builtins.int:
+        r"""
+        Assignments not yet started.
+        """
+    @property
+    def in_progress(self) -> builtins.int:
+        r"""
+        Assignments in progress.
+        """
+    @property
+    def done(self) -> builtins.int:
+        r"""
+        Assignments done.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -699,6 +730,29 @@ class Ltas:
     def alpha_ratio(self) -> builtins.float:
         r"""
         Alpha ratio (dB): energy above vs below 1 kHz.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class PairAgreement:
+    r"""
+    Pairwise inter-annotator agreement for one tier (slice S6) — an element of
+    `Project.agreement_summary`.
+    """
+    @property
+    def annotator_a(self) -> builtins.str:
+        r"""
+        First annotator.
+        """
+    @property
+    def annotator_b(self) -> builtins.str:
+        r"""
+        Second annotator.
+        """
+    @property
+    def report(self) -> AgreementReport:
+        r"""
+        Their agreement.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -1281,6 +1335,25 @@ class Project:
         The next target on `bundle_id` whose status is in `statuses` (time
         order) — the work-queue navigator. `None` when none match.
         """
+    def project_target_progress(self) -> ProgressCounts:
+        r"""
+        Project-wide target counts by status — the QA dashboard completeness
+        headline (slice S6).
+        """
+    def assignment_progress(self) -> builtins.list[AnnotatorProgress]:
+        r"""
+        Per-annotator assignment counts across the project, in annotator order.
+        """
+    def tier_qa(self, tier_id: builtins.int) -> QaReport:
+        r"""
+        QA findings for a tier: out-of-vocabulary / missing labels and (interval
+        tiers) overlapping pairs.
+        """
+    def agreement_summary(self, bundle_id: builtins.int, base_tier_name: builtins.str) -> builtins.list[PairAgreement]:
+        r"""
+        Pairwise inter-annotator agreement over every `"<base> [annotator]"`
+        tier on `bundle_id`.
+        """
     def run_criterion(self, id: builtins.int, bundle_id: builtins.int) -> builtins.int:
         r"""
         Runs a `structured` criterion against a bundle, (re)writing its
@@ -1392,6 +1465,38 @@ class Project:
         stereotype; reference tiers become `REF_ANNOTATION` tiers with
         the `Symbolic_Association` stereotype + a JSON sentinel encoding
         `(target_kind, target_id)`.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class QaReport:
+    r"""
+    QA findings for one tier (slice S6) — from `Project.tier_qa`.
+    """
+    @property
+    def tier_id(self) -> builtins.int:
+        r"""
+        The tier inspected.
+        """
+    @property
+    def n_annotations(self) -> builtins.int:
+        r"""
+        Total annotations on the tier.
+        """
+    @property
+    def out_of_vocab(self) -> builtins.int:
+        r"""
+        Annotations whose label is out of the controlled vocabulary.
+        """
+    @property
+    def missing_label(self) -> builtins.int:
+        r"""
+        Annotations with an empty / missing label.
+        """
+    @property
+    def overlaps(self) -> builtins.int:
+        r"""
+        Overlapping interval pairs (0 for point tiers).
         """
     def __repr__(self) -> builtins.str: ...
 

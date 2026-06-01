@@ -6,6 +6,25 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-01 — Annotation workflow S6a: the compile + QA dashboard (shipped)
+
+S6 is the "monitor and evolve" layer; user chose to **decompose it dashboard-first**. This slice (S6a) is the *compile + QA dashboard* — pure read-only aggregation over what S4/S5 built, **no migration**. S6b (rubric *versioning* + impact) is next, and will use the snapshot-history approach (user's call).
+
+Three reads, the three dashboard panes:
+- **Completeness** (from assignments/targets): `project_target_progress()` sums `target_progress` across all bundles (the headline), and `assignment_progress()` rolls assignments up per annotator (`assigned`/`in_progress`/`done`, annotator-sorted) — "who has how much left".
+- **QA sanity** (per tier): `tier_qa(tier_id) → QaReport` flags out-of-vocabulary labels (against the tier's S1 controlled vocabulary), empty/missing labels, and — for interval tiers — overlapping interval pairs. Reference/dense tiers report zeros.
+- **Accuracy** (from the S5 agreement engine): `agreement_summary(bundle, base) → [PairAgreement]` finds every `"<base> [annotator]"` tier (the per-annotator tiers S4c import produces), parses the annotator out of the bracket, and runs `compare_tiers` on each annotator pair — closing the loop "S4c lands per-annotator tiers → S5 compares them → S6 summarizes".
+
+**Decisions:** all aggregation lives on `Project` (no new module — these are thin reads over existing tables); annotator identity is parsed from the `"<base> [annotator]"` tier-name convention rather than stored (consistent with S4b's free-text annotators); QA `overlaps` is an all-pairs positive-intersection count (fine at tier scale).
+
+**Python**: `project_target_progress` / `assignment_progress` / `tier_qa` / `agreement_summary` + the `AnnotatorProgress` / `QaReport` / `PairAgreement` result types (provisional `sadda.*`; `PairAgreement.report` is the S5 `AgreementReport`). Stubs regenerated (additive).
+
+**GUI**: a dedicated **Annotate → Dashboard…** window (`dashboard_window`) — a live Completeness pane (overall + per-annotator) and an on-demand QA & agreement pane (pick a tier → Run QA; type a base tier → Summarize agreement). Pure unit-tested `format_annotator_progress` / `format_qa_report` (with the existing `format_target_progress` / `format_agreement_report`).
+
+**Deferred to S6b / later:** rubric version *history* (snapshot table + publish/recall) and **impact tracking** (re-check annotations against a chosen version's vocab); a curator/adjudication view; CSV/report export of the dashboard.
+
+**Gate (all green):** engine 291 lib + integration (incl. `dashboard_compiles_completeness_qa_and_agreement`), clippy clean; python 185 passed / 6 skipped (`test_dashboard.py`); app 77 (incl. `dashboard_lines_read_naturally`), clippy clean; stubs no drift. **Next: S6b — rubric versioning (snapshot history) + impact tracking. Then S7 (PI lab-notebook).**
+
 ## 2026-06-01 — Annotation workflow S5: the agreement engine + work-queue (shipped)
 
 S4 (the campaign layer) is complete, so S5 adds the **QA core**: the comparison/agreement engine and the annotator throughput/work-queue. Built both together (user's call) with the agreement engine reporting **both** the unit-based and frame-based paradigms (method diversity).
