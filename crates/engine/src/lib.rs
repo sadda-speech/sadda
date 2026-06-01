@@ -33,7 +33,7 @@ pub use clinical::{
 };
 pub use corpus::{
     ASSIGNMENT_ROLES, ASSIGNMENT_STATUSES, Assignment, AssignmentSpec, Bundle, BundleSpec,
-    Calibration, Criterion, DerivedSignal, Instrument, InstrumentSpec,
+    Calibration, Criterion, DerivedSignal, ExportSummary, ImportSummary, Instrument, InstrumentSpec,
     Interval, IntervalSpec, LabelCheck, Point, PointSpec, ProcessingRunKind, ProcessingRunRow,
     ProcessingRunSpec, ProcessingRunStatus, Project, RecipeRun, Reference, ReferenceSpec, Rubric,
     RubricTier, Session, SessionSpec, Speaker, SpeakerSpec, StatusDef, TARGET_STATUSES, Target,

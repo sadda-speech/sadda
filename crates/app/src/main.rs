@@ -533,6 +533,9 @@ struct TargetsPanel {
     /// S4b — comma-separated roster + seed for "Assign randomly".
     roster: String,
     seed: String,
+    /// S4c — merge_tiers inputs: comma-separated source tier names + destination.
+    merge_sources: String,
+    merge_dest: String,
     /// Last action result, shown in the panel.
     status_msg: Option<String>,
 }
@@ -2616,6 +2619,9 @@ impl SaddaApp {
         let mut add_manual = false;
         let mut random_assign = false;
         let mut assign_one: Option<i64> = None;
+        let mut export_pkg = false;
+        let mut import_pkg = false;
+        let mut merge = false;
         let mut status_change: Option<(i64, String)> = None;
         let mut delete_id: Option<i64> = None;
 
@@ -2715,6 +2721,46 @@ impl SaddaApp {
                         .clicked()
                     {
                         random_assign = true;
+                    }
+                });
+
+                // S4c — package hand-off + explicit tier merge.
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Package:");
+                    if ui
+                        .add_enabled(
+                            !panel.assign_annotator.trim().is_empty(),
+                            egui::Button::new("Export for annotator…"),
+                        )
+                        .on_hover_text("Export the annotator above a self-contained sub-project")
+                        .clicked()
+                    {
+                        export_pkg = true;
+                    }
+                    if ui
+                        .button("Import package…")
+                        .on_hover_text("Merge a returned annotator package back in")
+                        .clicked()
+                    {
+                        import_pkg = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Merge tiers:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut panel.merge_sources)
+                            .hint_text("phones [alice], phones [bob]")
+                            .desired_width(180.0),
+                    );
+                    ui.label("→");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut panel.merge_dest)
+                            .hint_text("phones")
+                            .desired_width(90.0),
+                    );
+                    if ui.button("Merge").clicked() {
+                        merge = true;
                     }
                 });
 
@@ -2862,6 +2908,81 @@ impl SaddaApp {
                     match project.assign_targets_randomly(bid, &names, s, None) {
                         Ok(n) => format!("Randomly assigned {n} target(s)."),
                         Err(e) => format!("Assign failed: {e}"),
+                    }
+                }
+                _ => "Select a bundle first.".to_string(),
+            };
+            if let Some(p) = self.targets_panel.as_mut() {
+                p.status_msg = Some(msg);
+            }
+        }
+        if export_pkg {
+            let annotator = self
+                .targets_panel
+                .as_ref()
+                .map(|p| p.assign_annotator.trim().to_string())
+                .unwrap_or_default();
+            let msg = if annotator.is_empty() {
+                Some("Enter an annotator to export.".to_string())
+            } else if let Some(parent) = rfd::FileDialog::new()
+                .set_title("Pick a folder to write the annotator package into")
+                .pick_folder()
+            {
+                let dest = parent.join(format!("sadda_package_{annotator}"));
+                match &self.app_state {
+                    AppState::ProjectLoaded { project, .. } => {
+                        Some(match project.export_annotator_package(&annotator, &dest) {
+                            Ok(s) => format_export_summary(&s),
+                            Err(e) => format!("Export failed: {e}"),
+                        })
+                    }
+                    _ => None,
+                }
+            } else {
+                None // cancelled
+            };
+            if let (Some(p), Some(msg)) = (self.targets_panel.as_mut(), msg) {
+                p.status_msg = Some(msg);
+            }
+        }
+        if import_pkg {
+            let msg = if let Some(dir) = rfd::FileDialog::new()
+                .set_title("Pick the returned annotator package directory")
+                .pick_folder()
+            {
+                match &self.app_state {
+                    AppState::ProjectLoaded { project, .. } => {
+                        Some(match project.import_annotator_package(&dir) {
+                            Ok(s) => format_import_summary(&s),
+                            Err(e) => format!("Import failed: {e}"),
+                        })
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let (Some(p), Some(msg)) = (self.targets_panel.as_mut(), msg) {
+                p.status_msg = Some(msg);
+            }
+        }
+        if merge {
+            let (sources, dest) = self
+                .targets_panel
+                .as_ref()
+                .map(|p| (p.merge_sources.clone(), p.merge_dest.clone()))
+                .unwrap_or_default();
+            let names: Vec<String> = sources
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let msg = match (names.is_empty() || dest.trim().is_empty(), bundle_id, &self.app_state) {
+                (true, _, _) => "Enter source tiers and a destination.".to_string(),
+                (_, Some(bid), AppState::ProjectLoaded { project, .. }) => {
+                    match project.merge_tiers(bid, &names, dest.trim()) {
+                        Ok(n) => format!("Merged {n} annotation(s) into “{}”.", dest.trim()),
+                        Err(e) => format!("Merge failed: {e}"),
                     }
                 }
                 _ => "Select a bundle first.".to_string(),
@@ -4547,6 +4668,30 @@ fn format_assignment_summary(assignments: &[sadda_engine::Assignment]) -> String
         .map(|a| format!("{}({})", a.annotator, a.role))
         .collect();
     format!("→ {}", who.join(", "))
+}
+
+/// Status line for a completed package export (slice S4c).
+fn format_export_summary(s: &sadda_engine::ExportSummary) -> String {
+    format!(
+        "Exported {} bundle(s), {} target(s), {} assignment(s) for “{}” → {}",
+        s.bundles,
+        s.targets,
+        s.assignments,
+        s.annotator,
+        s.path.display()
+    )
+}
+
+/// Status line for a completed package import (slice S4c).
+fn format_import_summary(s: &sadda_engine::ImportSummary) -> String {
+    format!(
+        "Imported “{}”: {} bundle(s) matched, {} tier(s) / {} annotation(s) landed, {} assignment(s) done",
+        s.annotator,
+        s.bundles_matched,
+        s.tiers_imported,
+        s.annotations_imported,
+        s.assignments_marked_done
+    )
 }
 
 /// Whether `label` is out of the controlled `vocab`: non-empty and absent.
@@ -8144,6 +8289,32 @@ mod rubric_ui_tests {
         assert_eq!(
             format_assignment_summary(&a),
             "→ alice(primary), bob(secondary)"
+        );
+    }
+
+    #[test]
+    fn package_summaries_read_naturally() {
+        let exp = sadda_engine::ExportSummary {
+            annotator: "alice".into(),
+            path: std::path::PathBuf::from("/tmp/pkg"),
+            bundles: 2,
+            targets: 5,
+            assignments: 5,
+        };
+        assert_eq!(
+            format_export_summary(&exp),
+            "Exported 2 bundle(s), 5 target(s), 5 assignment(s) for “alice” → /tmp/pkg"
+        );
+        let imp = sadda_engine::ImportSummary {
+            annotator: "alice".into(),
+            bundles_matched: 2,
+            tiers_imported: 3,
+            annotations_imported: 40,
+            assignments_marked_done: 5,
+        };
+        assert_eq!(
+            format_import_summary(&imp),
+            "Imported “alice”: 2 bundle(s) matched, 3 tier(s) / 40 annotation(s) landed, 5 assignment(s) done"
         );
     }
 }
