@@ -24,6 +24,7 @@ __all__ = [
     "Interval",
     "LabelCheck",
     "Ltas",
+    "NotebookEntry",
     "PairAgreement",
     "PerturbationReport",
     "Point",
@@ -737,6 +738,64 @@ class Ltas:
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
+class NotebookEntry:
+    r"""
+    A PI lab-notebook entry (slice S7): an observation / measurement / decision
+    captured while exploring, promotable into a criterion or rubric guidance.
+    """
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Entry id.
+        """
+    @property
+    def target_type(self) -> builtins.str:
+        r"""
+        What the note is about (usually a tier name).
+        """
+    @property
+    def kind(self) -> builtins.str:
+        r"""
+        `observation` / `measurement` / `decision`.
+        """
+    @property
+    def text(self) -> builtins.str:
+        r"""
+        The note prose.
+        """
+    @property
+    def measurement(self) -> typing.Optional[builtins.str]:
+        r"""
+        Optional recorded measurement.
+        """
+    @property
+    def bundle_id(self) -> typing.Optional[builtins.int]:
+        r"""
+        Optional context bundle.
+        """
+    @property
+    def promoted_kind(self) -> typing.Optional[builtins.str]:
+        r"""
+        `criterion` / `rubric_guidance` once promoted, else `None`.
+        """
+    @property
+    def promoted_ref(self) -> typing.Optional[builtins.str]:
+        r"""
+        Reference (name) of the produced artifact once promoted.
+        """
+    @property
+    def created_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC creation timestamp.
+        """
+    @property
+    def updated_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC timestamp of the last update.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
 class PairAgreement:
     r"""
     Pairwise inter-annotator agreement for one tier (slice S6) — an element of
@@ -1376,6 +1435,38 @@ class Project:
         Reports how the current rubric differs from a published `version`: per
         tier, vocabulary added/removed and current annotations now out of
         vocabulary (needing revisiting). Raises if `version` was never published.
+        """
+    def add_notebook_entry(self, target_type: builtins.str, text: builtins.str, *, kind: typing.Optional[builtins.str] = None, measurement: typing.Optional[builtins.str] = None, bundle_id: typing.Optional[builtins.int] = None) -> builtins.int:
+        r"""
+        Records a PI lab-notebook entry about `target_type` (slice S7). `kind`
+        defaults to `"observation"`. Returns the new entry id.
+        """
+    def notebook_entries(self, target_type: typing.Optional[builtins.str] = None) -> builtins.list[NotebookEntry]:
+        r"""
+        Lists notebook entries (newest first), optionally restricted to a
+        `target_type`.
+        """
+    def get_notebook_entry(self, id: builtins.int) -> typing.Optional[NotebookEntry]:
+        r"""
+        Reads a notebook entry by id, or `None`.
+        """
+    def update_notebook_entry(self, id: builtins.int, text: builtins.str, measurement: typing.Optional[builtins.str] = None) -> None:
+        r"""
+        Edits a notebook entry's text and measurement.
+        """
+    def delete_notebook_entry(self, id: builtins.int) -> None:
+        r"""
+        Deletes a notebook entry by id (idempotent).
+        """
+    def promote_entry_to_criterion(self, entry_id: builtins.int, name: builtins.str, kind: builtins.str, body: builtins.str, target_tier: builtins.str) -> Criterion:
+        r"""
+        Promotes a notebook entry into a criterion (creates it + links the
+        entry). Returns the criterion.
+        """
+    def promote_entry_to_rubric_guidance(self, entry_id: builtins.int) -> None:
+        r"""
+        Promotes a notebook entry into rubric-tier guidance: appends its text to
+        the `target_type` tier's rubric description and links the entry.
         """
     def run_criterion(self, id: builtins.int, bundle_id: builtins.int) -> builtins.int:
         r"""

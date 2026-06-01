@@ -901,6 +901,64 @@ struct SnapshotTier {
     vocab: Vec<VocabEntry>,
 }
 
+/// A PI lab-notebook entry (slice S7): an observation / measurement / decision
+/// the PI made while exploring a corpus, grouped by `target_type`. Promoting it
+/// into a `criterion` or rubric-tier guidance records `promoted_kind` /
+/// `promoted_ref`, so the rubric's own creation is provenance.
+#[derive(Debug, Clone)]
+pub struct NotebookEntry {
+    /// Entry id (primary key).
+    pub id: i64,
+    /// What the note is about (free text; usually a tier name).
+    pub target_type: String,
+    /// `observation` / `measurement` / `decision`.
+    pub kind: String,
+    /// The note prose.
+    pub text: String,
+    /// Optional recorded measurement action / result.
+    pub measurement: Option<String>,
+    /// Optional context: the bundle that prompted the note.
+    pub bundle_id: Option<i64>,
+    /// `criterion` / `rubric_guidance` once promoted, else `None`.
+    pub promoted_kind: Option<String>,
+    /// Reference (name) of the produced artifact once promoted.
+    pub promoted_ref: Option<String>,
+    /// ISO 8601 UTC creation timestamp.
+    pub created_at: String,
+    /// ISO 8601 UTC timestamp of the last update.
+    pub updated_at: String,
+}
+
+/// Insert parameters for a [`NotebookEntry`]. `kind` defaults to
+/// `"observation"`.
+#[derive(Debug, Clone, Default)]
+pub struct NotebookEntrySpec {
+    /// What the note is about.
+    pub target_type: String,
+    /// `observation` / `measurement` / `decision`; `None` → `"observation"`.
+    pub kind: Option<String>,
+    /// The note prose.
+    pub text: String,
+    /// Optional recorded measurement.
+    pub measurement: Option<String>,
+    /// Optional context bundle.
+    pub bundle_id: Option<i64>,
+}
+
+impl NotebookEntrySpec {
+    /// An observation about `target_type`.
+    pub fn new(target_type: &str, text: &str) -> Self {
+        Self {
+            target_type: target_type.to_owned(),
+            text: text.to_owned(),
+            ..Default::default()
+        }
+    }
+}
+
+/// The valid [`NotebookEntry::kind`] values.
+pub const NOTEBOOK_KINDS: [&str; 3] = ["observation", "measurement", "decision"];
+
 /// Registration row for a Parquet sidecar holding a dense tier's data.
 /// Created automatically by `Project::write_continuous_numeric` /
 /// `write_continuous_vector` / `write_categorical_sampled`.
@@ -3671,6 +3729,171 @@ impl Project {
             }
         }
         Ok(total)
+    }
+
+    // ====================================================================
+    // PI lab-notebook (slice S7). Capture exploration notes per target type,
+    // then promote them into rubric artifacts (a criterion or rubric-tier
+    // guidance) — the rubric's creation becomes provenance.
+    // ====================================================================
+
+    /// Records a notebook entry. Validates `kind` (defaults to `observation`).
+    pub fn add_notebook_entry(&self, spec: &NotebookEntrySpec) -> Result<i64> {
+        let kind = spec.kind.as_deref().unwrap_or("observation");
+        Self::validate_notebook_kind(kind)?;
+        if spec.text.trim().is_empty() {
+            return Err(EngineError::Corpus("notebook entry text is empty".into()));
+        }
+        let id: i64 = self.conn.query_row(
+            "INSERT INTO notebook_entry (target_type, kind, text, measurement, bundle_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
+            rusqlite::params![spec.target_type, kind, spec.text, spec.measurement, spec.bundle_id],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    /// Lists notebook entries, newest first; if `target_type` is `Some`,
+    /// restricted to that topic.
+    pub fn notebook_entries(&self, target_type: Option<&str>) -> Result<Vec<NotebookEntry>> {
+        let cols = "id, target_type, kind, text, measurement, bundle_id, \
+                    promoted_kind, promoted_ref, created_at, updated_at";
+        let rows = match target_type {
+            Some(tt) => {
+                let mut stmt = self.conn.prepare(&format!(
+                    "SELECT {cols} FROM notebook_entry WHERE target_type = ?1 \
+                     ORDER BY id DESC"
+                ))?;
+                stmt.query_map([tt], Self::map_notebook_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => {
+                let mut stmt = self
+                    .conn
+                    .prepare(&format!("SELECT {cols} FROM notebook_entry ORDER BY id DESC"))?;
+                stmt.query_map([], Self::map_notebook_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            }
+        };
+        Ok(rows)
+    }
+
+    /// Reads a notebook entry by id, or `None`.
+    pub fn get_notebook_entry(&self, id: i64) -> Result<Option<NotebookEntry>> {
+        self.conn
+            .query_row(
+                "SELECT id, target_type, kind, text, measurement, bundle_id, \
+                        promoted_kind, promoted_ref, created_at, updated_at \
+                 FROM notebook_entry WHERE id = ?1",
+                [id],
+                Self::map_notebook_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Edits a notebook entry's `text` and `measurement` (exploration evolves).
+    /// Errors if the entry does not exist.
+    pub fn update_notebook_entry(
+        &self,
+        id: i64,
+        text: &str,
+        measurement: Option<&str>,
+    ) -> Result<()> {
+        if text.trim().is_empty() {
+            return Err(EngineError::Corpus("notebook entry text is empty".into()));
+        }
+        let n = self.conn.execute(
+            "UPDATE notebook_entry SET text = ?1, measurement = ?2, \
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?3",
+            rusqlite::params![text, measurement, id],
+        )?;
+        if n == 0 {
+            return Err(EngineError::Corpus(format!("no notebook entry with id {id}")));
+        }
+        Ok(())
+    }
+
+    /// Deletes a notebook entry by id. Idempotent.
+    pub fn delete_notebook_entry(&self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM notebook_entry WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Promotes a notebook entry into a `criterion` (the computational rule):
+    /// creates the criterion via [`set_criterion`](Self::set_criterion) and
+    /// records `promoted_kind = "criterion"` + the criterion name on the entry,
+    /// so the criterion's origin is the observation. Returns the criterion.
+    pub fn promote_entry_to_criterion(
+        &self,
+        entry_id: i64,
+        name: &str,
+        kind: &str,
+        body: &str,
+        target_tier: &str,
+    ) -> Result<Criterion> {
+        if self.get_notebook_entry(entry_id)?.is_none() {
+            return Err(EngineError::Corpus(format!(
+                "no notebook entry with id {entry_id}"
+            )));
+        }
+        let crit = self.set_criterion(name, None, kind, body, target_tier)?;
+        self.mark_entry_promoted(entry_id, "criterion", &crit.name)?;
+        Ok(crit)
+    }
+
+    /// Promotes a notebook entry into rubric-tier guidance (the prose rule):
+    /// appends the entry text to the `target_type` tier's rubric description
+    /// (creating the rubric-tier config if absent), and records
+    /// `promoted_kind = "rubric_guidance"` on the entry. Requires a rubric
+    /// (`set_rubric` first).
+    pub fn promote_entry_to_rubric_guidance(&self, entry_id: i64) -> Result<()> {
+        let entry = self
+            .get_notebook_entry(entry_id)?
+            .ok_or_else(|| EngineError::Corpus(format!("no notebook entry with id {entry_id}")))?;
+        let existing = self.rubric_tier(&entry.target_type)?;
+        let closed = existing.as_ref().map(|r| r.closed_vocabulary).unwrap_or(false);
+        let description = match existing.and_then(|r| r.description) {
+            Some(d) if !d.trim().is_empty() => format!("{d}\n{}", entry.text),
+            _ => entry.text.clone(),
+        };
+        self.set_rubric_tier(&entry.target_type, Some(&description), closed)?;
+        self.mark_entry_promoted(entry_id, "rubric_guidance", &entry.target_type)?;
+        Ok(())
+    }
+
+    fn mark_entry_promoted(&self, entry_id: i64, kind: &str, reference: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE notebook_entry SET promoted_kind = ?1, promoted_ref = ?2, \
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?3",
+            rusqlite::params![kind, reference, entry_id],
+        )?;
+        Ok(())
+    }
+
+    fn validate_notebook_kind(kind: &str) -> Result<()> {
+        if !NOTEBOOK_KINDS.contains(&kind) {
+            return Err(EngineError::Corpus(format!(
+                "invalid notebook kind {kind:?}; must be one of {NOTEBOOK_KINDS:?}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn map_notebook_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NotebookEntry> {
+        Ok(NotebookEntry {
+            id: row.get(0)?,
+            target_type: row.get(1)?,
+            kind: row.get(2)?,
+            text: row.get(3)?,
+            measurement: row.get(4)?,
+            bundle_id: row.get(5)?,
+            promoted_kind: row.get(6)?,
+            promoted_ref: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+        })
     }
 
     /// Finds a tier by name on a bundle, if present.
@@ -7435,6 +7658,91 @@ mod tests {
         let params: serde_json::Value =
             serde_json::from_str(run.parameters.as_deref().unwrap()).unwrap();
         assert_eq!(params["rubric_version"], 2);
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn notebook_captures_and_promotes_to_criterion_and_guidance() {
+        let root = unique_dir("notebook");
+        let _ = std::fs::remove_dir_all(&root);
+        let source_wav =
+            std::env::temp_dir().join(format!("sadda_notebook_{}.wav", std::process::id()));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("b", &source_wav).unwrap();
+
+        // Capture two notes about "vowels".
+        let e1 = project
+            .add_notebook_entry(&NotebookEntrySpec {
+                target_type: "vowels".into(),
+                kind: Some("measurement".into()),
+                text: "creaky tokens cluster below 120 Hz".into(),
+                measurement: Some("mean f0 = 110 Hz".into()),
+                bundle_id: Some(bundle_id),
+            })
+            .unwrap();
+        project
+            .add_notebook_entry(&NotebookEntrySpec::new("words", "function words reduce"))
+            .unwrap();
+
+        // Filtered + ordered (newest first within a topic).
+        assert_eq!(project.notebook_entries(Some("vowels")).unwrap().len(), 1);
+        assert_eq!(project.notebook_entries(None).unwrap().len(), 2);
+        let got = project.get_notebook_entry(e1).unwrap().unwrap();
+        assert_eq!(got.kind, "measurement");
+        assert_eq!(got.measurement.as_deref(), Some("mean f0 = 110 Hz"));
+        assert_eq!(got.promoted_kind, None);
+
+        // Editable; bad kind + empty text rejected.
+        project.update_notebook_entry(e1, "creaky below 115 Hz", None).unwrap();
+        assert_eq!(
+            project.get_notebook_entry(e1).unwrap().unwrap().text,
+            "creaky below 115 Hz"
+        );
+        assert!(
+            project
+                .add_notebook_entry(&NotebookEntrySpec {
+                    target_type: "x".into(),
+                    kind: Some("bogus".into()),
+                    text: "t".into(),
+                    ..Default::default()
+                })
+                .is_err()
+        );
+
+        // Promote to a criterion → the entry records the link.
+        let crit = project
+            .promote_entry_to_criterion(
+                e1,
+                "creaky vowels",
+                "structured",
+                r#"{"select":{"tier":"phones"},"emit":{"kind":"span"}}"#,
+                "creaky",
+            )
+            .unwrap();
+        assert_eq!(crit.name, "creaky vowels");
+        let promoted = project.get_notebook_entry(e1).unwrap().unwrap();
+        assert_eq!(promoted.promoted_kind.as_deref(), Some("criterion"));
+        assert_eq!(promoted.promoted_ref.as_deref(), Some("creaky vowels"));
+
+        // Promote the "words" note to rubric-tier guidance → appends to the
+        // tier description and links the entry.
+        let words_entry = project.notebook_entries(Some("words")).unwrap()[0].id;
+        project.set_rubric("scheme", 1, None).unwrap();
+        project.set_rubric_tier("words", Some("existing guidance"), false).unwrap();
+        project.promote_entry_to_rubric_guidance(words_entry).unwrap();
+        let rt = project.rubric_tier("words").unwrap().unwrap();
+        assert_eq!(rt.description.as_deref(), Some("existing guidance\nfunction words reduce"));
+        let we = project.get_notebook_entry(words_entry).unwrap().unwrap();
+        assert_eq!(we.promoted_kind.as_deref(), Some("rubric_guidance"));
+
+        // Delete is idempotent.
+        project.delete_notebook_entry(e1).unwrap();
+        project.delete_notebook_entry(e1).unwrap();
+        assert_eq!(project.notebook_entries(None).unwrap().len(), 1);
 
         let _ = std::fs::remove_file(&source_wav);
         let _ = std::fs::remove_dir_all(&root);
