@@ -535,7 +535,7 @@ pub struct Rubric {
 
 /// One allowed annotation-status value, defined by the rubric. The status
 /// set is arbitrary and user-defined (e.g. `draft` / `done` / `flagged`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct StatusDef {
     /// The status string stored on annotations.
     pub value: String,
@@ -562,7 +562,7 @@ pub struct RubricTier {
 }
 
 /// One controlled-vocabulary entry (an allowed label) for a tier.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct VocabEntry {
     /// The allowed label value.
     pub value: String,
@@ -833,6 +833,72 @@ pub struct PairAgreement {
     pub annotator_b: String,
     /// Their agreement.
     pub report: crate::agreement::AgreementReport,
+}
+
+/// A published snapshot of the rubric at a point in its version history
+/// (slice S6b) — the full scheme (statuses + per-tier config + controlled
+/// vocabularies), recallable and diffable.
+#[derive(Debug, Clone)]
+pub struct RubricVersion {
+    /// The rubric version this snapshot captures.
+    pub version: i64,
+    /// Rubric name at snapshot time.
+    pub name: String,
+    /// Guidelines prose at snapshot time.
+    pub guidelines: Option<String>,
+    /// Optional note recorded at publish time (e.g. "added creaky").
+    pub note: Option<String>,
+    /// ISO 8601 UTC publish timestamp.
+    pub created_at: String,
+    /// The status vocabulary at snapshot time.
+    pub statuses: Vec<StatusDef>,
+    /// Per-tier config + controlled vocabularies at snapshot time.
+    pub tiers: Vec<RubricTierSnapshot>,
+}
+
+/// One tier's rubric configuration within a [`RubricVersion`] snapshot.
+#[derive(Debug, Clone)]
+pub struct RubricTierSnapshot {
+    /// Tier name.
+    pub tier_name: String,
+    /// Per-tier guidance.
+    pub description: Option<String>,
+    /// Whether the controlled vocabulary is closed.
+    pub closed_vocabulary: bool,
+    /// The controlled vocabulary at snapshot time.
+    pub vocab: Vec<VocabEntry>,
+}
+
+/// How a rubric change affects one tier (slice S6b) — the vocabulary delta
+/// between a past version and the current rubric, plus how many current
+/// annotations are now out of vocabulary (need revisiting).
+#[derive(Debug, Clone, Default)]
+pub struct TierImpact {
+    /// Tier name.
+    pub tier_name: String,
+    /// Vocabulary values present now but not in the compared version.
+    pub vocab_added: Vec<String>,
+    /// Vocabulary values present in the compared version but not now.
+    pub vocab_removed: Vec<String>,
+    /// Current annotations on tiers of this name whose label is out of the
+    /// *current* controlled vocabulary.
+    pub affected_annotations: usize,
+}
+
+/// Internal serde shape of a [`RubricVersion`] snapshot stored in the
+/// `rubric_version.snapshot` JSON column.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RubricSnapshot {
+    statuses: Vec<StatusDef>,
+    tiers: Vec<SnapshotTier>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapshotTier {
+    tier_name: String,
+    description: Option<String>,
+    closed_vocabulary: bool,
+    vocab: Vec<VocabEntry>,
 }
 
 /// Registration row for a Parquet sidecar holding a dense tier's data.
@@ -3418,6 +3484,195 @@ impl Project {
         Ok(out)
     }
 
+    // ====================================================================
+    // Rubric versioning + impact (slice S6b). Snapshot the rubric scheme into
+    // a version history so a past scheme is recallable, and report how a change
+    // since a past version affects existing annotations.
+    // ====================================================================
+
+    /// Snapshots the current rubric (statuses + per-tier config + controlled
+    /// vocabularies) under its current `version`, recording `note`. Re-publishing
+    /// the same version number updates that snapshot (so you can tweak before
+    /// bumping); to start a new version, `set_rubric` with `version + 1` first.
+    /// Returns the published snapshot. Errors if no rubric exists.
+    pub fn publish_rubric_version(&self, note: Option<&str>) -> Result<RubricVersion> {
+        let rubric = self
+            .rubric()?
+            .ok_or_else(|| EngineError::Corpus("no rubric to publish; call set_rubric first".into()))?;
+        let snapshot = RubricSnapshot {
+            statuses: self.rubric_statuses()?,
+            tiers: self
+                .rubric_tier_snapshots()?
+                .into_iter()
+                .map(|t| SnapshotTier {
+                    tier_name: t.tier_name,
+                    description: t.description,
+                    closed_vocabulary: t.closed_vocabulary,
+                    vocab: t.vocab,
+                })
+                .collect(),
+        };
+        let json = serde_json::to_string(&snapshot)
+            .map_err(|e| EngineError::Corpus(format!("rubric snapshot serialize: {e}")))?;
+        self.conn.execute(
+            "INSERT INTO rubric_version (version, name, guidelines, snapshot, note) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(version) DO UPDATE SET \
+                 name = excluded.name, guidelines = excluded.guidelines, \
+                 snapshot = excluded.snapshot, note = excluded.note, \
+                 created_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+            rusqlite::params![rubric.version, rubric.name, rubric.guidelines, json, note],
+        )?;
+        self.get_rubric_version(rubric.version)?
+            .ok_or_else(|| EngineError::Corpus("rubric version missing after publish".into()))
+    }
+
+    /// Lists published rubric versions in version order.
+    pub fn rubric_versions(&self) -> Result<Vec<RubricVersion>> {
+        let versions: Vec<i64> = self
+            .conn
+            .prepare("SELECT version FROM rubric_version ORDER BY version")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut out = Vec::with_capacity(versions.len());
+        for v in versions {
+            if let Some(rv) = self.get_rubric_version(v)? {
+                out.push(rv);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Recalls a published rubric version's full snapshot, or `None`.
+    pub fn get_rubric_version(&self, version: i64) -> Result<Option<RubricVersion>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT version, name, guidelines, snapshot, note, created_at \
+                 FROM rubric_version WHERE version = ?1",
+                [version],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((version, name, guidelines, json, note, created_at)) = row else {
+            return Ok(None);
+        };
+        let snap: RubricSnapshot = serde_json::from_str(&json)
+            .map_err(|e| EngineError::Corpus(format!("rubric snapshot parse: {e}")))?;
+        Ok(Some(RubricVersion {
+            version,
+            name,
+            guidelines,
+            note,
+            created_at,
+            statuses: snap.statuses,
+            tiers: snap
+                .tiers
+                .into_iter()
+                .map(|t| RubricTierSnapshot {
+                    tier_name: t.tier_name,
+                    description: t.description,
+                    closed_vocabulary: t.closed_vocabulary,
+                    vocab: t.vocab,
+                })
+                .collect(),
+        }))
+    }
+
+    /// Reports how the current rubric differs from a published `version`: per
+    /// tier, the vocabulary values added / removed since that version, and how
+    /// many current annotations are now out of the *current* vocabulary (i.e.
+    /// need revisiting under the updated rubric — the step-7 loop). Only tiers
+    /// with a vocabulary change or affected annotations are returned, in tier
+    /// order. Errors if `version` was never published.
+    pub fn rubric_impact(&self, version: i64) -> Result<Vec<TierImpact>> {
+        use std::collections::{BTreeSet, HashMap};
+        let past = self
+            .get_rubric_version(version)?
+            .ok_or_else(|| EngineError::Corpus(format!("no published rubric version {version}")))?;
+        let vocab_of = |vocab: &[VocabEntry]| -> Vec<String> {
+            vocab.iter().map(|v| v.value.clone()).collect()
+        };
+        let current: HashMap<String, Vec<String>> = self
+            .rubric_tier_snapshots()?
+            .iter()
+            .map(|t| (t.tier_name.clone(), vocab_of(&t.vocab)))
+            .collect();
+        let past_map: HashMap<String, Vec<String>> = past
+            .tiers
+            .iter()
+            .map(|t| (t.tier_name.clone(), vocab_of(&t.vocab)))
+            .collect();
+        let names: BTreeSet<&String> = current.keys().chain(past_map.keys()).collect();
+
+        let mut out = Vec::new();
+        for name in names {
+            let cur = current.get(name).cloned().unwrap_or_default();
+            let pst = past_map.get(name).cloned().unwrap_or_default();
+            let added: Vec<String> = cur.iter().filter(|v| !pst.contains(v)).cloned().collect();
+            let removed: Vec<String> = pst.iter().filter(|v| !cur.contains(v)).cloned().collect();
+            let affected = self.count_out_of_vocab_for_tier_name(name)?;
+            if !added.is_empty() || !removed.is_empty() || affected > 0 {
+                out.push(TierImpact {
+                    tier_name: name.clone(),
+                    vocab_added: added,
+                    vocab_removed: removed,
+                    affected_annotations: affected,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// All rubric-tier configurations (with their controlled vocabularies) for
+    /// the singleton rubric, in tier-name order.
+    fn rubric_tier_snapshots(&self) -> Result<Vec<RubricTierSnapshot>> {
+        let tiers: Vec<(String, Option<String>, bool)> = self
+            .conn
+            .prepare(
+                "SELECT tier_name, description, closed_vocabulary \
+                 FROM rubric_tier WHERE rubric_id = 1 ORDER BY tier_name",
+            )?
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut out = Vec::with_capacity(tiers.len());
+        for (tier_name, description, closed_vocabulary) in tiers {
+            let vocab = self.controlled_vocabulary(&tier_name)?;
+            out.push(RubricTierSnapshot {
+                tier_name,
+                description,
+                closed_vocabulary,
+                vocab,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Total current annotations on tiers named `name` (across all bundles)
+    /// whose label is out of the current controlled vocabulary.
+    fn count_out_of_vocab_for_tier_name(&self, name: &str) -> Result<usize> {
+        let mut total = 0;
+        for b in self.bundles()? {
+            for t in self.tiers(Some(b.id))? {
+                if t.name == name {
+                    total += self.tier_qa(t.id)?.out_of_vocab;
+                }
+            }
+        }
+        Ok(total)
+    }
+
     /// Finds a tier by name on a bundle, if present.
     fn tier_by_name(&self, bundle_id: i64, name: &str) -> Result<Option<Tier>> {
         Ok(self
@@ -3701,16 +3956,19 @@ impl Project {
             hasher.update(criterion.body.as_bytes());
             format!("{:x}", hasher.finalize())
         };
-        let rubric_id: Option<i64> = self
+        let rubric: Option<(i64, i64)> = self
             .conn
-            .query_row("SELECT id FROM rubric WHERE id = 1", [], |row| row.get(0))
+            .query_row("SELECT id, version FROM rubric WHERE id = 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
             .optional()?;
         let parameters = serde_json::json!({
             "criterion_id": criterion.id,
             "criterion_name": criterion.name,
             "criterion_kind": criterion.kind,
             "body_sha256": body_sha256,
-            "rubric_id": rubric_id,
+            "rubric_id": rubric.map(|(id, _)| id),
+            "rubric_version": rubric.map(|(_, v)| v),
         })
         .to_string();
         let mut spec = ProcessingRunSpec::new(
@@ -7088,6 +7346,95 @@ mod tests {
         assert_eq!(pairs.len(), 1);
         assert_eq!((pairs[0].annotator_a.as_str(), pairs[0].annotator_b.as_str()), ("alice", "bob"));
         assert_eq!(pairs[0].report.n_matched, 1);
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rubric_versioning_snapshots_recalls_and_reports_impact() {
+        let root = unique_dir("rubricver");
+        let _ = std::fs::remove_dir_all(&root);
+        let source_wav =
+            std::env::temp_dir().join(format!("sadda_rubricver_{}.wav", std::process::id()));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("b", &source_wav).unwrap();
+        let phones = project
+            .add_tier(&TierSpec::new(bundle_id, "phones", TierType::Interval))
+            .unwrap();
+
+        // v1: vocabulary {a, b}; publish a snapshot.
+        project.set_rubric("scheme", 1, Some("v1 guide")).unwrap();
+        project
+            .set_controlled_vocabulary(
+                "phones",
+                &[
+                    VocabEntry { value: "a".into(), ..Default::default() },
+                    VocabEntry { value: "b".into(), ..Default::default() },
+                ],
+            )
+            .unwrap();
+        let v1 = project.publish_rubric_version(Some("initial")).unwrap();
+        assert_eq!(v1.version, 1);
+        assert_eq!(v1.note.as_deref(), Some("initial"));
+        assert_eq!(v1.tiers.len(), 1);
+        assert_eq!(v1.tiers[0].vocab.len(), 2);
+
+        // Annotate "a" (in vocab) and "b" (will be removed in v2).
+        for (s, e, l) in [(0.0, 0.1, "a"), (0.1, 0.2, "b")] {
+            project
+                .add_interval(&IntervalSpec {
+                    tier_id: phones,
+                    start_seconds: s,
+                    end_seconds: e,
+                    label: Some(l.into()),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        // v2: bump version, drop "b", add "c"; publish.
+        project.set_rubric("scheme", 2, Some("v2 guide")).unwrap();
+        project
+            .set_controlled_vocabulary(
+                "phones",
+                &[
+                    VocabEntry { value: "a".into(), ..Default::default() },
+                    VocabEntry { value: "c".into(), ..Default::default() },
+                ],
+            )
+            .unwrap();
+        project.publish_rubric_version(Some("dropped b, added c")).unwrap();
+
+        // History recall.
+        assert_eq!(project.rubric_versions().unwrap().len(), 2);
+        let recalled = project.get_rubric_version(1).unwrap().unwrap();
+        assert_eq!(recalled.guidelines.as_deref(), Some("v1 guide"));
+        let v1_labels: Vec<String> =
+            recalled.tiers[0].vocab.iter().map(|v| v.value.clone()).collect();
+        assert_eq!(v1_labels, vec!["a".to_string(), "b".to_string()]);
+        assert!(project.get_rubric_version(99).unwrap().is_none());
+
+        // Impact since v1: "phones" added {c}, removed {b}; one annotation ("b")
+        // is now out of the current vocabulary.
+        let impact = project.rubric_impact(1).unwrap();
+        let ph = impact.iter().find(|t| t.tier_name == "phones").unwrap();
+        assert_eq!(ph.vocab_added, vec!["c".to_string()]);
+        assert_eq!(ph.vocab_removed, vec!["b".to_string()]);
+        assert_eq!(ph.affected_annotations, 1);
+        assert!(project.rubric_impact(99).is_err());
+
+        // criterion_run records the active rubric version.
+        let crit = project
+            .set_criterion("c", None, "structured", r#"{"select":{"tier":"phones"},"emit":{"kind":"span"}}"#, "out")
+            .unwrap();
+        let run_id = project.record_criterion_run(&crit, bundle_id).unwrap();
+        let run = project.get_processing_run(run_id).unwrap().unwrap();
+        let params: serde_json::Value =
+            serde_json::from_str(run.parameters.as_deref().unwrap()).unwrap();
+        assert_eq!(params["rubric_version"], 2);
 
         let _ = std::fs::remove_file(&source_wav);
         let _ = std::fs::remove_dir_all(&root);

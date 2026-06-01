@@ -6,6 +6,25 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-01 — Annotation workflow S6b: rubric versioning (snapshot history) + impact (shipped)
+
+The "evolve" half of S6, finishing the rubric loop (flag → refine → revisit). Snapshot-history approach (user's call), so **no per-annotation versioning** — annotations stay untouched; provenance carries the version.
+
+**Engine** (migration **V13** + `corpus.rs`): a `rubric_version` table — `(version UNIQUE, name, guidelines, snapshot JSON, note, created_at)` + 3 audit triggers. The snapshot is an opaque JSON blob (engine-owned `RubricSnapshot`: statuses + per-tier config + controlled vocabularies), so the rubric scheme can evolve without a schema change. `StatusDef` / `VocabEntry` gained serde derives for it.
+- `publish_rubric_version(note)` snapshots the current rubric under its current `version` (upsert on version — tweak before bumping; `set_rubric(version+1)` starts a new one). `rubric_versions()` lists; `get_rubric_version(v)` recalls the full scheme.
+- **Impact** (`rubric_impact(version) → [TierImpact]`): per tier, the vocabulary values added / removed since a past version, and how many *current* annotations are now out of the current vocabulary (need revisiting — the step-7 loop). Only changed/affected tiers, tier-ordered. Reuses S6a's out-of-vocab counting.
+- `record_criterion_run` now records `rubric_version` in its params alongside `rubric_id` (the schema-ready slot from S2.5).
+
+**Decisions:** publish upserts the current version's snapshot rather than erroring on re-publish (edit-then-snapshot ergonomics); impact is measured against the *current* rubric's vocab (so a removed label shows as affected annotations); annotations are never rubric-version-tagged (snapshot history + provenance suffice — the invasive per-annotation column was explicitly rejected).
+
+**Python**: `publish_rubric_version` / `rubric_versions` / `get_rubric_version` / `rubric_impact` + `RubricVersion` / `RubricTierSnapshot` / `TierImpact` (provisional; snapshots expose the existing `StatusDef` / `VocabEntry` pyclasses). Stubs regenerated (additive).
+
+**GUI**: the **Dashboard** window gained a *Rubric versions* section — a publish-with-note control, the published-version list, and an "impact since version N" report via a pure unit-tested `format_tier_impact`.
+
+**Deferred to S7 / later:** rubric *rollback* (recall is read-only — re-applying a snapshot to the live rubric is not wired); diffing two arbitrary past versions (impact compares a version to *current*); the protocol-registry (4th registry) sharing of versioned schemes.
+
+**Gate (all green):** engine 292 lib + integration (incl. `rubric_versioning_snapshots_recalls_and_reports_impact`), clippy clean; python 187 passed / 6 skipped (`test_rubric_versions.py`); app 78 (incl. `tier_impact_line_reads_naturally`), clippy clean; stubs no drift. **S6 complete (S6a dashboard + S6b versioning/impact). Next: S7 — the PI lab-notebook (measurement-actions + notes per target-type → promote-to-rubric/criterion), the final roadmap slice.**
+
 ## 2026-06-01 — Annotation workflow S6a: the compile + QA dashboard (shipped)
 
 S6 is the "monitor and evolve" layer; user chose to **decompose it dashboard-first**. This slice (S6a) is the *compile + QA dashboard* — pure read-only aggregation over what S4/S5 built, **no migration**. S6b (rubric *versioning* + impact) is next, and will use the snapshot-history approach (user's call).

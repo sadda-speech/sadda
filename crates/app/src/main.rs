@@ -558,6 +558,12 @@ struct DashboardWindow {
     qa_msg: Option<String>,
     /// Last agreement-summary result lines.
     agreement_msgs: Vec<String>,
+    /// S6b — note for the next published rubric version + impact version input.
+    publish_note: String,
+    impact_version: String,
+    /// Last versioning result line + impact lines.
+    version_msg: Option<String>,
+    impact_msgs: Vec<String>,
 }
 
 /// Working state for the inline Annotation panel (the modal-free editor): a
@@ -3173,11 +3179,23 @@ impl SaddaApp {
             ),
             _ => (None, Vec::new(), Vec::new()),
         };
+        // S6b — published rubric versions (version + note).
+        let versions: Vec<(i64, Option<String>)> = match &self.app_state {
+            AppState::ProjectLoaded { project, .. } => project
+                .rubric_versions()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|v| (v.version, v.note))
+                .collect(),
+            _ => Vec::new(),
+        };
 
         let mut close = false;
         let mut keep_open = true;
         let mut run_qa = false;
         let mut run_agreement = false;
+        let mut publish = false;
+        let mut run_impact = false;
 
         egui::Window::new("Campaign dashboard")
             .open(&mut keep_open)
@@ -3253,6 +3271,57 @@ impl SaddaApp {
                     }
                 }
 
+                // S6b — rubric versioning + impact.
+                ui.separator();
+                ui.heading("Rubric versions");
+                ui.horizontal(|ui| {
+                    ui.label("Publish note:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut dash.publish_note)
+                            .hint_text("e.g. added creaky")
+                            .desired_width(150.0),
+                    );
+                    if ui
+                        .button("Publish current")
+                        .on_hover_text("Snapshot the current rubric under its version number")
+                        .clicked()
+                    {
+                        publish = true;
+                    }
+                });
+                if let Some(msg) = &dash.version_msg {
+                    ui.label(egui::RichText::new(msg).weak());
+                }
+                if versions.is_empty() {
+                    ui.label(egui::RichText::new("No versions published yet.").weak());
+                } else {
+                    for (v, note) in &versions {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "v{v}{}",
+                                note.as_deref()
+                                    .map(|n| format!(" — {n}"))
+                                    .unwrap_or_default()
+                            ))
+                            .weak(),
+                        );
+                    }
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Impact since version:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut dash.impact_version)
+                            .hint_text("1")
+                            .desired_width(40.0),
+                    );
+                    if ui.button("Report").clicked() {
+                        run_impact = true;
+                    }
+                });
+                for line in &dash.impact_msgs {
+                    ui.label(egui::RichText::new(line).weak());
+                }
+
                 ui.separator();
                 if ui.button("Close").clicked() {
                     close = true;
@@ -3310,6 +3379,49 @@ impl SaddaApp {
             };
             if let Some(d) = self.dashboard.as_mut() {
                 d.agreement_msgs = lines;
+            }
+        }
+        if publish {
+            let note = self
+                .dashboard
+                .as_ref()
+                .map(|d| d.publish_note.trim().to_string())
+                .unwrap_or_default();
+            let msg = match &self.app_state {
+                AppState::ProjectLoaded { project, .. } => {
+                    let note = (!note.is_empty()).then_some(note.as_str());
+                    Some(match project.publish_rubric_version(note) {
+                        Ok(v) => format!("Published rubric v{}.", v.version),
+                        Err(e) => format!("Publish failed: {e}"),
+                    })
+                }
+                _ => None,
+            };
+            if let (Some(d), Some(msg)) = (self.dashboard.as_mut(), msg) {
+                d.version_msg = Some(msg);
+            }
+        }
+        if run_impact {
+            let raw = self
+                .dashboard
+                .as_ref()
+                .map(|d| d.impact_version.trim().to_string())
+                .unwrap_or_default();
+            let lines: Vec<String> = match (raw.parse::<i64>(), &self.app_state) {
+                (Err(_), _) => vec!["Enter a version number.".to_string()],
+                (Ok(v), AppState::ProjectLoaded { project, .. }) => {
+                    match project.rubric_impact(v) {
+                        Ok(impacts) if impacts.is_empty() => {
+                            vec![format!("No changes since v{v}.")]
+                        }
+                        Ok(impacts) => impacts.iter().map(format_tier_impact).collect(),
+                        Err(e) => vec![format!("Impact failed: {e}")],
+                    }
+                }
+                _ => vec![],
+            };
+            if let Some(d) = self.dashboard.as_mut() {
+                d.impact_msgs = lines;
             }
         }
     }
@@ -5018,6 +5130,17 @@ fn format_qa_report(q: &sadda_engine::QaReport) -> String {
     format!(
         "{} annotations · {} out-of-vocab · {} missing · {} overlaps",
         q.n_annotations, q.out_of_vocab, q.missing_label, q.overlaps
+    )
+}
+
+/// Per-tier rubric-change impact line for the dashboard (slice S6b).
+fn format_tier_impact(t: &sadda_engine::TierImpact) -> String {
+    format!(
+        "{}: +[{}] −[{}] · {} to revisit",
+        t.tier_name,
+        t.vocab_added.join(", "),
+        t.vocab_removed.join(", "),
+        t.affected_annotations
     )
 }
 
@@ -8747,6 +8870,20 @@ mod rubric_ui_tests {
         assert_eq!(
             format_qa_report(&q),
             "12 annotations · 2 out-of-vocab · 1 missing · 3 overlaps"
+        );
+    }
+
+    #[test]
+    fn tier_impact_line_reads_naturally() {
+        let t = sadda_engine::TierImpact {
+            tier_name: "phones".into(),
+            vocab_added: vec!["c".into()],
+            vocab_removed: vec!["b".into()],
+            affected_annotations: 4,
+        };
+        assert_eq!(
+            format_tier_impact(&t),
+            "phones: +[c] −[b] · 4 to revisit"
         );
     }
 }

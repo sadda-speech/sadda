@@ -34,11 +34,14 @@ __all__ = [
     "Reference",
     "Rubric",
     "RubricTier",
+    "RubricTierSnapshot",
+    "RubricVersion",
     "Session",
     "Speaker",
     "StatusDef",
     "Target",
     "Tier",
+    "TierImpact",
     "VocabEntry",
     "abi",
     "avqi",
@@ -1354,6 +1357,26 @@ class Project:
         Pairwise inter-annotator agreement over every `"<base> [annotator]"`
         tier on `bundle_id`.
         """
+    def publish_rubric_version(self, note: typing.Optional[builtins.str] = None) -> RubricVersion:
+        r"""
+        Snapshots the current rubric under its current version (slice S6b),
+        recording `note`. Re-publishing the same version updates that snapshot;
+        bump `set_rubric(version+1)` to start a new one. Returns the snapshot.
+        """
+    def rubric_versions(self) -> builtins.list[RubricVersion]:
+        r"""
+        Lists published rubric versions in version order.
+        """
+    def get_rubric_version(self, version: builtins.int) -> typing.Optional[RubricVersion]:
+        r"""
+        Recalls a published rubric version's full snapshot, or `None`.
+        """
+    def rubric_impact(self, version: builtins.int) -> builtins.list[TierImpact]:
+        r"""
+        Reports how the current rubric differs from a published `version`: per
+        tier, vocabulary added/removed and current annotations now out of
+        vocabulary (needing revisiting). Raises if `version` was never published.
+        """
     def run_criterion(self, id: builtins.int, bundle_id: builtins.int) -> builtins.int:
         r"""
         Runs a `structured` criterion against a bundle, (re)writing its
@@ -1606,6 +1629,76 @@ class RubricTier:
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
+class RubricTierSnapshot:
+    r"""
+    One tier's config within a published rubric snapshot (slice S6b).
+    """
+    @property
+    def tier_name(self) -> builtins.str:
+        r"""
+        Tier name.
+        """
+    @property
+    def description(self) -> typing.Optional[builtins.str]:
+        r"""
+        Per-tier guidance.
+        """
+    @property
+    def closed_vocabulary(self) -> builtins.bool:
+        r"""
+        Whether the controlled vocabulary is closed.
+        """
+    @property
+    def vocab(self) -> builtins.list[VocabEntry]:
+        r"""
+        The controlled vocabulary at snapshot time.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class RubricVersion:
+    r"""
+    A published rubric version snapshot (slice S6b) — from
+    `Project.publish_rubric_version` / `rubric_versions` / `get_rubric_version`.
+    """
+    @property
+    def version(self) -> builtins.int:
+        r"""
+        The rubric version captured.
+        """
+    @property
+    def name(self) -> builtins.str:
+        r"""
+        Rubric name at snapshot time.
+        """
+    @property
+    def guidelines(self) -> typing.Optional[builtins.str]:
+        r"""
+        Guidelines prose at snapshot time.
+        """
+    @property
+    def note(self) -> typing.Optional[builtins.str]:
+        r"""
+        Note recorded at publish time.
+        """
+    @property
+    def created_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC publish timestamp.
+        """
+    @property
+    def statuses(self) -> builtins.list[StatusDef]:
+        r"""
+        Status vocabulary at snapshot time.
+        """
+    @property
+    def tiers(self) -> builtins.list[RubricTierSnapshot]:
+        r"""
+        Per-tier config + controlled vocabularies at snapshot time.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
 class Session:
     r"""
     A recording session — a time-bounded block during which one or more
@@ -1848,6 +1941,34 @@ class Tier:
     def created_at(self) -> builtins.str:
         r"""
         ISO 8601 UTC creation timestamp.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class TierImpact:
+    r"""
+    How a rubric change affects one tier (slice S6b) — an element of
+    `Project.rubric_impact`.
+    """
+    @property
+    def tier_name(self) -> builtins.str:
+        r"""
+        Tier name.
+        """
+    @property
+    def vocab_added(self) -> builtins.list[builtins.str]:
+        r"""
+        Vocabulary values added since the compared version.
+        """
+    @property
+    def vocab_removed(self) -> builtins.list[builtins.str]:
+        r"""
+        Vocabulary values removed since the compared version.
+        """
+    @property
+    def affected_annotations(self) -> builtins.int:
+        r"""
+        Current annotations now out of the current vocabulary.
         """
     def __repr__(self) -> builtins.str: ...
 
