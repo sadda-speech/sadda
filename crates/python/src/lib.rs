@@ -1502,6 +1502,76 @@ impl PyTierImpact {
     }
 }
 
+/// A PI lab-notebook entry (slice S7): an observation / measurement / decision
+/// captured while exploring, promotable into a criterion or rubric guidance.
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "NotebookEntry", frozen)]
+struct PyNotebookEntry {
+    inner: sadda_engine::NotebookEntry,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyNotebookEntry {
+    /// Entry id.
+    #[getter]
+    fn id(&self) -> i64 {
+        self.inner.id
+    }
+    /// What the note is about (usually a tier name).
+    #[getter]
+    fn target_type(&self) -> String {
+        self.inner.target_type.clone()
+    }
+    /// `observation` / `measurement` / `decision`.
+    #[getter]
+    fn kind(&self) -> String {
+        self.inner.kind.clone()
+    }
+    /// The note prose.
+    #[getter]
+    fn text(&self) -> String {
+        self.inner.text.clone()
+    }
+    /// Optional recorded measurement.
+    #[getter]
+    fn measurement(&self) -> Option<String> {
+        self.inner.measurement.clone()
+    }
+    /// Optional context bundle.
+    #[getter]
+    fn bundle_id(&self) -> Option<i64> {
+        self.inner.bundle_id
+    }
+    /// `criterion` / `rubric_guidance` once promoted, else `None`.
+    #[getter]
+    fn promoted_kind(&self) -> Option<String> {
+        self.inner.promoted_kind.clone()
+    }
+    /// Reference (name) of the produced artifact once promoted.
+    #[getter]
+    fn promoted_ref(&self) -> Option<String> {
+        self.inner.promoted_ref.clone()
+    }
+    /// ISO 8601 UTC creation timestamp.
+    #[getter]
+    fn created_at(&self) -> String {
+        self.inner.created_at.clone()
+    }
+    /// ISO 8601 UTC timestamp of the last update.
+    #[getter]
+    fn updated_at(&self) -> String {
+        self.inner.updated_at.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "NotebookEntry(id={}, target_type={:?}, kind={:?}, promoted={:?})",
+            self.inner.id, self.inner.target_type, self.inner.kind, self.inner.promoted_kind
+        )
+    }
+}
+
 /// Registration row for a Parquet sidecar holding a dense tier's data.
 /// Created automatically by the `Project.write_continuous_numeric` /
 /// `write_continuous_vector` / `write_categorical_sampled` methods.
@@ -2825,6 +2895,87 @@ impl PyProject {
             .map_err(engine_err_to_py)
     }
 
+    /// Records a PI lab-notebook entry about `target_type` (slice S7). `kind`
+    /// defaults to `"observation"`. Returns the new entry id.
+    #[pyo3(signature = (target_type, text, *, kind=None, measurement=None, bundle_id=None))]
+    fn add_notebook_entry(
+        &self,
+        target_type: &str,
+        text: &str,
+        kind: Option<String>,
+        measurement: Option<String>,
+        bundle_id: Option<i64>,
+    ) -> PyResult<i64> {
+        let spec = sadda_engine::NotebookEntrySpec {
+            target_type: target_type.to_owned(),
+            kind,
+            text: text.to_owned(),
+            measurement,
+            bundle_id,
+        };
+        self.inner.add_notebook_entry(&spec).map_err(engine_err_to_py)
+    }
+
+    /// Lists notebook entries (newest first), optionally restricted to a
+    /// `target_type`.
+    #[pyo3(signature = (target_type=None))]
+    fn notebook_entries(&self, target_type: Option<&str>) -> PyResult<Vec<PyNotebookEntry>> {
+        self.inner
+            .notebook_entries(target_type)
+            .map(|xs| xs.into_iter().map(|inner| PyNotebookEntry { inner }).collect())
+            .map_err(engine_err_to_py)
+    }
+
+    /// Reads a notebook entry by id, or `None`.
+    fn get_notebook_entry(&self, id: i64) -> PyResult<Option<PyNotebookEntry>> {
+        self.inner
+            .get_notebook_entry(id)
+            .map(|opt| opt.map(|inner| PyNotebookEntry { inner }))
+            .map_err(engine_err_to_py)
+    }
+
+    /// Edits a notebook entry's text and measurement.
+    #[pyo3(signature = (id, text, measurement=None))]
+    fn update_notebook_entry(
+        &self,
+        id: i64,
+        text: &str,
+        measurement: Option<&str>,
+    ) -> PyResult<()> {
+        self.inner
+            .update_notebook_entry(id, text, measurement)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Deletes a notebook entry by id (idempotent).
+    fn delete_notebook_entry(&self, id: i64) -> PyResult<()> {
+        self.inner.delete_notebook_entry(id).map_err(engine_err_to_py)
+    }
+
+    /// Promotes a notebook entry into a criterion (creates it + links the
+    /// entry). Returns the criterion.
+    fn promote_entry_to_criterion(
+        &self,
+        entry_id: i64,
+        name: &str,
+        kind: &str,
+        body: &str,
+        target_tier: &str,
+    ) -> PyResult<PyCriterion> {
+        self.inner
+            .promote_entry_to_criterion(entry_id, name, kind, body, target_tier)
+            .map(|inner| PyCriterion { inner })
+            .map_err(engine_err_to_py)
+    }
+
+    /// Promotes a notebook entry into rubric-tier guidance: appends its text to
+    /// the `target_type` tier's rubric description and links the entry.
+    fn promote_entry_to_rubric_guidance(&self, entry_id: i64) -> PyResult<()> {
+        self.inner
+            .promote_entry_to_rubric_guidance(entry_id)
+            .map_err(engine_err_to_py)
+    }
+
     /// Runs a `structured` criterion against a bundle, (re)writing its
     /// proposals onto the preview tier. Returns the proposal count.
     /// `python` criteria are run via `sadda.criteria.run_criterion`.
@@ -3949,6 +4100,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRubricVersion>()?;
     m.add_class::<PyRubricTierSnapshot>()?;
     m.add_class::<PyTierImpact>()?;
+    m.add_class::<PyNotebookEntry>()?;
     m.add_class::<PyDerivedSignal>()?;
     m.add_class::<PyFormantFrame>()?;
     m.add_class::<PyLtas>()?;

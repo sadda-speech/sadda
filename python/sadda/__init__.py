@@ -39,6 +39,7 @@ __all__ = [
     "Instrument",
     "Interval",
     "LabelCheck",
+    "NotebookEntry",
     "PairAgreement",
     "Point",
     "ProcessingRun",
@@ -135,6 +136,9 @@ PairAgreement = provisional(_native.PairAgreement)
 RubricVersion = provisional(_native.RubricVersion)
 RubricTierSnapshot = provisional(_native.RubricTierSnapshot)
 TierImpact = provisional(_native.TierImpact)
+
+# S7 surface (Phase 4) — the PI lab-notebook.
+NotebookEntry = provisional(_native.NotebookEntry)
 
 # A1 surface (Phase 3) — provenance timeline + citation export.
 ProcessingRun = stable(_native.ProcessingRun)

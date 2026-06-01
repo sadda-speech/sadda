@@ -6,6 +6,26 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-01 — Annotation workflow S7: the PI lab-notebook (shipped) — the suite is complete
+
+The final slice. As the PI explores a corpus to define a study, they capture observations / measurements / decisions, then **promote** them into rubric artifacts — so the rubric's own creation is provenance ("this rule came from that observation"). Same iterate-loop the annotators use later, run earlier by the PI.
+
+**Engine** (migration **V14** + `corpus.rs`): a `notebook_entry` table — `(target_type, kind, text, measurement, bundle_id, promoted_kind, promoted_ref, timestamps)` + index + 3 audit triggers. `kind ∈ {observation, measurement, decision}`; `target_type` is the free-text topic (usually a tier name); `measurement` optionally records the action/result behind a note (a free record at v1 — deeper recipe integration deferred). CRUD: `add_notebook_entry`, `notebook_entries(target_type?)` (newest-first, optional topic filter), `get_notebook_entry`, `update_notebook_entry`, `delete_notebook_entry`. **Two promote paths**, each stamping `promoted_kind` / `promoted_ref` on the entry:
+- `promote_entry_to_criterion(entry, name, kind, body, target_tier)` — creates a criterion via `set_criterion` and links it (the computational rule).
+- `promote_entry_to_rubric_guidance(entry)` — appends the note text to the `target_type` tier's rubric description (upserting `rubric_tier`) and links it (the prose rule).
+
+**Decisions:** annotators/topics are free text (consistent with S4b/S6); guidance promotion *appends* to existing tier description (notebook accumulates guidance) rather than replacing; promotion is one-directional provenance (no auto-sync if the note later changes).
+
+**Python**: the seven methods + `NotebookEntry` (provisional `sadda.NotebookEntry`). Stubs regenerated (additive).
+
+**GUI**: an **Annotate → Notebook…** window — an add-note form (target type / kind / note / measurement), a topic-filtered list, and per-note **→criterion** (creates a template criterion to refine in the Criteria editor) / **→guidance** / delete, with a pure unit-tested `format_notebook_entry` (showing the promotion marker).
+
+**Deferred / later:** a live measurement-runner feeding `measurement` (it's a recorded note at v1); recipe linkage for replaying measurement actions; promoting to a controlled-vocabulary *label* (guidance promotion targets the tier description).
+
+**Gate (all green):** engine 293 lib + integration (incl. `notebook_captures_and_promotes_to_criterion_and_guidance`), clippy clean; python 190 passed / 6 skipped (`test_notebook.py`); app 79 (incl. `notebook_entry_line_shows_topic_kind_and_promotion`), clippy clean; stubs no drift.
+
+**The annotation-workflow campaign suite (S1–S7) is complete:** S1 rubric-as-data → S2 criteria engine → S2.5 criterion-run provenance → S3 signal-function expressions → S4 campaign layer (a targets, b assignment, c distribution) → S5 agreement engine + work-queue → S6 dashboard (a) + rubric versioning/impact (b) → S7 lab-notebook. Migrations V8–V14. Next focus is open (validation runs / polish; a 0.4.0 cut bundling the suite is a natural milestone).
+
 ## 2026-06-01 — Annotation workflow S6b: rubric versioning (snapshot history) + impact (shipped)
 
 The "evolve" half of S6, finishing the rubric loop (flag → refine → revisit). Snapshot-history approach (user's call), so **no per-annotation versioning** — annotations stay untouched; provenance carries the version.

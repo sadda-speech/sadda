@@ -291,6 +291,8 @@ struct SaddaApp {
     targets_panel: Option<TargetsPanel>,
     /// Open campaign QA dashboard (slice S6a), or `None`.
     dashboard: Option<DashboardWindow>,
+    /// Open PI lab-notebook (slice S7), or `None`.
+    notebook: Option<NotebookWindow>,
     /// Working state for the inline Annotation panel (modal-free editor).
     annotation_inspector: AnnotationInspector,
     /// E8: most recent `script-engine` output (stdout + stderr).
@@ -542,6 +544,21 @@ struct TargetsPanel {
     compare_a: Option<(i64, String)>,
     compare_b: Option<(i64, String)>,
     /// Last action result, shown in the panel.
+    status_msg: Option<String>,
+}
+
+/// State for the PI lab-notebook (slice S7): draft inputs for a new note plus
+/// an optional topic filter. Entries are read live from the project each frame.
+#[derive(Default)]
+struct NotebookWindow {
+    /// Draft fields for a new entry.
+    new_target_type: String,
+    new_kind: String,
+    new_text: String,
+    new_measurement: String,
+    /// Optional `target_type` filter for the list (empty = all).
+    filter: String,
+    /// Last action result.
     status_msg: Option<String>,
 }
 
@@ -971,6 +988,7 @@ impl SaddaApp {
             criteria_editor: None,
             targets_panel: None,
             dashboard: None,
+            notebook: None,
             annotation_inspector: AnnotationInspector::default(),
             script_output: None,
             script_error: None,
@@ -3426,6 +3444,221 @@ impl SaddaApp {
         }
     }
 
+    /// The PI lab-notebook (slice S7): capture notes per target type and
+    /// promote them into a criterion or rubric guidance. Read-live /
+    /// apply-after-borrow, like the other campaign windows.
+    fn notebook_window(&mut self, ctx: &egui::Context) {
+        if self.notebook.is_none() {
+            return;
+        }
+        let filter = self
+            .notebook
+            .as_ref()
+            .map(|n| n.filter.trim().to_string())
+            .unwrap_or_default();
+        let entries: Vec<sadda_engine::NotebookEntry> = match &self.app_state {
+            AppState::ProjectLoaded { project, .. } => project
+                .notebook_entries((!filter.is_empty()).then_some(filter.as_str()))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+
+        let mut close = false;
+        let mut keep_open = true;
+        let mut add = false;
+        let mut promote_criterion: Option<i64> = None;
+        let mut promote_guidance: Option<i64> = None;
+        let mut delete_id: Option<i64> = None;
+
+        egui::Window::new("Lab notebook")
+            .open(&mut keep_open)
+            .resizable(true)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                let nb = self.notebook.as_mut().expect("checked above");
+
+                egui::Grid::new("notebook_new")
+                    .num_columns(2)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Target type");
+                        ui.text_edit_singleline(&mut nb.new_target_type);
+                        ui.end_row();
+                        ui.label("Kind");
+                        egui::ComboBox::from_id_salt("notebook_kind")
+                            .selected_text(if nb.new_kind.is_empty() {
+                                "observation"
+                            } else {
+                                &nb.new_kind
+                            })
+                            .show_ui(ui, |ui| {
+                                for k in ["observation", "measurement", "decision"] {
+                                    ui.selectable_value(&mut nb.new_kind, k.to_string(), k);
+                                }
+                            });
+                        ui.end_row();
+                        ui.label("Note");
+                        ui.text_edit_singleline(&mut nb.new_text);
+                        ui.end_row();
+                        ui.label("Measurement");
+                        ui.text_edit_singleline(&mut nb.new_measurement);
+                        ui.end_row();
+                    });
+                if ui
+                    .add_enabled(
+                        !nb.new_target_type.trim().is_empty() && !nb.new_text.trim().is_empty(),
+                        egui::Button::new("Add note"),
+                    )
+                    .clicked()
+                {
+                    add = true;
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Filter:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut nb.filter)
+                            .hint_text("target type")
+                            .desired_width(120.0),
+                    );
+                });
+                if entries.is_empty() {
+                    ui.label(egui::RichText::new("No notes yet.").weak());
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for e in &entries {
+                        ui.horizontal(|ui| {
+                            ui.label(format_notebook_entry(e));
+                            if e.promoted_kind.is_none() {
+                                if ui
+                                    .button("→criterion")
+                                    .on_hover_text("Create a criterion template from this note")
+                                    .clicked()
+                                {
+                                    promote_criterion = Some(e.id);
+                                }
+                                if ui
+                                    .button("→guidance")
+                                    .on_hover_text("Append this note to the tier's rubric guidance")
+                                    .clicked()
+                                {
+                                    promote_guidance = Some(e.id);
+                                }
+                            }
+                            if ui.button("🗑").on_hover_text("Delete note").clicked() {
+                                delete_id = Some(e.id);
+                            }
+                        });
+                    }
+                });
+
+                if let Some(msg) = &nb.status_msg {
+                    ui.separator();
+                    ui.label(egui::RichText::new(msg).weak());
+                }
+                ui.separator();
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+
+        if !keep_open || close {
+            self.notebook = None;
+            return;
+        }
+
+        if add {
+            let (tt, kind, text, meas) = self
+                .notebook
+                .as_ref()
+                .map(|n| {
+                    (
+                        n.new_target_type.trim().to_string(),
+                        if n.new_kind.is_empty() {
+                            "observation".to_string()
+                        } else {
+                            n.new_kind.clone()
+                        },
+                        n.new_text.trim().to_string(),
+                        n.new_measurement.trim().to_string(),
+                    )
+                })
+                .unwrap_or_default();
+            let msg = match &self.app_state {
+                AppState::ProjectLoaded { project, .. } => {
+                    let spec = sadda_engine::NotebookEntrySpec {
+                        target_type: tt,
+                        kind: Some(kind),
+                        text,
+                        measurement: (!meas.is_empty()).then_some(meas),
+                        bundle_id: self.selected_bundle_id,
+                    };
+                    Some(match project.add_notebook_entry(&spec) {
+                        Ok(_) => "added".to_string(),
+                        Err(e) => format!("Add failed: {e}"),
+                    })
+                }
+                _ => None,
+            };
+            if let Some(n) = self.notebook.as_mut() {
+                if msg.as_deref() == Some("added") {
+                    n.new_text.clear();
+                    n.new_measurement.clear();
+                    n.status_msg = Some("Note added.".into());
+                } else if let Some(msg) = msg {
+                    n.status_msg = Some(msg);
+                }
+            }
+        }
+        if let Some(id) = promote_criterion {
+            let tt = entries
+                .iter()
+                .find(|e| e.id == id)
+                .map(|e| e.target_type.clone())
+                .unwrap_or_default();
+            let msg = match &self.app_state {
+                AppState::ProjectLoaded { project, .. } => {
+                    let name = format!("{tt} rule ({id})");
+                    let body = format!(
+                        "{{\"select\": {{\"tier\": \"{tt}\"}}, \"emit\": {{\"kind\": \"span\"}}}}"
+                    );
+                    Some(
+                        match project
+                            .promote_entry_to_criterion(id, &name, "structured", &body, &tt)
+                        {
+                            Ok(c) => format!("Created criterion “{}” — refine it in Criteria.", c.name),
+                            Err(e) => format!("Promote failed: {e}"),
+                        },
+                    )
+                }
+                _ => None,
+            };
+            if let (Some(n), Some(msg)) = (self.notebook.as_mut(), msg) {
+                n.status_msg = Some(msg);
+            }
+        }
+        if let Some(id) = promote_guidance {
+            let msg = match &self.app_state {
+                AppState::ProjectLoaded { project, .. } => {
+                    Some(match project.promote_entry_to_rubric_guidance(id) {
+                        Ok(()) => "Appended to rubric guidance.".to_string(),
+                        Err(e) => format!("Promote failed: {e}"),
+                    })
+                }
+                _ => None,
+            };
+            if let (Some(n), Some(msg)) = (self.notebook.as_mut(), msg) {
+                n.status_msg = Some(msg);
+            }
+        }
+        if let Some(id) = delete_id {
+            if let AppState::ProjectLoaded { project, .. } = &self.app_state {
+                let _ = project.delete_notebook_entry(id);
+            }
+        }
+    }
+
     /// Saves the criteria-editor working copy via the engine, then refreshes
     /// the list and selection.
     fn criteria_save(&mut self) {
@@ -5133,6 +5366,17 @@ fn format_qa_report(q: &sadda_engine::QaReport) -> String {
     )
 }
 
+/// One lab-notebook entry line (slice S7): topic, kind, text, and a promotion
+/// marker once it's become a rubric artifact.
+fn format_notebook_entry(e: &sadda_engine::NotebookEntry) -> String {
+    let promoted = e
+        .promoted_kind
+        .as_deref()
+        .map(|k| format!("  → {k}"))
+        .unwrap_or_default();
+    format!("[{} · {}] {}{}", e.target_type, e.kind, e.text, promoted)
+}
+
 /// Per-tier rubric-change impact line for the dashboard (slice S6b).
 fn format_tier_impact(t: &sadda_engine::TierImpact) -> String {
     format!(
@@ -5962,6 +6206,7 @@ impl eframe::App for SaddaApp {
         self.criteria_editor_window(ui.ctx());
         self.targets_panel_window(ui.ctx());
         self.dashboard_window(ui.ctx());
+        self.notebook_window(ui.ctx());
 
         // E9 command palette. Same overlay pattern.
         self.command_palette_window(ui.ctx());
@@ -6156,6 +6401,20 @@ impl SaddaApp {
                 ui.close();
                 if self.dashboard.is_none() {
                     self.dashboard = Some(DashboardWindow::default());
+                }
+            }
+            if ui
+                .add_enabled(project_open, egui::Button::new("Notebook…"))
+                .on_disabled_hover_text("Open or create a project first")
+                .on_hover_text(
+                    "PI lab-notebook: capture exploration notes per target type \
+                     and promote them into a criterion or rubric guidance",
+                )
+                .clicked()
+            {
+                ui.close();
+                if self.notebook.is_none() {
+                    self.notebook = Some(NotebookWindow::default());
                 }
             }
         });
@@ -8884,6 +9143,30 @@ mod rubric_ui_tests {
         assert_eq!(
             format_tier_impact(&t),
             "phones: +[c] −[b] · 4 to revisit"
+        );
+    }
+
+    #[test]
+    fn notebook_entry_line_shows_topic_kind_and_promotion() {
+        let mk = |promoted: Option<&str>| sadda_engine::NotebookEntry {
+            id: 1,
+            target_type: "vowels".into(),
+            kind: "measurement".into(),
+            text: "creaky below 120 Hz".into(),
+            measurement: None,
+            bundle_id: None,
+            promoted_kind: promoted.map(|s| s.to_string()),
+            promoted_ref: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        assert_eq!(
+            format_notebook_entry(&mk(None)),
+            "[vowels · measurement] creaky below 120 Hz"
+        );
+        assert_eq!(
+            format_notebook_entry(&mk(Some("criterion"))),
+            "[vowels · measurement] creaky below 120 Hz  → criterion"
         );
     }
 }
