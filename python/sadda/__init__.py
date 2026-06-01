@@ -32,6 +32,8 @@ __all__ = [
     "Criterion",
     "DerivedSignal",
     "ExperimentalAPIWarning",
+    "ExportSummary",
+    "ImportSummary",
     "Instrument",
     "Interval",
     "LabelCheck",
@@ -107,6 +109,10 @@ Target = provisional(_native.Target)
 
 # S4b surface (Phase 4) — assignments: distribute targets to annotators.
 Assignment = provisional(_native.Assignment)
+
+# S4c surface (Phase 4) — per-annotator package export / import summaries.
+ExportSummary = provisional(_native.ExportSummary)
+ImportSummary = provisional(_native.ImportSummary)
 
 # A1 surface (Phase 3) — provenance timeline + citation export.
 ProcessingRun = stable(_native.ProcessingRun)

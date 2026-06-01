@@ -15,7 +15,9 @@ __all__ = [
     "Citation",
     "Criterion",
     "DerivedSignal",
+    "ExportSummary",
     "FormantFrame",
+    "ImportSummary",
     "Instrument",
     "Interval",
     "LabelCheck",
@@ -364,6 +366,38 @@ class DerivedSignal:
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
+class ExportSummary:
+    r"""
+    Result of `Project.export_annotator_package` (slice S4c).
+    """
+    @property
+    def annotator(self) -> builtins.str:
+        r"""
+        The annotator the package was built for.
+        """
+    @property
+    def path(self) -> builtins.str:
+        r"""
+        The package directory (a self-contained sadda sub-project).
+        """
+    @property
+    def bundles(self) -> builtins.int:
+        r"""
+        Number of bundles included.
+        """
+    @property
+    def targets(self) -> builtins.int:
+        r"""
+        Number of targets included.
+        """
+    @property
+    def assignments(self) -> builtins.int:
+        r"""
+        Number of assignments included.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
 class FormantFrame:
     r"""
     One frame of formant output. Variable-length `frequencies` /
@@ -385,6 +419,38 @@ class FormantFrame:
     def bandwidths(self) -> numpy.typing.NDArray[numpy.float32]:
         r"""
         Bandwidths in Hz, co-indexed with `frequencies`.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class ImportSummary:
+    r"""
+    Result of `Project.import_annotator_package` (slice S4c).
+    """
+    @property
+    def annotator(self) -> builtins.str:
+        r"""
+        The annotator whose work was merged in.
+        """
+    @property
+    def bundles_matched(self) -> builtins.int:
+        r"""
+        Package bundles matched (by name) to a bundle in this project.
+        """
+    @property
+    def tiers_imported(self) -> builtins.int:
+        r"""
+        Per-annotator tiers created or refilled.
+        """
+    @property
+    def annotations_imported(self) -> builtins.int:
+        r"""
+        Annotations copied onto those tiers.
+        """
+    @property
+    def assignments_marked_done(self) -> builtins.int:
+        r"""
+        Assignments advanced to `done`.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -1057,6 +1123,27 @@ class Project:
         roster + targets → same assignment). Already-assigned targets are left
         alone, so re-running after a roster change re-randomizes the remainder.
         `role` defaults to `"primary"`. Returns the number assigned.
+        """
+    def export_annotator_package(self, annotator: builtins.str, dest_dir: builtins.str | os.PathLike | pathlib.Path) -> ExportSummary:
+        r"""
+        Exports a self-contained sub-project for `annotator` at `dest_dir` (their
+        assigned bundles + audio + sparse tiers/annotations + targets/assignments
+        + the rubric + a manifest). The annotator opens it as a normal sadda
+        project and works offline. Returns an `ExportSummary`.
+        """
+    def import_annotator_package(self, package_dir: builtins.str | os.PathLike | pathlib.Path) -> ImportSummary:
+        r"""
+        Imports a returned annotator package at `package_dir`, landing the
+        annotator's work on per-annotator tiers `"<tier> [annotator]"` (use
+        `merge_tiers` to reconcile) and marking their assignments `done`.
+        Returns an `ImportSummary`.
+        """
+    def merge_tiers(self, bundle_id: builtins.int, source_tier_names: typing.Sequence[builtins.str], dest_tier_name: builtins.str) -> builtins.int:
+        r"""
+        Unions the annotations of `source_tier_names` into `dest_tier_name` on
+        `bundle_id` (time-ordered), creating the destination and replacing its
+        contents. All sources must share one type (interval/point). Returns the
+        number of annotations written.
         """
     def run_criterion(self, id: builtins.int, bundle_id: builtins.int) -> builtins.int:
         r"""

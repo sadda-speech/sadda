@@ -979,6 +979,99 @@ impl PyAssignment {
     }
 }
 
+/// Result of `Project.export_annotator_package` (slice S4c).
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "ExportSummary", frozen)]
+struct PyExportSummary {
+    inner: sadda_engine::ExportSummary,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyExportSummary {
+    /// The annotator the package was built for.
+    #[getter]
+    fn annotator(&self) -> String {
+        self.inner.annotator.clone()
+    }
+    /// The package directory (a self-contained sadda sub-project).
+    #[getter]
+    fn path(&self) -> String {
+        self.inner.path.to_string_lossy().into_owned()
+    }
+    /// Number of bundles included.
+    #[getter]
+    fn bundles(&self) -> usize {
+        self.inner.bundles
+    }
+    /// Number of targets included.
+    #[getter]
+    fn targets(&self) -> usize {
+        self.inner.targets
+    }
+    /// Number of assignments included.
+    #[getter]
+    fn assignments(&self) -> usize {
+        self.inner.assignments
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ExportSummary(annotator={:?}, bundles={}, targets={}, assignments={})",
+            self.inner.annotator, self.inner.bundles, self.inner.targets, self.inner.assignments
+        )
+    }
+}
+
+/// Result of `Project.import_annotator_package` (slice S4c).
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "ImportSummary", frozen)]
+struct PyImportSummary {
+    inner: sadda_engine::ImportSummary,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyImportSummary {
+    /// The annotator whose work was merged in.
+    #[getter]
+    fn annotator(&self) -> String {
+        self.inner.annotator.clone()
+    }
+    /// Package bundles matched (by name) to a bundle in this project.
+    #[getter]
+    fn bundles_matched(&self) -> usize {
+        self.inner.bundles_matched
+    }
+    /// Per-annotator tiers created or refilled.
+    #[getter]
+    fn tiers_imported(&self) -> usize {
+        self.inner.tiers_imported
+    }
+    /// Annotations copied onto those tiers.
+    #[getter]
+    fn annotations_imported(&self) -> usize {
+        self.inner.annotations_imported
+    }
+    /// Assignments advanced to `done`.
+    #[getter]
+    fn assignments_marked_done(&self) -> usize {
+        self.inner.assignments_marked_done
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ImportSummary(annotator={:?}, bundles_matched={}, tiers_imported={}, \
+             annotations_imported={}, assignments_marked_done={})",
+            self.inner.annotator,
+            self.inner.bundles_matched,
+            self.inner.tiers_imported,
+            self.inner.annotations_imported,
+            self.inner.assignments_marked_done,
+        )
+    }
+}
+
 /// Registration row for a Parquet sidecar holding a dense tier's data.
 /// Created automatically by the `Project.write_continuous_numeric` /
 /// `write_continuous_vector` / `write_categorical_sampled` methods.
@@ -2130,6 +2223,50 @@ impl PyProject {
             .map_err(engine_err_to_py)
     }
 
+    /// Exports a self-contained sub-project for `annotator` at `dest_dir` (their
+    /// assigned bundles + audio + sparse tiers/annotations + targets/assignments
+    /// + the rubric + a manifest). The annotator opens it as a normal sadda
+    /// project and works offline. Returns an `ExportSummary`.
+    fn export_annotator_package(
+        &self,
+        annotator: &str,
+        dest_dir: std::path::PathBuf,
+    ) -> PyResult<PyExportSummary> {
+        self.inner
+            .export_annotator_package(annotator, &dest_dir)
+            .map(|inner| PyExportSummary { inner })
+            .map_err(engine_err_to_py)
+    }
+
+    /// Imports a returned annotator package at `package_dir`, landing the
+    /// annotator's work on per-annotator tiers `"<tier> [annotator]"` (use
+    /// `merge_tiers` to reconcile) and marking their assignments `done`.
+    /// Returns an `ImportSummary`.
+    fn import_annotator_package(
+        &self,
+        package_dir: std::path::PathBuf,
+    ) -> PyResult<PyImportSummary> {
+        self.inner
+            .import_annotator_package(&package_dir)
+            .map(|inner| PyImportSummary { inner })
+            .map_err(engine_err_to_py)
+    }
+
+    /// Unions the annotations of `source_tier_names` into `dest_tier_name` on
+    /// `bundle_id` (time-ordered), creating the destination and replacing its
+    /// contents. All sources must share one type (interval/point). Returns the
+    /// number of annotations written.
+    fn merge_tiers(
+        &self,
+        bundle_id: i64,
+        source_tier_names: Vec<String>,
+        dest_tier_name: &str,
+    ) -> PyResult<usize> {
+        self.inner
+            .merge_tiers(bundle_id, &source_tier_names, dest_tier_name)
+            .map_err(engine_err_to_py)
+    }
+
     /// Runs a `structured` criterion against a bundle, (re)writing its
     /// proposals onto the preview tier. Returns the proposal count.
     /// `python` criteria are run via `sadda.criteria.run_criterion`.
@@ -3244,6 +3381,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCriterion>()?;
     m.add_class::<PyTarget>()?;
     m.add_class::<PyAssignment>()?;
+    m.add_class::<PyExportSummary>()?;
+    m.add_class::<PyImportSummary>()?;
     m.add_class::<PyDerivedSignal>()?;
     m.add_class::<PyFormantFrame>()?;
     m.add_class::<PyLtas>()?;

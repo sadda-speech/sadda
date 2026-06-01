@@ -6,6 +6,27 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-01 — Annotation workflow S4c: per-annotator package export / import / merge (shipped)
+
+The last piece of the campaign layer, and the one I'd flagged as heaviest: **distribution**. Local-first / no-server → hand-off is a *package*, not a shared web app. The PI exports each annotator a self-contained slice, they work offline, the PI imports it back. Across the three surfaces.
+
+**Design forks (user-decided):** package format = a **self-contained sub-project directory** (a real sadda project: copied audio + a `corpus.db` + manifest — dep-free; the annotator just opens it; zipping for transfer is the user's call). Merge model = **per-annotator tiers PLUS an explicit `merge_tiers`** — the user's refinement of my "smart merge": import never silently combines; each annotator's work lands on `"<tier> [annotator]"`, and a separate PI-driven `merge_tiers` unions selected tiers. Cleaner separation than auto-merging disjoint vs overlap on import.
+
+**No migration.** A package *is* a normal sadda project (same schema V12), so S4c is pure orchestration — no V13.
+
+**Engine** (`corpus.rs`):
+- `export_annotator_package(annotator, dest_dir) → ExportSummary`: the bundles with a target assigned to `annotator` (audio via `add_bundle`'s copy), their **sparse interval/point tiers + annotations** copied with tier-`parent_id` and annotation-`parent_annotation_id` **remapped** through id maps (tiers placed **parent-first** via `parent_first_order`), the annotator's targets+assignments, the rubric (`copy_rubric_into` — name/version/guidelines/status vocab + per-tier config & CVs), and a `sadda_export.json` manifest (`{format, annotator, source_project, schema_version}`, serde_json).
+- `import_annotator_package(package_dir) → ImportSummary`: reads the manifest, opens the package, matches bundles **by name**, and for each assigned target-type lands the package tier's annotations onto `"<tier> [annotator]"` (created/refilled), then marks that annotator's assignments on matched bundles `done` (importing the package = "they finished here").
+- `merge_tiers(bundle, source_names, dest_name)`: unions same-type (interval/point) source tiers into a destination in time order (read-all-before-clear, so a destination that is also a source isn't wiped early).
+
+**v1 scope cuts (documented):** dense (measure-track/vector) + reference tiers aren't copied; rubric *versioning* is S6 (current rubric copied as-is); the criterion behind a target isn't exported (targets keep their RoI/type/status, `criterion_id` dropped); bundle matching is by name.
+
+**Python**: `export_annotator_package` / `import_annotator_package` / `merge_tiers` on `Project` (paths as `str`/`PathLike`), returning `ExportSummary` / `ImportSummary` (provisional `sadda.*`). Stubs regenerated (additive).
+
+**GUI**: the Targets… panel gained a Package row (**Export for annotator…** / **Import package…** via `rfd` folder pickers) and a **Merge tiers** row (sources + dest), with pure unit-tested `format_export_summary` / `format_import_summary` status lines.
+
+**Gate (all green):** engine 280 lib + integration (incl. `export_import_round_trip_lands_per_annotator_tier`, `merge_tiers_unions_sources_in_time_order`), clippy clean; python 177 passed / 6 skipped (`test_packages.py`); app 75 (incl. `package_summaries_read_naturally`), clippy clean; stubs no drift. **S4 (the campaign layer) is complete — S4a targets + S4b assignment + S4c distribution. Next: S5 (annotator throughput + QA core: flag/status UX + work queue + the comparison/agreement engine).**
+
 ## 2026-05-31 — Annotation workflow S4b: the `assignment` object + seeded random distribution (shipped)
 
 Second piece of the campaign layer (the S4 decomposition is in the entry below): **assignments** distribute S4a targets to annotators. Built across the three surfaces.

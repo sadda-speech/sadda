@@ -744,6 +744,36 @@ pub const ASSIGNMENT_STATUSES: [&str; 3] = ["assigned", "in_progress", "done"];
 /// The valid [`Assignment::role`] values.
 pub const ASSIGNMENT_ROLES: [&str; 2] = ["primary", "secondary"];
 
+/// Result of [`Project::export_annotator_package`].
+#[derive(Debug, Clone)]
+pub struct ExportSummary {
+    /// The annotator the package was built for.
+    pub annotator: String,
+    /// The package's root directory (a self-contained sadda sub-project).
+    pub path: PathBuf,
+    /// Bundles included (those with a target assigned to the annotator).
+    pub bundles: usize,
+    /// Targets included (the annotator's).
+    pub targets: usize,
+    /// Assignments included.
+    pub assignments: usize,
+}
+
+/// Result of [`Project::import_annotator_package`].
+#[derive(Debug, Clone)]
+pub struct ImportSummary {
+    /// The annotator whose work was merged in (from the package manifest).
+    pub annotator: String,
+    /// Package bundles matched (by name) to a bundle in this project.
+    pub bundles_matched: usize,
+    /// Per-annotator tiers (`"<tier> [annotator]"`) created or refilled.
+    pub tiers_imported: usize,
+    /// Annotations copied onto those per-annotator tiers.
+    pub annotations_imported: usize,
+    /// Assignments advanced to `done`.
+    pub assignments_marked_done: usize,
+}
+
 /// Registration row for a Parquet sidecar holding a dense tier's data.
 /// Created automatically by `Project::write_continuous_numeric` /
 /// `write_continuous_vector` / `write_categorical_sampled`.
@@ -2722,6 +2752,377 @@ impl Project {
             created_at: row.get(6)?,
             updated_at: row.get(7)?,
         })
+    }
+
+    // ====================================================================
+    // Campaign packages (slice S4c). Local-first distribution: export each
+    // annotator a self-contained sub-project (a real sadda project dir), they
+    // work offline, the PI imports it back — landing the annotator's work on
+    // per-annotator tiers `"<tier> [annotator]"` (never silently merged), with
+    // `merge_tiers` as the explicit PI-driven union.
+    // ====================================================================
+
+    /// Exports a self-contained sub-project for `annotator` at `dest_dir`: the
+    /// bundles with a target assigned to them (audio + sparse interval/point
+    /// tiers and annotations), the annotator's targets + assignments, the
+    /// (frozen) rubric, and a `sadda_export.json` manifest. The result is a
+    /// normal sadda project the annotator opens and works in offline.
+    ///
+    /// v1 scope: dense (measure-track / vector) tiers and reference tiers are
+    /// NOT copied; rubric *versioning* is S6 (the current rubric is copied as-is).
+    pub fn export_annotator_package(&self, annotator: &str, dest_dir: &Path) -> Result<ExportSummary> {
+        if annotator.trim().is_empty() {
+            return Err(EngineError::Corpus("export: annotator is empty".into()));
+        }
+        // Bundles with at least one target assigned to this annotator.
+        let mut assigned: Vec<(Bundle, Vec<Target>, Vec<Assignment>)> = Vec::new();
+        for b in self.bundles()? {
+            let assigns: Vec<Assignment> = self
+                .assignments(b.id)?
+                .into_iter()
+                .filter(|a| a.annotator == annotator)
+                .collect();
+            if assigns.is_empty() {
+                continue;
+            }
+            let tids: std::collections::HashSet<i64> = assigns.iter().map(|a| a.target_id).collect();
+            let targets: Vec<Target> = self
+                .targets(b.id)?
+                .into_iter()
+                .filter(|t| tids.contains(&t.id))
+                .collect();
+            assigned.push((b, targets, assigns));
+        }
+        if assigned.is_empty() {
+            return Err(EngineError::Corpus(format!(
+                "export: no assignments for annotator {annotator:?}"
+            )));
+        }
+
+        let pkg = Project::create(dest_dir, &format!("{} [{annotator}]", self.name()?))?;
+        let (mut n_targets, mut n_assignments) = (0usize, 0usize);
+        for (b, targets, assigns) in &assigned {
+            let src_audio = self.root.join(&b.audio_relative_path);
+            let new_bundle = pkg.add_bundle(&b.name, &src_audio)?;
+            self.copy_bundle_sparse_tiers(b.id, &pkg, new_bundle)?;
+            let mut tmap: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+            for t in targets {
+                let new_t = pkg.add_target(&TargetSpec {
+                    bundle_id: new_bundle,
+                    start_seconds: t.start_seconds,
+                    end_seconds: t.end_seconds,
+                    target_type: t.target_type.clone(),
+                    status: Some(t.status.clone()),
+                    source: Some(t.source.clone()),
+                    criterion_id: None, // the criterion itself is not exported in v1
+                    note: t.note.clone(),
+                    extra: None,
+                })?;
+                tmap.insert(t.id, new_t);
+                n_targets += 1;
+            }
+            for a in assigns {
+                if let Some(&new_t) = tmap.get(&a.target_id) {
+                    pkg.add_assignment(&AssignmentSpec {
+                        target_id: new_t,
+                        annotator: a.annotator.clone(),
+                        role: Some(a.role.clone()),
+                        status: Some(a.status.clone()),
+                        seed: a.seed,
+                        extra: None,
+                    })?;
+                    n_assignments += 1;
+                }
+            }
+        }
+        self.copy_rubric_into(&pkg)?;
+        write_export_manifest(dest_dir, annotator, &self.name()?)?;
+        Ok(ExportSummary {
+            annotator: annotator.to_owned(),
+            path: dest_dir.to_path_buf(),
+            bundles: assigned.len(),
+            targets: n_targets,
+            assignments: n_assignments,
+        })
+    }
+
+    /// Imports a returned annotator package (written by
+    /// [`export_annotator_package`](Self::export_annotator_package)) at
+    /// `package_dir`, merging the annotator's work back. For each package bundle
+    /// matched by **name** to a bundle here, each assigned target-type tier is
+    /// landed on a per-annotator tier `"<tier> [annotator]"` (created or
+    /// refilled — never merged into the canonical tier; use
+    /// [`merge_tiers`](Self::merge_tiers) for that), and the annotator's
+    /// assignments on the matched bundles are advanced to `done`.
+    pub fn import_annotator_package(&self, package_dir: &Path) -> Result<ImportSummary> {
+        let manifest = read_export_manifest(package_dir)?;
+        let annotator = manifest.annotator;
+        let pkg = Project::open(package_dir)?;
+        let parent_bundles = self.bundles()?;
+        let mut summary = ImportSummary {
+            annotator: annotator.clone(),
+            bundles_matched: 0,
+            tiers_imported: 0,
+            annotations_imported: 0,
+            assignments_marked_done: 0,
+        };
+        for pb in pkg.bundles()? {
+            let Some(parent_b) = parent_bundles.iter().find(|b| b.name == pb.name) else {
+                continue;
+            };
+            summary.bundles_matched += 1;
+
+            // The distinct target types the annotator was assigned on this bundle.
+            let pkg_assigns: Vec<Assignment> = pkg
+                .assignments(pb.id)?
+                .into_iter()
+                .filter(|a| a.annotator == annotator)
+                .collect();
+            let by_id: std::collections::HashMap<i64, Target> =
+                pkg.targets(pb.id)?.into_iter().map(|t| (t.id, t)).collect();
+            let mut types: Vec<String> = pkg_assigns
+                .iter()
+                .filter_map(|a| by_id.get(&a.target_id))
+                .map(|t| t.target_type.clone())
+                .collect();
+            types.sort();
+            types.dedup();
+
+            for ttype in &types {
+                let Some(src_tier) = pkg.tier_by_name(pb.id, ttype)? else {
+                    continue;
+                };
+                if !matches!(src_tier.r#type, TierType::Interval | TierType::Point) {
+                    continue;
+                }
+                let dest_name = format!("{ttype} [{annotator}]");
+                let dest_tid = self.ensure_tier(parent_b.id, &dest_name, src_tier.r#type)?;
+                self.clear_tier_annotations(dest_tid, src_tier.r#type)?;
+                let mut n = 0usize;
+                match src_tier.r#type {
+                    TierType::Interval => {
+                        for iv in pkg.intervals(src_tier.id)? {
+                            self.add_interval(&IntervalSpec {
+                                tier_id: dest_tid,
+                                start_seconds: iv.start_seconds,
+                                end_seconds: iv.end_seconds,
+                                label: iv.label,
+                                status: iv.status,
+                                note: iv.note,
+                                ..Default::default()
+                            })?;
+                            n += 1;
+                        }
+                    }
+                    TierType::Point => {
+                        for p in pkg.points(src_tier.id)? {
+                            self.add_point(&PointSpec {
+                                tier_id: dest_tid,
+                                time_seconds: p.time_seconds,
+                                label: p.label,
+                                status: p.status,
+                                note: p.note,
+                                ..Default::default()
+                            })?;
+                            n += 1;
+                        }
+                    }
+                    _ => {}
+                }
+                summary.tiers_imported += 1;
+                summary.annotations_imported += n;
+            }
+
+            // Importing a returned package means the annotator finished their
+            // work on these bundles: mark their assignments here `done`.
+            for pa in self
+                .assignments(parent_b.id)?
+                .into_iter()
+                .filter(|a| a.annotator == annotator && a.status != "done")
+            {
+                self.update_assignment_status(pa.id, "done")?;
+                summary.assignments_marked_done += 1;
+            }
+        }
+        Ok(summary)
+    }
+
+    /// Unions the annotations of `source_tier_names` into `dest_tier_name` on
+    /// `bundle_id` (in time order), creating the destination tier if absent and
+    /// replacing its contents. All sources must share one type (interval or
+    /// point). This is the explicit, PI-driven merge — e.g. combining
+    /// `"phones [alice]"` and `"phones [bob]"` into a reconciled `"phones"`.
+    /// Returns the number of annotations written.
+    pub fn merge_tiers(
+        &self,
+        bundle_id: i64,
+        source_tier_names: &[String],
+        dest_tier_name: &str,
+    ) -> Result<usize> {
+        if source_tier_names.is_empty() {
+            return Err(EngineError::Corpus("merge_tiers: no source tiers".into()));
+        }
+        let mut tiers = Vec::new();
+        for name in source_tier_names {
+            let t = self.tier_by_name(bundle_id, name)?.ok_or_else(|| {
+                EngineError::Corpus(format!("merge_tiers: no tier {name:?} on bundle {bundle_id}"))
+            })?;
+            tiers.push(t);
+        }
+        let ttype = tiers[0].r#type;
+        if !matches!(ttype, TierType::Interval | TierType::Point) {
+            return Err(EngineError::Corpus(
+                "merge_tiers: only interval/point tiers can be merged".into(),
+            ));
+        }
+        if tiers.iter().any(|t| t.r#type != ttype) {
+            return Err(EngineError::Corpus(
+                "merge_tiers: all source tiers must share one type".into(),
+            ));
+        }
+        // Read all source annotations BEFORE clearing the destination, so a
+        // destination that is also a source isn't wiped before it's read.
+        let cmp = |a: f64, b: f64| a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal);
+        let dest_tid = self.ensure_tier(bundle_id, dest_tier_name, ttype)?;
+        let mut count = 0;
+        match ttype {
+            TierType::Interval => {
+                let mut all: Vec<Interval> = Vec::new();
+                for t in &tiers {
+                    all.extend(self.intervals(t.id)?);
+                }
+                all.sort_by(|a, b| {
+                    cmp(a.start_seconds, b.start_seconds).then(cmp(a.end_seconds, b.end_seconds))
+                });
+                self.clear_tier_annotations(dest_tid, ttype)?;
+                for iv in all {
+                    self.add_interval(&IntervalSpec {
+                        tier_id: dest_tid,
+                        start_seconds: iv.start_seconds,
+                        end_seconds: iv.end_seconds,
+                        label: iv.label,
+                        status: iv.status,
+                        note: iv.note,
+                        ..Default::default()
+                    })?;
+                    count += 1;
+                }
+            }
+            TierType::Point => {
+                let mut all: Vec<Point> = Vec::new();
+                for t in &tiers {
+                    all.extend(self.points(t.id)?);
+                }
+                all.sort_by(|a, b| cmp(a.time_seconds, b.time_seconds));
+                self.clear_tier_annotations(dest_tid, ttype)?;
+                for p in all {
+                    self.add_point(&PointSpec {
+                        tier_id: dest_tid,
+                        time_seconds: p.time_seconds,
+                        label: p.label,
+                        status: p.status,
+                        note: p.note,
+                        ..Default::default()
+                    })?;
+                    count += 1;
+                }
+            }
+            _ => {}
+        }
+        Ok(count)
+    }
+
+    /// Copies a bundle's sparse (interval / point) tiers and their annotations
+    /// into `dest`'s `dest_bundle_id`, preserving tier hierarchy and annotation
+    /// parent links via id remapping (tiers placed parent-first). Reference and
+    /// dense tiers are skipped in v1.
+    fn copy_bundle_sparse_tiers(
+        &self,
+        src_bundle_id: i64,
+        dest: &Project,
+        dest_bundle_id: i64,
+    ) -> Result<()> {
+        let tiers = parent_first_order(self.tiers(Some(src_bundle_id))?);
+        let mut tier_map: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+        let mut anno_map: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+        for t in tiers {
+            if !matches!(t.r#type, TierType::Interval | TierType::Point) {
+                continue;
+            }
+            let new_tid = dest.add_tier(&TierSpec {
+                bundle_id: dest_bundle_id,
+                name: t.name.clone(),
+                r#type: Some(t.r#type),
+                parent_id: t.parent_id.and_then(|p| tier_map.get(&p).copied()),
+                cardinality: t.cardinality.clone(),
+                schema: t.schema.clone(),
+                extra: t.extra.clone(),
+            })?;
+            tier_map.insert(t.id, new_tid);
+            match t.r#type {
+                TierType::Interval => {
+                    for iv in self.intervals(t.id)? {
+                        let new_id = dest.add_interval(&IntervalSpec {
+                            tier_id: new_tid,
+                            start_seconds: iv.start_seconds,
+                            end_seconds: iv.end_seconds,
+                            label: iv.label.clone(),
+                            parent_annotation_id: iv
+                                .parent_annotation_id
+                                .and_then(|p| anno_map.get(&p).copied()),
+                            status: iv.status.clone(),
+                            note: iv.note.clone(),
+                            extra: iv.extra.clone(),
+                            ..Default::default()
+                        })?;
+                        anno_map.insert(iv.id, new_id);
+                    }
+                }
+                TierType::Point => {
+                    for p in self.points(t.id)? {
+                        let new_id = dest.add_point(&PointSpec {
+                            tier_id: new_tid,
+                            time_seconds: p.time_seconds,
+                            label: p.label.clone(),
+                            parent_annotation_id: p
+                                .parent_annotation_id
+                                .and_then(|x| anno_map.get(&x).copied()),
+                            status: p.status.clone(),
+                            note: p.note.clone(),
+                            extra: p.extra.clone(),
+                            ..Default::default()
+                        })?;
+                        anno_map.insert(p.id, new_id);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Copies this project's rubric (name, version, guidelines, status
+    /// vocabulary, and per-tier config + controlled vocabularies for the tiers
+    /// already present in `dest`) into `dest`.
+    fn copy_rubric_into(&self, dest: &Project) -> Result<()> {
+        let Some(r) = self.rubric()? else {
+            return Ok(());
+        };
+        dest.set_rubric(&r.name, r.version, r.guidelines.as_deref())?;
+        let statuses = self.rubric_statuses()?;
+        if !statuses.is_empty() {
+            dest.set_rubric_statuses(&statuses)?;
+        }
+        for t in dest.tiers(None)? {
+            if let Some(rt) = self.rubric_tier(&t.name)? {
+                dest.set_rubric_tier(&t.name, rt.description.as_deref(), rt.closed_vocabulary)?;
+            }
+            let vocab = self.controlled_vocabulary(&t.name)?;
+            if !vocab.is_empty() {
+                dest.set_controlled_vocabulary(&t.name, &vocab)?;
+            }
+        }
+        Ok(())
     }
 
     /// Finds a tier by name on a bundle, if present.
@@ -4882,6 +5283,80 @@ fn deterministic_shuffle<T>(items: &mut [T], seed: u64) {
     }
 }
 
+/// Orders tiers so each tier precedes its children (parent-first), so a copy
+/// can remap `parent_id` through an already-populated id map. A tier with no
+/// parent, or whose parent isn't in the set, is ready immediately; the rest
+/// follow once their parent is placed. A dangling cycle (shouldn't happen) is
+/// appended as-is rather than looping forever.
+fn parent_first_order(tiers: Vec<Tier>) -> Vec<Tier> {
+    let present: std::collections::HashSet<i64> = tiers.iter().map(|t| t.id).collect();
+    let mut placed: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut out: Vec<Tier> = Vec::with_capacity(tiers.len());
+    while out.len() < tiers.len() {
+        let before = out.len();
+        for t in &tiers {
+            if placed.contains(&t.id) {
+                continue;
+            }
+            let ready = match t.parent_id {
+                None => true,
+                Some(p) => placed.contains(&p) || !present.contains(&p),
+            };
+            if ready {
+                out.push(t.clone());
+                placed.insert(t.id);
+            }
+        }
+        if out.len() == before {
+            for t in &tiers {
+                if placed.insert(t.id) {
+                    out.push(t.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The `sadda_export.json` manifest written into an annotator package and read
+/// back on import — identifies the package and whose work it carries.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ExportManifest {
+    /// Package format tag, for forward compatibility.
+    format: String,
+    /// The annotator the package was built for.
+    annotator: String,
+    /// The source project's name (informational).
+    source_project: String,
+    /// The engine schema version the package was written at.
+    schema_version: i64,
+}
+
+const EXPORT_MANIFEST_NAME: &str = "sadda_export.json";
+
+fn write_export_manifest(dir: &Path, annotator: &str, source_project: &str) -> Result<()> {
+    let m = ExportManifest {
+        format: "sadda-annotator-package/1".into(),
+        annotator: annotator.to_owned(),
+        source_project: source_project.to_owned(),
+        schema_version: crate::corpus::migrations::engine_max_version(),
+    };
+    let json = serde_json::to_string_pretty(&m)
+        .map_err(|e| EngineError::Corpus(format!("manifest serialize: {e}")))?;
+    std::fs::write(dir.join(EXPORT_MANIFEST_NAME), json)?;
+    Ok(())
+}
+
+fn read_export_manifest(dir: &Path) -> Result<ExportManifest> {
+    let path = dir.join(EXPORT_MANIFEST_NAME);
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        EngineError::Corpus(format!(
+            "not a sadda annotator package (missing {EXPORT_MANIFEST_NAME}): {e}"
+        ))
+    })?;
+    serde_json::from_str(&text).map_err(|e| EngineError::Corpus(format!("bad manifest: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5989,5 +6464,159 @@ mod tests {
         sorted.sort();
         assert_eq!(sorted, base);
         assert_ne!(a, base);
+    }
+
+    #[test]
+    fn export_import_round_trip_lands_per_annotator_tier() {
+        let root = unique_dir("pkg_parent");
+        let pkg_dir = unique_dir("pkg_export");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&pkg_dir);
+        let source_wav =
+            std::env::temp_dir().join(format!("sadda_pkg_{}.wav", std::process::id()));
+        write_short_wav(&source_wav, 16_000);
+
+        let parent = Project::create(&root, "study").unwrap();
+        let bundle_id = parent.add_bundle("b", &source_wav).unwrap();
+        // Context tier the annotator references.
+        let phones = parent
+            .add_tier(&TierSpec::new(bundle_id, "phones", TierType::Interval))
+            .unwrap();
+        parent
+            .add_interval(&IntervalSpec {
+                tier_id: phones,
+                start_seconds: 0.0,
+                end_seconds: 0.2,
+                label: Some("a".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        // A rubric, to exercise the rubric copy.
+        parent.set_rubric("scheme", 1, Some("annotate vowels")).unwrap();
+        // alice and bob each get a "vowels" target; export must include only alice's.
+        let ta = parent
+            .add_target(&TargetSpec::new(bundle_id, 0.0, 0.2, "vowels"))
+            .unwrap();
+        parent.add_assignment(&AssignmentSpec::new(ta, "alice")).unwrap();
+        let tb = parent
+            .add_target(&TargetSpec::new(bundle_id, 0.5, 0.7, "vowels"))
+            .unwrap();
+        parent.add_assignment(&AssignmentSpec::new(tb, "bob")).unwrap();
+
+        let summary = parent
+            .export_annotator_package("alice", &pkg_dir)
+            .unwrap();
+        assert_eq!((summary.bundles, summary.targets, summary.assignments), (1, 1, 1));
+
+        // Simulate alice working in the package: the context + her target/assignment
+        // are present (not bob's); she adds a "vowels" tier and annotates.
+        {
+            let pkg = Project::open(&pkg_dir).unwrap();
+            let pb = pkg.bundles().unwrap()[0].id;
+            assert_eq!(pkg.targets(pb).unwrap().len(), 1);
+            assert_eq!(pkg.assignments(pb).unwrap()[0].annotator, "alice");
+            let ph = pkg.tier_by_name(pb, "phones").unwrap().unwrap();
+            assert_eq!(pkg.intervals(ph.id).unwrap().len(), 1); // context copied
+            assert_eq!(pkg.rubric().unwrap().unwrap().name, "scheme"); // rubric copied
+            let vowels = pkg
+                .add_tier(&TierSpec::new(pb, "vowels", TierType::Interval))
+                .unwrap();
+            pkg.add_interval(&IntervalSpec {
+                tier_id: vowels,
+                start_seconds: 0.05,
+                end_seconds: 0.15,
+                label: Some("a".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        } // drop the package handle so import can open it
+
+        let imp = parent.import_annotator_package(&pkg_dir).unwrap();
+        assert_eq!(imp.annotator, "alice");
+        assert_eq!(
+            (imp.bundles_matched, imp.tiers_imported, imp.annotations_imported),
+            (1, 1, 1)
+        );
+        assert_eq!(imp.assignments_marked_done, 1);
+
+        // alice's work landed on its own per-annotator tier.
+        let valice = parent.tier_by_name(bundle_id, "vowels [alice]").unwrap().unwrap();
+        assert_eq!(parent.intervals(valice.id).unwrap().len(), 1);
+        // Her assignment is done; bob's is untouched.
+        let assigns = parent.assignments(bundle_id).unwrap();
+        assert_eq!(
+            assigns.iter().find(|a| a.annotator == "alice").unwrap().status,
+            "done"
+        );
+        assert_eq!(
+            assigns.iter().find(|a| a.annotator == "bob").unwrap().status,
+            "assigned"
+        );
+
+        // A directory without a manifest is rejected.
+        assert!(parent.import_annotator_package(&root).is_err());
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&pkg_dir);
+    }
+
+    #[test]
+    fn merge_tiers_unions_sources_in_time_order() {
+        let root = unique_dir("merge");
+        let _ = std::fs::remove_dir_all(&root);
+        let source_wav =
+            std::env::temp_dir().join(format!("sadda_merge_{}.wav", std::process::id()));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("b", &source_wav).unwrap();
+        let alice = project
+            .add_tier(&TierSpec::new(bundle_id, "phones [alice]", TierType::Interval))
+            .unwrap();
+        let bob = project
+            .add_tier(&TierSpec::new(bundle_id, "phones [bob]", TierType::Interval))
+            .unwrap();
+        for (tier, s) in [(alice, 0.2), (alice, 0.0), (bob, 0.5)] {
+            project
+                .add_interval(&IntervalSpec {
+                    tier_id: tier,
+                    start_seconds: s,
+                    end_seconds: s + 0.05,
+                    label: Some("a".into()),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        let n = project
+            .merge_tiers(
+                bundle_id,
+                &["phones [alice]".into(), "phones [bob]".into()],
+                "phones",
+            )
+            .unwrap();
+        assert_eq!(n, 3);
+        let merged = project.tier_by_name(bundle_id, "phones").unwrap().unwrap();
+        let ivs = project.intervals(merged.id).unwrap();
+        // Unioned and time-ordered.
+        let starts: Vec<f64> = ivs.iter().map(|i| i.start_seconds).collect();
+        assert_eq!(starts, vec![0.0, 0.2, 0.5]);
+
+        // Re-merging replaces (idempotent); a missing source errors.
+        assert_eq!(
+            project
+                .merge_tiers(bundle_id, &["phones [alice]".into()], "phones")
+                .unwrap(),
+            2
+        );
+        assert!(
+            project
+                .merge_tiers(bundle_id, &["nope".into()], "phones")
+                .is_err()
+        );
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
