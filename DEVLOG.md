@@ -6,6 +6,48 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-01 — Design: bundle-switch responsiveness + the aggregate view — one signal-cache + async-compute layer (logged, not built)
+
+Responsiveness when switching bundles across a corpus is, per the user, make-or-break for sadda being usable as intended. The user also flagged that this is **coupled** to the planned "aggregate" view (all of a query's tokens shown as one concatenated timeline) — and they're right: the machinery that makes a switch snappy is exactly what the aggregate view needs. So this designs **one shared layer** for both, before any code.
+
+### What a bundle switch costs today
+`select_bundle` (on click) runs `load_audio` (WAV read + decode) + a full mono `.collect()`, then invalidates the spectrogram so it — and the measure tracks — **rebuild on the *next frame*, on the UI thread**:
+1. `load_audio` — I/O + decode (UI thread, on click)
+2. mono down-mix collect — O(n) (UI thread, on click)
+3. spectrogram — STFT + colormap + GPU upload (**UI thread**, next frame)
+4. measure tracks — pitch (autocorr/Boersma) + formants (LPC) + intensity over the whole file (**UI thread**, next frame)
+
+Two structural problems: **(a)** the heavy DSP (3, 4) blocks the frame after the click → the stutter; **(b)** **no cross-bundle cache** — a switch invalidates everything, so switching *back* recomputes from scratch. Scrubbing across a corpus pays full price every time. (A worker-thread + lock-free result-ring pattern already exists in the app, but only for *live recording* — a pattern to reuse, not new ground.)
+
+### The architecture: three layers
+Separate the concerns that are currently fused in `select_bundle`:
+
+1. **View / time-map** — maps a *timeline position* to a `(bundle_id, time)`. The single-bundle view is the identity map (one bundle fills the timeline). The **aggregate view is just a different time-map** over an ordered segment list `[(bundle_id, start, end)]`. Nothing about signals or compute is view-specific.
+2. **Signal cache** — a per-bundle `BundleSignals` keyed by `bundle_id` (+ the configs that affect each part): a **down-sampled min/max envelope pyramid** (cheap waveform at any zoom), the **spectrogram** (CPU dB grid + its uploaded `TextureHandle`), and the **measure tracks** (f0 / formants / intensity). Held in a small **LRU** (count-bounded to start, e.g. 6) so revisits are instant. Audio for a bundle is immutable, so only config changes invalidate the derived parts.
+3. **Async producer** — a background worker (reusing the live-recording worker+channel pattern) that computes a `BundleSignals` for a requested `(bundle_id, configs)` and hands it back via a channel the UI drains each frame (exactly like the record dialog drains its rings).
+
+### The flow that removes the stutter
+On `select_bundle`:
+- **cache hit** → display immediately (instant revisits — fixes (b));
+- **miss** → load audio, build the **down-sampled envelope** (cheap) so the **waveform paints this frame**, mark the bundle selected, and **dispatch** spectrogram + tracks to the worker; those panels show a quiet "computing…" until the result lands and goes into the cache (fixes (a) — the UI never blocks on DSP).
+- **Progressive reveal**: nothing → (decode) waveform → (DSP) spectrogram + tracks.
+- **Staleness**: a generation token guards *display* ("is this result still the selected bundle?"); a late result for a now-unselected bundle still **enters the cache** (useful for the inevitable switch-back), so no work is wasted.
+
+### How the aggregate view rides on the same layer (the payoff)
+The aggregate view is a new **time-map** (step 1) over a segment list — and segment lists come straight from the criteria RoI query (the "one object, three faces" insight). To render, for each visible segment it needs that source bundle's signals over `[start, end]` — which it pulls from the **same** `BundleSignals` cache + async producer: cached → instant, else compute lazily as segments scroll in. The down-sampled envelope makes per-segment waveforms cheap; the spectrogram grid slices per segment. So the aggregate view adds **only** a time-map + a scroll-driven prefetch policy — the model and producer are unchanged. Build the cache+async layer once; both features ride it.
+
+### Down-sampled waveform (a win on its own)
+A min/max envelope pyramid (mip levels) renders the waveform in O(visible pixels) regardless of file length or zoom — standard in DAWs (Audacity, REAPER). Cheap to build (one O(n) pass), independent of the cache/async work, and required by the aggregate view (many segment envelopes).
+
+### Decisions / recommendations (open to refine)
+- **Async scope v1:** async the *DSP* only, keep `load_audio` sync → simplest, and decode is usually fast next to pitch/formants. Promote `load_audio` to the worker only if measurement shows decode dominates. **(rec)**
+- **Cache eviction:** count-based LRU (e.g. 6) to start; revisit to memory-bounded if long recordings blow the budget. **(rec)**
+- **Spectrogram cache granularity:** cache the uploaded `TextureHandle` (same egui ctx) keyed by `bundle + cfg`, so revisits skip both STFT *and* upload. **(rec)**
+- **Slicing:** P1 — down-sampled envelope + per-bundle LRU cache (instant revisits, no threading); P2 — async producer + progressive reveal (kills first-visit stutter); P3 — aggregate view as a time-map on top. Each independently shippable + three-surface where relevant. **(rec)**
+
+### Still measure — to *tune*, not to decide direction
+Even with the layer decided, instrument the four cost centers (env-gated) to tune: LRU capacity (memory vs hit-rate), whether `load_audio` needs async, envelope pyramid depth. So an instrumentation pass is step 0 of P1.
+
 ## 2026-06-01 — Fix: Criteria editor's right panel collapsed (egui infinite-width footgun)
 
 Found during user testing of the notebook→criterion flow: the Criteria editor's left-list / right-editor split rendered only the left list — the right panel (Name / Kind / Target tier / Rule body / Save / Run / Accept / Reject) was squeezed to zero width, so the editor looked dead (clicking a criterion or "+ New criterion" did nothing *visible*; the interactions fired but had nowhere to show). Cause (S2 code): the rule-body `TextEdit::multiline` used `.desired_width(f32::INFINITY)` **inside a `horizontal_top` layout** — an infinite-width child collapses its siblings in a horizontal layout. Fix: fixed-width (170) left column + bound the body to `available_width().max(280)`, and widened the default window (560→640). The other two `INFINITY` boxes (Rubric guidelines, annotation Note) live in *vertical* layouts where it means "fill width" correctly — left as-is. App 79 tests green, clippy clean; engine/python untouched. (User confirmed the editor + Run → `… (auto)` preview tier now work.)
