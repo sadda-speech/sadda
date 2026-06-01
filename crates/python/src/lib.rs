@@ -1349,6 +1349,159 @@ impl PyPairAgreement {
     }
 }
 
+/// One tier's config within a published rubric snapshot (slice S6b).
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "RubricTierSnapshot", frozen)]
+struct PyRubricTierSnapshot {
+    inner: sadda_engine::RubricTierSnapshot,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyRubricTierSnapshot {
+    /// Tier name.
+    #[getter]
+    fn tier_name(&self) -> String {
+        self.inner.tier_name.clone()
+    }
+    /// Per-tier guidance.
+    #[getter]
+    fn description(&self) -> Option<String> {
+        self.inner.description.clone()
+    }
+    /// Whether the controlled vocabulary is closed.
+    #[getter]
+    fn closed_vocabulary(&self) -> bool {
+        self.inner.closed_vocabulary
+    }
+    /// The controlled vocabulary at snapshot time.
+    #[getter]
+    fn vocab(&self) -> Vec<PyVocabEntry> {
+        self.inner
+            .vocab
+            .iter()
+            .map(|v| PyVocabEntry { inner: v.clone() })
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "RubricTierSnapshot(tier_name={:?}, closed={}, vocab={})",
+            self.inner.tier_name,
+            self.inner.closed_vocabulary,
+            self.inner.vocab.len()
+        )
+    }
+}
+
+/// A published rubric version snapshot (slice S6b) — from
+/// `Project.publish_rubric_version` / `rubric_versions` / `get_rubric_version`.
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "RubricVersion", frozen)]
+struct PyRubricVersion {
+    inner: sadda_engine::RubricVersion,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyRubricVersion {
+    /// The rubric version captured.
+    #[getter]
+    fn version(&self) -> i64 {
+        self.inner.version
+    }
+    /// Rubric name at snapshot time.
+    #[getter]
+    fn name(&self) -> String {
+        self.inner.name.clone()
+    }
+    /// Guidelines prose at snapshot time.
+    #[getter]
+    fn guidelines(&self) -> Option<String> {
+        self.inner.guidelines.clone()
+    }
+    /// Note recorded at publish time.
+    #[getter]
+    fn note(&self) -> Option<String> {
+        self.inner.note.clone()
+    }
+    /// ISO 8601 UTC publish timestamp.
+    #[getter]
+    fn created_at(&self) -> String {
+        self.inner.created_at.clone()
+    }
+    /// Status vocabulary at snapshot time.
+    #[getter]
+    fn statuses(&self) -> Vec<PyStatusDef> {
+        self.inner
+            .statuses
+            .iter()
+            .map(|s| PyStatusDef { inner: s.clone() })
+            .collect()
+    }
+    /// Per-tier config + controlled vocabularies at snapshot time.
+    #[getter]
+    fn tiers(&self) -> Vec<PyRubricTierSnapshot> {
+        self.inner
+            .tiers
+            .iter()
+            .map(|t| PyRubricTierSnapshot { inner: t.clone() })
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "RubricVersion(version={}, name={:?}, tiers={})",
+            self.inner.version,
+            self.inner.name,
+            self.inner.tiers.len()
+        )
+    }
+}
+
+/// How a rubric change affects one tier (slice S6b) — an element of
+/// `Project.rubric_impact`.
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "TierImpact", frozen)]
+struct PyTierImpact {
+    inner: sadda_engine::TierImpact,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyTierImpact {
+    /// Tier name.
+    #[getter]
+    fn tier_name(&self) -> String {
+        self.inner.tier_name.clone()
+    }
+    /// Vocabulary values added since the compared version.
+    #[getter]
+    fn vocab_added(&self) -> Vec<String> {
+        self.inner.vocab_added.clone()
+    }
+    /// Vocabulary values removed since the compared version.
+    #[getter]
+    fn vocab_removed(&self) -> Vec<String> {
+        self.inner.vocab_removed.clone()
+    }
+    /// Current annotations now out of the current vocabulary.
+    #[getter]
+    fn affected_annotations(&self) -> usize {
+        self.inner.affected_annotations
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "TierImpact(tier_name={:?}, added={:?}, removed={:?}, affected={})",
+            self.inner.tier_name,
+            self.inner.vocab_added,
+            self.inner.vocab_removed,
+            self.inner.affected_annotations,
+        )
+    }
+}
+
 /// Registration row for a Parquet sidecar holding a dense tier's data.
 /// Created automatically by the `Project.write_continuous_numeric` /
 /// `write_continuous_vector` / `write_categorical_sampled` methods.
@@ -2635,6 +2788,43 @@ impl PyProject {
             .map_err(engine_err_to_py)
     }
 
+    /// Snapshots the current rubric under its current version (slice S6b),
+    /// recording `note`. Re-publishing the same version updates that snapshot;
+    /// bump `set_rubric(version+1)` to start a new one. Returns the snapshot.
+    #[pyo3(signature = (note=None))]
+    fn publish_rubric_version(&self, note: Option<&str>) -> PyResult<PyRubricVersion> {
+        self.inner
+            .publish_rubric_version(note)
+            .map(|inner| PyRubricVersion { inner })
+            .map_err(engine_err_to_py)
+    }
+
+    /// Lists published rubric versions in version order.
+    fn rubric_versions(&self) -> PyResult<Vec<PyRubricVersion>> {
+        self.inner
+            .rubric_versions()
+            .map(|xs| xs.into_iter().map(|inner| PyRubricVersion { inner }).collect())
+            .map_err(engine_err_to_py)
+    }
+
+    /// Recalls a published rubric version's full snapshot, or `None`.
+    fn get_rubric_version(&self, version: i64) -> PyResult<Option<PyRubricVersion>> {
+        self.inner
+            .get_rubric_version(version)
+            .map(|opt| opt.map(|inner| PyRubricVersion { inner }))
+            .map_err(engine_err_to_py)
+    }
+
+    /// Reports how the current rubric differs from a published `version`: per
+    /// tier, vocabulary added/removed and current annotations now out of
+    /// vocabulary (needing revisiting). Raises if `version` was never published.
+    fn rubric_impact(&self, version: i64) -> PyResult<Vec<PyTierImpact>> {
+        self.inner
+            .rubric_impact(version)
+            .map(|xs| xs.into_iter().map(|inner| PyTierImpact { inner }).collect())
+            .map_err(engine_err_to_py)
+    }
+
     /// Runs a `structured` criterion against a bundle, (re)writing its
     /// proposals onto the preview tier. Returns the proposal count.
     /// `python` criteria are run via `sadda.criteria.run_criterion`.
@@ -3756,6 +3946,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAnnotatorProgress>()?;
     m.add_class::<PyQaReport>()?;
     m.add_class::<PyPairAgreement>()?;
+    m.add_class::<PyRubricVersion>()?;
+    m.add_class::<PyRubricTierSnapshot>()?;
+    m.add_class::<PyTierImpact>()?;
     m.add_class::<PyDerivedSignal>()?;
     m.add_class::<PyFormantFrame>()?;
     m.add_class::<PyLtas>()?;

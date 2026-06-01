@@ -49,12 +49,15 @@ __all__ = [
     "Reference",
     "Rubric",
     "RubricTier",
+    "RubricTierSnapshot",
+    "RubricVersion",
     "SaddaWarning",
     "Session",
     "Speaker",
     "StatusDef",
     "Target",
     "Tier",
+    "TierImpact",
     "VocabEntry",
     "clinical",
     "criteria",
@@ -127,6 +130,11 @@ ProgressCounts = provisional(_native.ProgressCounts)
 AnnotatorProgress = provisional(_native.AnnotatorProgress)
 QaReport = provisional(_native.QaReport)
 PairAgreement = provisional(_native.PairAgreement)
+
+# S6b surface (Phase 4) — rubric versioning + impact.
+RubricVersion = provisional(_native.RubricVersion)
+RubricTierSnapshot = provisional(_native.RubricTierSnapshot)
+TierImpact = provisional(_native.TierImpact)
 
 # A1 surface (Phase 3) — provenance timeline + citation export.
 ProcessingRun = stable(_native.ProcessingRun)
