@@ -2424,13 +2424,14 @@ impl SaddaApp {
         egui::Window::new("Criteria")
             .open(&mut keep_open)
             .resizable(true)
-            .default_width(560.0)
+            .default_width(640.0)
             .show(ctx, |ui| {
                 let ed = self.criteria_editor.as_mut().expect("checked above");
                 ui.horizontal_top(|ui| {
-                    // Left: the criteria list.
+                    // Left: the criteria list. Fixed width so the right
+                    // editor column always gets the remaining space.
                     ui.vertical(|ui| {
-                        ui.set_min_width(150.0);
+                        ui.set_width(170.0);
                         if ui.button("➕ New criterion").clicked() {
                             ed.reset_to_new();
                         }
@@ -2482,11 +2483,15 @@ impl SaddaApp {
                             })
                             .small(),
                         );
+                        // Bound the body to the column's remaining width — an
+                        // infinite desired_width inside a horizontal layout
+                        // collapses the right panel (egui footgun).
+                        let body_width = ui.available_width().max(280.0);
                         ui.add(
                             egui::TextEdit::multiline(&mut ed.body)
                                 .code_editor()
                                 .desired_rows(8)
-                                .desired_width(f32::INFINITY),
+                                .desired_width(body_width),
                         );
                         ui.horizontal(|ui| {
                             if ui.button("Save").clicked() {
