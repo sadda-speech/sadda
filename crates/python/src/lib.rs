@@ -1224,6 +1224,131 @@ impl PyProgressCounts {
     }
 }
 
+/// One annotator's assignment counts across the project (slice S6) — from
+/// `Project.assignment_progress`.
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "AnnotatorProgress", frozen)]
+struct PyAnnotatorProgress {
+    inner: sadda_engine::AnnotatorProgress,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyAnnotatorProgress {
+    /// The annotator.
+    #[getter]
+    fn annotator(&self) -> String {
+        self.inner.annotator.clone()
+    }
+    /// Assignments not yet started.
+    #[getter]
+    fn assigned(&self) -> usize {
+        self.inner.assigned
+    }
+    /// Assignments in progress.
+    #[getter]
+    fn in_progress(&self) -> usize {
+        self.inner.in_progress
+    }
+    /// Assignments done.
+    #[getter]
+    fn done(&self) -> usize {
+        self.inner.done
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AnnotatorProgress(annotator={:?}, done={}, in_progress={}, assigned={})",
+            self.inner.annotator, self.inner.done, self.inner.in_progress, self.inner.assigned
+        )
+    }
+}
+
+/// QA findings for one tier (slice S6) — from `Project.tier_qa`.
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "QaReport", frozen)]
+struct PyQaReport {
+    inner: sadda_engine::QaReport,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyQaReport {
+    /// The tier inspected.
+    #[getter]
+    fn tier_id(&self) -> i64 {
+        self.inner.tier_id
+    }
+    /// Total annotations on the tier.
+    #[getter]
+    fn n_annotations(&self) -> usize {
+        self.inner.n_annotations
+    }
+    /// Annotations whose label is out of the controlled vocabulary.
+    #[getter]
+    fn out_of_vocab(&self) -> usize {
+        self.inner.out_of_vocab
+    }
+    /// Annotations with an empty / missing label.
+    #[getter]
+    fn missing_label(&self) -> usize {
+        self.inner.missing_label
+    }
+    /// Overlapping interval pairs (0 for point tiers).
+    #[getter]
+    fn overlaps(&self) -> usize {
+        self.inner.overlaps
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "QaReport(tier_id={}, n={}, out_of_vocab={}, missing={}, overlaps={})",
+            self.inner.tier_id,
+            self.inner.n_annotations,
+            self.inner.out_of_vocab,
+            self.inner.missing_label,
+            self.inner.overlaps,
+        )
+    }
+}
+
+/// Pairwise inter-annotator agreement for one tier (slice S6) — an element of
+/// `Project.agreement_summary`.
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "PairAgreement", frozen)]
+struct PyPairAgreement {
+    inner: sadda_engine::PairAgreement,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyPairAgreement {
+    /// First annotator.
+    #[getter]
+    fn annotator_a(&self) -> String {
+        self.inner.annotator_a.clone()
+    }
+    /// Second annotator.
+    #[getter]
+    fn annotator_b(&self) -> String {
+        self.inner.annotator_b.clone()
+    }
+    /// Their agreement.
+    #[getter]
+    fn report(&self) -> PyAgreementReport {
+        PyAgreementReport {
+            inner: self.inner.report.clone(),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PairAgreement({:?} vs {:?}, kappa={:.3})",
+            self.inner.annotator_a, self.inner.annotator_b, self.inner.report.cohen_kappa
+        )
+    }
+}
+
 /// Registration row for a Parquet sidecar holding a dense tier's data.
 /// Created automatically by the `Project.write_continuous_numeric` /
 /// `write_continuous_vector` / `write_categorical_sampled` methods.
@@ -2463,6 +2588,53 @@ impl PyProject {
             .map_err(engine_err_to_py)
     }
 
+    /// Project-wide target counts by status — the QA dashboard completeness
+    /// headline (slice S6).
+    fn project_target_progress(&self) -> PyResult<PyProgressCounts> {
+        self.inner
+            .project_target_progress()
+            .map(|inner| PyProgressCounts { inner })
+            .map_err(engine_err_to_py)
+    }
+
+    /// Per-annotator assignment counts across the project, in annotator order.
+    fn assignment_progress(&self) -> PyResult<Vec<PyAnnotatorProgress>> {
+        self.inner
+            .assignment_progress()
+            .map(|xs| {
+                xs.into_iter()
+                    .map(|inner| PyAnnotatorProgress { inner })
+                    .collect()
+            })
+            .map_err(engine_err_to_py)
+    }
+
+    /// QA findings for a tier: out-of-vocabulary / missing labels and (interval
+    /// tiers) overlapping pairs.
+    fn tier_qa(&self, tier_id: i64) -> PyResult<PyQaReport> {
+        self.inner
+            .tier_qa(tier_id)
+            .map(|inner| PyQaReport { inner })
+            .map_err(engine_err_to_py)
+    }
+
+    /// Pairwise inter-annotator agreement over every `"<base> [annotator]"`
+    /// tier on `bundle_id`.
+    fn agreement_summary(
+        &self,
+        bundle_id: i64,
+        base_tier_name: &str,
+    ) -> PyResult<Vec<PyPairAgreement>> {
+        self.inner
+            .agreement_summary(bundle_id, base_tier_name)
+            .map(|xs| {
+                xs.into_iter()
+                    .map(|inner| PyPairAgreement { inner })
+                    .collect()
+            })
+            .map_err(engine_err_to_py)
+    }
+
     /// Runs a `structured` criterion against a bundle, (re)writing its
     /// proposals onto the preview tier. Returns the proposal count.
     /// `python` criteria are run via `sadda.criteria.run_criterion`.
@@ -3581,6 +3753,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyImportSummary>()?;
     m.add_class::<PyAgreementReport>()?;
     m.add_class::<PyProgressCounts>()?;
+    m.add_class::<PyAnnotatorProgress>()?;
+    m.add_class::<PyQaReport>()?;
+    m.add_class::<PyPairAgreement>()?;
     m.add_class::<PyDerivedSignal>()?;
     m.add_class::<PyFormantFrame>()?;
     m.add_class::<PyLtas>()?;

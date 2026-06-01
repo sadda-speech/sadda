@@ -289,6 +289,8 @@ struct SaddaApp {
     criteria_editor: Option<CriteriaEditor>,
     /// Open targets panel (slice S4a — campaign work units), or `None`.
     targets_panel: Option<TargetsPanel>,
+    /// Open campaign QA dashboard (slice S6a), or `None`.
+    dashboard: Option<DashboardWindow>,
     /// Working state for the inline Annotation panel (modal-free editor).
     annotation_inspector: AnnotationInspector,
     /// E8: most recent `script-engine` output (stdout + stderr).
@@ -541,6 +543,21 @@ struct TargetsPanel {
     compare_b: Option<(i64, String)>,
     /// Last action result, shown in the panel.
     status_msg: Option<String>,
+}
+
+/// State for the campaign QA dashboard (slice S6a): overall + per-annotator
+/// completeness (read live), plus on-demand per-tier QA and inter-annotator
+/// agreement. Holds only the draft inputs and the last computed result lines.
+#[derive(Default)]
+struct DashboardWindow {
+    /// Tier selected for the QA check, as `(id, name)`.
+    qa_tier: Option<(i64, String)>,
+    /// Base tier name for the agreement summary (e.g. `phones`).
+    agreement_base: String,
+    /// Last QA result line.
+    qa_msg: Option<String>,
+    /// Last agreement-summary result lines.
+    agreement_msgs: Vec<String>,
 }
 
 /// Working state for the inline Annotation panel (the modal-free editor): a
@@ -947,6 +964,7 @@ impl SaddaApp {
             rubric_editor: None,
             criteria_editor: None,
             targets_panel: None,
+            dashboard: None,
             annotation_inspector: AnnotationInspector::default(),
             script_output: None,
             script_error: None,
@@ -3122,6 +3140,180 @@ impl SaddaApp {
         }
     }
 
+    /// The campaign QA dashboard (slice S6a): project + per-annotator
+    /// completeness (read live), and on-demand per-tier QA + inter-annotator
+    /// agreement. Read-live / apply-after-borrow, like the targets panel.
+    fn dashboard_window(&mut self, ctx: &egui::Context) {
+        if self.dashboard.is_none() {
+            return;
+        }
+        let bundle_id = self.selected_bundle_id;
+
+        // Read live aggregates before borrowing dashboard state.
+        let (progress, annotators, tier_choices): (
+            Option<sadda_engine::ProgressCounts>,
+            Vec<sadda_engine::AnnotatorProgress>,
+            Vec<(i64, String)>,
+        ) = match &self.app_state {
+            AppState::ProjectLoaded { project, .. } => (
+                project.project_target_progress().ok(),
+                project.assignment_progress().unwrap_or_default(),
+                bundle_id
+                    .and_then(|bid| project.tiers(Some(bid)).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|t| {
+                        matches!(
+                            t.r#type,
+                            sadda_engine::TierType::Interval | sadda_engine::TierType::Point
+                        )
+                    })
+                    .map(|t| (t.id, t.name))
+                    .collect(),
+            ),
+            _ => (None, Vec::new(), Vec::new()),
+        };
+
+        let mut close = false;
+        let mut keep_open = true;
+        let mut run_qa = false;
+        let mut run_agreement = false;
+
+        egui::Window::new("Campaign dashboard")
+            .open(&mut keep_open)
+            .resizable(true)
+            .default_width(480.0)
+            .show(ctx, |ui| {
+                let dash = self.dashboard.as_mut().expect("checked above");
+
+                ui.heading("Completeness");
+                if let Some(p) = &progress {
+                    ui.label(format_target_progress(p));
+                }
+                if annotators.is_empty() {
+                    ui.label(egui::RichText::new("No assignments yet.").weak());
+                } else {
+                    for a in &annotators {
+                        ui.label(format_annotator_progress(a));
+                    }
+                }
+
+                ui.separator();
+                ui.heading("QA & agreement");
+                if bundle_id.is_none() {
+                    ui.label(
+                        egui::RichText::new("Select a bundle for per-tier QA / agreement.").weak(),
+                    );
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label("QA tier:");
+                        let text = dash
+                            .qa_tier
+                            .as_ref()
+                            .map(|(_, n)| n.as_str())
+                            .unwrap_or("— tier —");
+                        egui::ComboBox::from_id_salt("dash_qa_tier")
+                            .selected_text(text)
+                            .show_ui(ui, |ui| {
+                                for (id, name) in &tier_choices {
+                                    if ui
+                                        .selectable_label(
+                                            dash.qa_tier.as_ref().map(|(i, _)| *i) == Some(*id),
+                                            name,
+                                        )
+                                        .clicked()
+                                    {
+                                        dash.qa_tier = Some((*id, name.clone()));
+                                    }
+                                }
+                            });
+                        if ui
+                            .add_enabled(dash.qa_tier.is_some(), egui::Button::new("Run QA"))
+                            .clicked()
+                        {
+                            run_qa = true;
+                        }
+                    });
+                    if let Some(msg) = &dash.qa_msg {
+                        ui.label(egui::RichText::new(msg).weak());
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("Agreement for base tier:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut dash.agreement_base)
+                                .hint_text("phones")
+                                .desired_width(120.0),
+                        );
+                        if ui.button("Summarize").clicked() {
+                            run_agreement = true;
+                        }
+                    });
+                    for line in &dash.agreement_msgs {
+                        ui.label(egui::RichText::new(line).weak());
+                    }
+                }
+
+                ui.separator();
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+
+        if !keep_open || close {
+            self.dashboard = None;
+            return;
+        }
+
+        if run_qa {
+            let tier = self.dashboard.as_ref().and_then(|d| d.qa_tier.as_ref().map(|(i, _)| *i));
+            let msg = match (tier, &self.app_state) {
+                (Some(tid), AppState::ProjectLoaded { project, .. }) => {
+                    Some(match project.tier_qa(tid) {
+                        Ok(q) => format_qa_report(&q),
+                        Err(e) => format!("QA failed: {e}"),
+                    })
+                }
+                _ => None,
+            };
+            if let (Some(d), Some(msg)) = (self.dashboard.as_mut(), msg) {
+                d.qa_msg = Some(msg);
+            }
+        }
+        if run_agreement {
+            let base = self
+                .dashboard
+                .as_ref()
+                .map(|d| d.agreement_base.trim().to_string())
+                .unwrap_or_default();
+            let lines: Vec<String> = match (base.is_empty(), bundle_id, &self.app_state) {
+                (true, _, _) => vec!["Enter a base tier name.".to_string()],
+                (_, Some(bid), AppState::ProjectLoaded { project, .. }) => {
+                    match project.agreement_summary(bid, &base) {
+                        Ok(pairs) if pairs.is_empty() => {
+                            vec![format!("No \"{base} [annotator]\" tiers on this bundle.")]
+                        }
+                        Ok(pairs) => pairs
+                            .iter()
+                            .map(|p| {
+                                format!(
+                                    "{} vs {}: {}",
+                                    p.annotator_a,
+                                    p.annotator_b,
+                                    format_agreement_report(&p.report)
+                                )
+                            })
+                            .collect(),
+                        Err(e) => vec![format!("Agreement failed: {e}")],
+                    }
+                }
+                _ => vec![],
+            };
+            if let Some(d) = self.dashboard.as_mut() {
+                d.agreement_msgs = lines;
+            }
+        }
+    }
+
     /// Saves the criteria-editor working copy via the engine, then refreshes
     /// the list and selection.
     fn criteria_save(&mut self) {
@@ -4813,6 +5005,22 @@ fn format_target_progress(p: &sadda_engine::ProgressCounts) -> String {
     )
 }
 
+/// One annotator's completeness line for the dashboard (slice S6).
+fn format_annotator_progress(a: &sadda_engine::AnnotatorProgress) -> String {
+    format!(
+        "{}: {} done · {} in progress · {} to do",
+        a.annotator, a.done, a.in_progress, a.assigned
+    )
+}
+
+/// QA findings line for a tier on the dashboard (slice S6).
+fn format_qa_report(q: &sadda_engine::QaReport) -> String {
+    format!(
+        "{} annotations · {} out-of-vocab · {} missing · {} overlaps",
+        q.n_annotations, q.out_of_vocab, q.missing_label, q.overlaps
+    )
+}
+
 /// Compact agreement readout for the targets panel (slice S5): κ + label
 /// agreement, unit match counts, boundary deviation/tolerance, and frame κ.
 fn format_agreement_report(r: &sadda_engine::AgreementReport) -> String {
@@ -5630,6 +5838,7 @@ impl eframe::App for SaddaApp {
         self.rubric_editor_window(ui.ctx());
         self.criteria_editor_window(ui.ctx());
         self.targets_panel_window(ui.ctx());
+        self.dashboard_window(ui.ctx());
 
         // E9 command palette. Same overlay pattern.
         self.command_palette_window(ui.ctx());
@@ -5810,6 +6019,20 @@ impl SaddaApp {
                 ui.close();
                 if self.targets_panel.is_none() {
                     self.targets_panel = Some(TargetsPanel::default());
+                }
+            }
+            if ui
+                .add_enabled(project_open, egui::Button::new("Dashboard…"))
+                .on_disabled_hover_text("Open or create a project first")
+                .on_hover_text(
+                    "Campaign QA dashboard: completeness, per-annotator progress, \
+                     tier QA, and inter-annotator agreement",
+                )
+                .clicked()
+            {
+                ui.close();
+                if self.dashboard.is_none() {
+                    self.dashboard = Some(DashboardWindow::default());
                 }
             }
         });
@@ -8499,6 +8722,31 @@ mod rubric_ui_tests {
         assert_eq!(
             format_agreement_report(&r),
             "κ=0.50 (67% labels) · 3 matched / 0+0 extra · Δbound 12ms (75% ≤20ms) · frame κ=0.60"
+        );
+    }
+
+    #[test]
+    fn dashboard_lines_read_naturally() {
+        let a = sadda_engine::AnnotatorProgress {
+            annotator: "alice".into(),
+            assigned: 2,
+            in_progress: 1,
+            done: 4,
+        };
+        assert_eq!(
+            format_annotator_progress(&a),
+            "alice: 4 done · 1 in progress · 2 to do"
+        );
+        let q = sadda_engine::QaReport {
+            tier_id: 1,
+            n_annotations: 12,
+            out_of_vocab: 2,
+            missing_label: 1,
+            overlaps: 3,
+        };
+        assert_eq!(
+            format_qa_report(&q),
+            "12 annotations · 2 out-of-vocab · 1 missing · 3 overlaps"
         );
     }
 }

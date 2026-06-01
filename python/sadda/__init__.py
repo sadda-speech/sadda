@@ -25,6 +25,7 @@ from sadda._stability import (
 
 __all__ = [
     "AgreementReport",
+    "AnnotatorProgress",
     "Assignment",
     "Audio",
     "Bundle",
@@ -38,11 +39,13 @@ __all__ = [
     "Instrument",
     "Interval",
     "LabelCheck",
+    "PairAgreement",
     "Point",
     "ProcessingRun",
     "ProgressCounts",
     "Project",
     "ProvisionalAPIWarning",
+    "QaReport",
     "Reference",
     "Rubric",
     "RubricTier",
@@ -119,6 +122,11 @@ ImportSummary = provisional(_native.ImportSummary)
 # S5 surface (Phase 4) — agreement engine + campaign progress.
 AgreementReport = provisional(_native.AgreementReport)
 ProgressCounts = provisional(_native.ProgressCounts)
+
+# S6 surface (Phase 4) — QA dashboard aggregation.
+AnnotatorProgress = provisional(_native.AnnotatorProgress)
+QaReport = provisional(_native.QaReport)
+PairAgreement = provisional(_native.PairAgreement)
 
 # A1 surface (Phase 3) — provenance timeline + citation export.
 ProcessingRun = stable(_native.ProcessingRun)
