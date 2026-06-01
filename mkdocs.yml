@@ -94,6 +94,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Quickstart: quickstart.md
+  - Annotation project cycle: annotation-cycle.md
   - Round-trip lossiness:
       - TextGrid: lossiness/textgrid.md
       - EAF: lossiness/eaf.md
