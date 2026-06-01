@@ -2041,6 +2041,7 @@ impl SaddaApp {
         let AppState::ProjectLoaded { project, .. } = &self.app_state else {
             return;
         };
+        let t_load = std::time::Instant::now();
         let audio = match project.load_audio(bundle_id) {
             Ok(a) => a,
             Err(e) => {
@@ -2048,7 +2049,10 @@ impl SaddaApp {
                 return;
             }
         };
+        perf_log("load_audio", t_load.elapsed());
+        let t_mix = std::time::Instant::now();
         let mono: Vec<f32> = audio.mono_samples().collect();
+        perf_log("downmix", t_mix.elapsed());
         self.active_envelope = Some(EnvelopeCache {
             bundle_id,
             sample_rate: audio.sample_rate,
@@ -4241,7 +4245,10 @@ impl SaddaApp {
                 return;
             }
         }
-        match build_spectrogram_texture(ctx, env, cfg) {
+        let t = std::time::Instant::now();
+        let built = build_spectrogram_texture(ctx, env, cfg);
+        perf_log("spectrogram", t.elapsed());
+        match built {
             Ok(sc) => self.active_spectrogram = Some(sc),
             Err(msg) => self.set_error(msg),
         }
@@ -4307,7 +4314,10 @@ impl SaddaApp {
             // just toggled off doesn't pay to recompute.
             return;
         }
-        self.active_tracks = Some(compute_measure_tracks(env, cfg));
+        let t = std::time::Instant::now();
+        let tracks = compute_measure_tracks(env, cfg);
+        perf_log("measure_tracks", t.elapsed());
+        self.active_tracks = Some(tracks);
     }
 
     /// D10: refresh the per-lane overlay bands if the View-menu selection
@@ -4367,6 +4377,20 @@ fn project_name_from_path(path: &Path) -> String {
     path.file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "untitled".into())
+}
+
+/// Emits a one-line timing to stderr when the `SADDA_PERF` environment variable
+/// is set — a measurement aid for the bundle-switch perf work (DEVLOG
+/// 2026-06-01 design entry). Effectively free when unset (the flag is read once).
+fn perf_log(label: &str, elapsed: std::time::Duration) {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    if *ON.get_or_init(|| std::env::var_os("SADDA_PERF").is_some()) {
+        eprintln!(
+            "[perf] {label:<15}{:8.1} ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
 }
 
 /// Runs STFT + power-spectrogram + dB-normalise + colormap on the
