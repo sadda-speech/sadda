@@ -17,6 +17,7 @@ Status: `[ ]` open · `[~]` in progress · `[x]` done (move to DEVLOG when shipp
 _Raw captures land here; groomed into the sections below on request._
 
 - [ ] Display selection timestamps — show the boundary times (start + end) of the current selection — _added 2026-06-01_
+- [ ] Refine / reorganize the `annotation-cycle.md` docs page — structure + flow need careful attention; revisit in the coming days (draft is uncommitted in the working tree) — _added 2026-06-01_
 
 ---
 
