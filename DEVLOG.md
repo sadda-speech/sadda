@@ -6,6 +6,10 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-01 — Fix: Criteria editor's right panel collapsed (egui infinite-width footgun)
+
+Found during user testing of the notebook→criterion flow: the Criteria editor's left-list / right-editor split rendered only the left list — the right panel (Name / Kind / Target tier / Rule body / Save / Run / Accept / Reject) was squeezed to zero width, so the editor looked dead (clicking a criterion or "+ New criterion" did nothing *visible*; the interactions fired but had nowhere to show). Cause (S2 code): the rule-body `TextEdit::multiline` used `.desired_width(f32::INFINITY)` **inside a `horizontal_top` layout** — an infinite-width child collapses its siblings in a horizontal layout. Fix: fixed-width (170) left column + bound the body to `available_width().max(280)`, and widened the default window (560→640). The other two `INFINITY` boxes (Rubric guidelines, annotation Note) live in *vertical* layouts where it means "fill width" correctly — left as-is. App 79 tests green, clippy clean; engine/python untouched. (User confirmed the editor + Run → `… (auto)` preview tier now work.)
+
 ## 2026-06-01 — Annotation workflow S7: the PI lab-notebook (shipped) — the suite is complete
 
 The final slice. As the PI explores a corpus to define a study, they capture observations / measurements / decisions, then **promote** them into rubric artifacts — so the rubric's own creation is provenance ("this rule came from that observation"). Same iterate-loop the annotators use later, run earlier by the PI.
