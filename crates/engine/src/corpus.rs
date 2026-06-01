@@ -683,6 +683,67 @@ impl TargetSpec {
 pub const TARGET_STATUSES: [&str; 5] =
     ["unassigned", "assigned", "in_progress", "done", "flagged"];
 
+/// An **assignment** (slice S4b): distributes a [`Target`] to an annotator. A
+/// dedicated object, separate from annotation data and the rubric. A target may
+/// carry several (overlap → agreement); each has a `role` (primary / secondary)
+/// and its own per-annotator progress `status`. Created by hand or in bulk via
+/// [`Project::assign_targets_randomly`].
+#[derive(Debug, Clone)]
+pub struct Assignment {
+    /// Assignment id (primary key).
+    pub id: i64,
+    /// FK into [`Target`].
+    pub target_id: i64,
+    /// The annotator this target is assigned to (a free-text identifier).
+    pub annotator: String,
+    /// `"primary"` or `"secondary"`.
+    pub role: String,
+    /// Per-annotator progress: `assigned` / `in_progress` / `done`.
+    pub status: String,
+    /// The [`Project::assign_targets_randomly`] seed when batch-assigned; else
+    /// `None` (hand assignment).
+    pub seed: Option<i64>,
+    /// ISO 8601 UTC creation timestamp.
+    pub created_at: String,
+    /// ISO 8601 UTC timestamp of the last update.
+    pub updated_at: String,
+}
+
+/// Insert parameters for an [`Assignment`]. `role` defaults to `"primary"` and
+/// `status` to `"assigned"` when `None`.
+#[derive(Debug, Clone, Default)]
+pub struct AssignmentSpec {
+    /// FK into [`Target`].
+    pub target_id: i64,
+    /// The annotator (free-text identifier).
+    pub annotator: String,
+    /// `"primary"` / `"secondary"`; `None` → `"primary"`.
+    pub role: Option<String>,
+    /// `assigned` / `in_progress` / `done`; `None` → `"assigned"`.
+    pub status: Option<String>,
+    /// Random-assignment seed; `None` for hand assignment.
+    pub seed: Option<i64>,
+    /// Optional opaque JSON blob.
+    pub extra: Option<String>,
+}
+
+impl AssignmentSpec {
+    /// A primary assignment of `target_id` to `annotator`.
+    pub fn new(target_id: i64, annotator: &str) -> Self {
+        Self {
+            target_id,
+            annotator: annotator.to_owned(),
+            ..Default::default()
+        }
+    }
+}
+
+/// The valid [`Assignment::status`] values, in lifecycle order.
+pub const ASSIGNMENT_STATUSES: [&str; 3] = ["assigned", "in_progress", "done"];
+
+/// The valid [`Assignment::role`] values.
+pub const ASSIGNMENT_ROLES: [&str; 2] = ["primary", "secondary"];
+
 /// Registration row for a Parquet sidecar holding a dense tier's data.
 /// Created automatically by `Project::write_continuous_numeric` /
 /// `write_continuous_vector` / `write_categorical_sampled`.
@@ -2363,8 +2424,10 @@ impl Project {
         Ok(())
     }
 
-    /// Deletes a target by id. Idempotent.
+    /// Deletes a target by id, along with any assignments on it. Idempotent.
     pub fn delete_target(&self, id: i64) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM assignment WHERE target_id = ?1", [id])?;
         self.conn.execute("DELETE FROM target WHERE id = ?1", [id])?;
         Ok(())
     }
@@ -2460,6 +2523,204 @@ impl Project {
             note: row.get(8)?,
             created_at: row.get(9)?,
             updated_at: row.get(10)?,
+        })
+    }
+
+    // ====================================================================
+    // Assignments (slice S4b). An `assignment` distributes a target to an
+    // annotator; targets can carry several. Creating one advances the target
+    // from `unassigned` to `assigned`; removing the last one reverts it.
+    // ====================================================================
+
+    /// Assigns a target to an annotator. Validates the `role` / `status` enums
+    /// and that the target exists; advances the target's status from
+    /// `unassigned` to `assigned`. The `(target, annotator)` pair is unique —
+    /// re-assigning the same annotator errors. Returns the new assignment id.
+    pub fn add_assignment(&self, spec: &AssignmentSpec) -> Result<i64> {
+        let role = spec.role.as_deref().unwrap_or("primary");
+        Self::validate_assignment_role(role)?;
+        let status = spec.status.as_deref().unwrap_or("assigned");
+        Self::validate_assignment_status(status)?;
+        if spec.annotator.trim().is_empty() {
+            return Err(EngineError::Corpus("assignment annotator is empty".into()));
+        }
+        let target = self.get_target(spec.target_id)?.ok_or_else(|| {
+            EngineError::Corpus(format!("no target with id {}", spec.target_id))
+        })?;
+        let id: i64 = self.conn.query_row(
+            "INSERT INTO assignment (target_id, annotator, role, status, seed) \
+             VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
+            rusqlite::params![spec.target_id, spec.annotator, role, status, spec.seed],
+            |row| row.get(0),
+        )?;
+        if target.status == "unassigned" {
+            self.update_target_status(spec.target_id, "assigned")?;
+        }
+        Ok(id)
+    }
+
+    /// Lists a bundle's assignments (joined through their targets), ordered by
+    /// target then assignment id.
+    pub fn assignments(&self, bundle_id: i64) -> Result<Vec<Assignment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT a.id, a.target_id, a.annotator, a.role, a.status, a.seed, \
+                    a.created_at, a.updated_at \
+             FROM assignment a JOIN target t ON a.target_id = t.id \
+             WHERE t.bundle_id = ?1 ORDER BY a.target_id, a.id",
+        )?;
+        let rows = stmt
+            .query_map([bundle_id], Self::map_assignment_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Lists the assignments on a single target, ordered by id.
+    pub fn assignments_for_target(&self, target_id: i64) -> Result<Vec<Assignment>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, target_id, annotator, role, status, seed, created_at, updated_at \
+             FROM assignment WHERE target_id = ?1 ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([target_id], Self::map_assignment_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Sets an assignment's per-annotator `status` (one of
+    /// `assigned` / `in_progress` / `done`). Errors if it does not exist.
+    pub fn update_assignment_status(&self, id: i64, status: &str) -> Result<()> {
+        Self::validate_assignment_status(status)?;
+        let n = self.conn.execute(
+            "UPDATE assignment SET status = ?1, \
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE id = ?2",
+            rusqlite::params![status, id],
+        )?;
+        if n == 0 {
+            return Err(EngineError::Corpus(format!("no assignment with id {id}")));
+        }
+        Ok(())
+    }
+
+    /// Reassigns an assignment to a different annotator (editable throughout).
+    /// Errors if the assignment is missing, the annotator is empty, or the
+    /// target is already assigned to that annotator.
+    pub fn set_assignment_annotator(&self, id: i64, annotator: &str) -> Result<()> {
+        if annotator.trim().is_empty() {
+            return Err(EngineError::Corpus("assignment annotator is empty".into()));
+        }
+        let n = self.conn.execute(
+            "UPDATE assignment SET annotator = ?1, \
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+             WHERE id = ?2",
+            rusqlite::params![annotator, id],
+        )?;
+        if n == 0 {
+            return Err(EngineError::Corpus(format!("no assignment with id {id}")));
+        }
+        Ok(())
+    }
+
+    /// Deletes an assignment. If it was the target's last assignment and the
+    /// target was merely `assigned` (not manually advanced), the target reverts
+    /// to `unassigned`. Idempotent.
+    pub fn delete_assignment(&self, id: i64) -> Result<()> {
+        let target_id: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT target_id FROM assignment WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(target_id) = target_id else {
+            return Ok(()); // already gone
+        };
+        self.conn
+            .execute("DELETE FROM assignment WHERE id = ?1", [id])?;
+        let remaining: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM assignment WHERE target_id = ?1",
+            [target_id],
+            |row| row.get(0),
+        )?;
+        if remaining == 0 {
+            if let Some(t) = self.get_target(target_id)? {
+                if t.status == "assigned" {
+                    self.update_target_status(target_id, "unassigned")?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Distributes a bundle's currently-`unassigned` targets across `annotators`
+    /// using a deterministic, seed-driven shuffle (Fisher–Yates over a
+    /// splitmix64 stream — no `rand` dep, reproducible per the no-`Math.random`
+    /// ethos), round-robining the shuffled order so counts differ by at most
+    /// one. Each new assignment records `seed`. Already-assigned targets are
+    /// left alone, so calling this again after a roster change re-randomizes
+    /// only the remainder. Returns the number of targets assigned.
+    pub fn assign_targets_randomly(
+        &self,
+        bundle_id: i64,
+        annotators: &[String],
+        seed: i64,
+        role: Option<&str>,
+    ) -> Result<usize> {
+        if annotators.is_empty() || annotators.iter().all(|a| a.trim().is_empty()) {
+            return Err(EngineError::Corpus(
+                "assign_targets_randomly: empty roster".into(),
+            ));
+        }
+        let role = role.unwrap_or("primary");
+        Self::validate_assignment_role(role)?;
+        let mut target_ids: Vec<i64> = self
+            .targets(bundle_id)?
+            .into_iter()
+            .filter(|t| t.status == "unassigned")
+            .map(|t| t.id)
+            .collect();
+        deterministic_shuffle(&mut target_ids, seed as u64);
+        for (i, tid) in target_ids.iter().enumerate() {
+            self.add_assignment(&AssignmentSpec {
+                target_id: *tid,
+                annotator: annotators[i % annotators.len()].clone(),
+                role: Some(role.to_owned()),
+                seed: Some(seed),
+                ..Default::default()
+            })?;
+        }
+        Ok(target_ids.len())
+    }
+
+    fn validate_assignment_status(status: &str) -> Result<()> {
+        if !ASSIGNMENT_STATUSES.contains(&status) {
+            return Err(EngineError::Corpus(format!(
+                "invalid assignment status {status:?}; must be one of {ASSIGNMENT_STATUSES:?}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_assignment_role(role: &str) -> Result<()> {
+        if !ASSIGNMENT_ROLES.contains(&role) {
+            return Err(EngineError::Corpus(format!(
+                "invalid assignment role {role:?}; must be one of {ASSIGNMENT_ROLES:?}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn map_assignment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Assignment> {
+        Ok(Assignment {
+            id: row.get(0)?,
+            target_id: row.get(1)?,
+            annotator: row.get(2)?,
+            role: row.get(3)?,
+            status: row.get(4)?,
+            seed: row.get(5)?,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
         })
     }
 
@@ -4596,6 +4857,31 @@ fn sanitize_filename(name: &str) -> String {
     out
 }
 
+/// In-place Fisher–Yates shuffle driven by a splitmix64 stream seeded with
+/// `seed`. Deterministic — the same `(slice contents, seed)` always yields the
+/// same permutation — so seeded random assignment is reproducible without a
+/// `rand` dependency. splitmix64 is the standard seed mixer (Steele et al.,
+/// "Fast Splittable Pseudorandom Number Generators", OOPSLA 2014).
+fn deterministic_shuffle<T>(items: &mut [T], seed: u64) {
+    let mut state = seed;
+    let mut next = || {
+        // splitmix64
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    // Fisher–Yates: for i from len-1 down to 1, swap i with a uniform j in 0..=i.
+    let len = items.len();
+    for i in (1..len).rev() {
+        // Lemire's unbiased bounded reduction into 0..=i.
+        let bound = (i as u64) + 1;
+        let j = ((next() as u128 * bound as u128) >> 64) as usize;
+        items.swap(i, j);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5516,5 +5802,192 @@ mod tests {
 
         let _ = std::fs::remove_file(&source_wav);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn assignment_crud_and_target_status_management() {
+        let root = unique_dir("assign");
+        let _ = std::fs::remove_dir_all(&root);
+        let source_wav =
+            std::env::temp_dir().join(format!("sadda_assign_{}.wav", std::process::id()));
+        write_short_wav(&source_wav, 16_000);
+
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("b", &source_wav).unwrap();
+        let tid = project
+            .add_target(&TargetSpec::new(bundle_id, 0.0, 0.1, "phones"))
+            .unwrap();
+
+        // Assigning advances the target unassigned → assigned.
+        let aid = project
+            .add_assignment(&AssignmentSpec::new(tid, "alice"))
+            .unwrap();
+        assert_eq!(project.get_target(tid).unwrap().unwrap().status, "assigned");
+        let a = &project.assignments(bundle_id).unwrap()[0];
+        assert_eq!(a.annotator, "alice");
+        assert_eq!(a.role, "primary");
+        assert_eq!(a.status, "assigned");
+        assert_eq!(a.seed, None);
+
+        // A second annotator on the same target (overlap → S5 agreement).
+        project
+            .add_assignment(&AssignmentSpec {
+                target_id: tid,
+                annotator: "bob".into(),
+                role: Some("secondary".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(project.assignments_for_target(tid).unwrap().len(), 2);
+        // The same annotator twice is rejected (UNIQUE).
+        assert!(
+            project
+                .add_assignment(&AssignmentSpec::new(tid, "alice"))
+                .is_err()
+        );
+        // Bad role / status / missing target are rejected.
+        assert!(
+            project
+                .add_assignment(&AssignmentSpec {
+                    target_id: tid,
+                    annotator: "x".into(),
+                    role: Some("lead".into()),
+                    ..Default::default()
+                })
+                .is_err()
+        );
+        assert!(
+            project
+                .add_assignment(&AssignmentSpec::new(9_999, "ghost"))
+                .is_err()
+        );
+
+        // Editable: status + reassignment.
+        project.update_assignment_status(aid, "in_progress").unwrap();
+        project.set_assignment_annotator(aid, "carol").unwrap();
+        let a = project.get_target(tid).unwrap().unwrap();
+        assert_eq!(a.status, "assigned"); // target status unaffected by edits
+        assert!(project.update_assignment_status(aid, "bogus").is_err());
+
+        // Deleting assignments: the target reverts to unassigned only when the
+        // LAST one is removed (and it was merely 'assigned').
+        project.delete_assignment(aid).unwrap();
+        assert_eq!(project.get_target(tid).unwrap().unwrap().status, "assigned");
+        let bob = project.assignments_for_target(tid).unwrap()[0].id;
+        project.delete_assignment(bob).unwrap();
+        assert_eq!(
+            project.get_target(tid).unwrap().unwrap().status,
+            "unassigned"
+        );
+        project.delete_assignment(bob).unwrap(); // idempotent
+
+        // Deleting a target removes its assignments (no orphans).
+        project
+            .add_assignment(&AssignmentSpec::new(tid, "dave"))
+            .unwrap();
+        project.delete_target(tid).unwrap();
+        assert!(project.assignments(bundle_id).unwrap().is_empty());
+
+        let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn assign_targets_randomly_is_deterministic_balanced_and_remainder_only() {
+        let build = |tag: &str| {
+            let root = unique_dir(tag);
+            let _ = std::fs::remove_dir_all(&root);
+            let wav = std::env::temp_dir().join(format!(
+                "sadda_rand_assign_{}_{}.wav",
+                std::process::id(),
+                root.file_name().unwrap().to_string_lossy()
+            ));
+            write_short_wav(&wav, 16_000);
+            let project = Project::create(&root, "p").unwrap();
+            let bundle_id = project.add_bundle("b", &wav).unwrap();
+            let mut ids = Vec::new();
+            for i in 0..10 {
+                let s = i as f64 * 0.1;
+                ids.push(
+                    project
+                        .add_target(&TargetSpec::new(bundle_id, s, s + 0.05, "phones"))
+                        .unwrap(),
+                );
+            }
+            (root, wav, project, bundle_id, ids)
+        };
+
+        let roster = vec!["alice".to_string(), "bob".into(), "carol".into()];
+
+        // First project: assign all 10 with seed 42.
+        let (root1, wav1, p1, b1, _) = build("rand_assign_1");
+        let n = p1.assign_targets_randomly(b1, &roster, 42, None).unwrap();
+        assert_eq!(n, 10);
+        let a1 = p1.assignments(b1).unwrap();
+        assert_eq!(a1.len(), 10);
+        // All targets now assigned; seed recorded.
+        assert!(p1.targets(b1).unwrap().iter().all(|t| t.status == "assigned"));
+        assert!(a1.iter().all(|a| a.seed == Some(42)));
+        // Balanced: 10 across 3 → counts in {3,4}, difference ≤ 1.
+        let mut counts = std::collections::HashMap::new();
+        for a in &a1 {
+            *counts.entry(a.annotator.clone()).or_insert(0) += 1;
+        }
+        let (min, max) = (
+            *counts.values().min().unwrap(),
+            *counts.values().max().unwrap(),
+        );
+        assert!(max - min <= 1, "unbalanced: {counts:?}");
+        // A second call assigns nothing (no remaining unassigned targets).
+        assert_eq!(p1.assign_targets_randomly(b1, &roster, 7, None).unwrap(), 0);
+        // Empty roster errors.
+        assert!(p1.assign_targets_randomly(b1, &[], 1, None).is_err());
+
+        // Second identical project, same seed → identical (target→annotator) map.
+        let (root2, wav2, p2, b2, _) = build("rand_assign_2");
+        p2.assign_targets_randomly(b2, &roster, 42, None).unwrap();
+        let map1: Vec<(i64, String)> =
+            a1.iter().map(|a| (a.target_id, a.annotator.clone())).collect();
+        let map2: Vec<(i64, String)> = p2
+            .assignments(b2)
+            .unwrap()
+            .iter()
+            .map(|a| (a.target_id, a.annotator.clone()))
+            .collect();
+        assert_eq!(map1, map2, "same seed must reproduce the same assignment");
+
+        // Re-randomize-of-remainder: add 2 new targets, reassign only those.
+        for i in 10..12 {
+            let s = i as f64 * 0.1;
+            p1.add_target(&TargetSpec::new(b1, s, s + 0.05, "phones"))
+                .unwrap();
+        }
+        assert_eq!(p1.assign_targets_randomly(b1, &roster, 99, None).unwrap(), 2);
+        assert_eq!(p1.assignments(b1).unwrap().len(), 12);
+
+        for (root, wav) in [(root1, wav1), (root2, wav2)] {
+            let _ = std::fs::remove_file(&wav);
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn deterministic_shuffle_is_seed_stable_and_a_permutation() {
+        let base: Vec<i32> = (0..50).collect();
+        let mut a = base.clone();
+        let mut b = base.clone();
+        deterministic_shuffle(&mut a, 12345);
+        deterministic_shuffle(&mut b, 12345);
+        assert_eq!(a, b, "same seed → same permutation");
+
+        let mut c = base.clone();
+        deterministic_shuffle(&mut c, 999);
+        assert_ne!(a, c, "different seeds should differ for 50 elements");
+
+        // It is a permutation (same multiset) and actually reorders.
+        let mut sorted = a.clone();
+        sorted.sort();
+        assert_eq!(sorted, base);
+        assert_ne!(a, base);
     }
 }

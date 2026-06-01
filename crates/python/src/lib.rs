@@ -914,6 +914,71 @@ impl PyTarget {
     }
 }
 
+/// An **assignment** (slice S4b): distributes a `Target` to an annotator. A
+/// dedicated object; a target may carry several (overlap → agreement). Created
+/// by hand (`Project.add_assignment`) or in bulk (`assign_targets_randomly`).
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "Assignment", frozen)]
+struct PyAssignment {
+    inner: sadda_engine::Assignment,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyAssignment {
+    /// Assignment id (primary key).
+    #[getter]
+    fn id(&self) -> i64 {
+        self.inner.id
+    }
+    /// The target this assignment distributes.
+    #[getter]
+    fn target_id(&self) -> i64 {
+        self.inner.target_id
+    }
+    /// The annotator (free-text identifier).
+    #[getter]
+    fn annotator(&self) -> String {
+        self.inner.annotator.clone()
+    }
+    /// `"primary"` or `"secondary"`.
+    #[getter]
+    fn role(&self) -> String {
+        self.inner.role.clone()
+    }
+    /// Per-annotator progress: `assigned` / `in_progress` / `done`.
+    #[getter]
+    fn status(&self) -> String {
+        self.inner.status.clone()
+    }
+    /// The `assign_targets_randomly` seed when batch-assigned, else `None`.
+    #[getter]
+    fn seed(&self) -> Option<i64> {
+        self.inner.seed
+    }
+    /// ISO 8601 UTC creation timestamp.
+    #[getter]
+    fn created_at(&self) -> String {
+        self.inner.created_at.clone()
+    }
+    /// ISO 8601 UTC timestamp of the last update.
+    #[getter]
+    fn updated_at(&self) -> String {
+        self.inner.updated_at.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Assignment(id={}, target_id={}, annotator={:?}, role={:?}, status={:?})",
+            self.inner.id,
+            self.inner.target_id,
+            self.inner.annotator,
+            self.inner.role,
+            self.inner.status,
+        )
+    }
+}
+
 /// Registration row for a Parquet sidecar holding a dense tier's data.
 /// Created automatically by the `Project.write_continuous_numeric` /
 /// `write_continuous_vector` / `write_categorical_sampled` methods.
@@ -1982,6 +2047,86 @@ impl PyProject {
     ) -> PyResult<usize> {
         self.inner
             .generate_targets_from_criterion(criterion_id, bundle_id)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Assigns a target to an annotator. `role` defaults to `"primary"`,
+    /// `status` to `"assigned"`. Advances the target `unassigned` → `assigned`.
+    /// Raises if the target is missing or it is already assigned to `annotator`.
+    /// Returns the new assignment id.
+    #[pyo3(signature = (target_id, annotator, *, role=None, status=None, seed=None, extra=None))]
+    fn add_assignment(
+        &self,
+        target_id: i64,
+        annotator: &str,
+        role: Option<String>,
+        status: Option<String>,
+        seed: Option<i64>,
+        extra: Option<String>,
+    ) -> PyResult<i64> {
+        let spec = sadda_engine::AssignmentSpec {
+            target_id,
+            annotator: annotator.to_owned(),
+            role,
+            status,
+            seed,
+            extra,
+        };
+        self.inner.add_assignment(&spec).map_err(engine_err_to_py)
+    }
+
+    /// Lists a bundle's assignments (across all its targets).
+    fn assignments(&self, bundle_id: i64) -> PyResult<Vec<PyAssignment>> {
+        self.inner
+            .assignments(bundle_id)
+            .map(|xs| xs.into_iter().map(|inner| PyAssignment { inner }).collect())
+            .map_err(engine_err_to_py)
+    }
+
+    /// Lists the assignments on a single target.
+    fn assignments_for_target(&self, target_id: i64) -> PyResult<Vec<PyAssignment>> {
+        self.inner
+            .assignments_for_target(target_id)
+            .map(|xs| xs.into_iter().map(|inner| PyAssignment { inner }).collect())
+            .map_err(engine_err_to_py)
+    }
+
+    /// Sets an assignment's per-annotator `status` (`assigned` / `in_progress`
+    /// / `done`).
+    fn update_assignment_status(&self, id: i64, status: &str) -> PyResult<()> {
+        self.inner
+            .update_assignment_status(id, status)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Reassigns an assignment to a different annotator.
+    fn set_assignment_annotator(&self, id: i64, annotator: &str) -> PyResult<()> {
+        self.inner
+            .set_assignment_annotator(id, annotator)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Deletes an assignment (idempotent). Reverts the target to `unassigned`
+    /// when its last assignment is removed and it was merely `assigned`.
+    fn delete_assignment(&self, id: i64) -> PyResult<()> {
+        self.inner.delete_assignment(id).map_err(engine_err_to_py)
+    }
+
+    /// Distributes a bundle's currently-`unassigned` targets across `annotators`
+    /// with a deterministic, seed-driven shuffle (reproducible — same seed +
+    /// roster + targets → same assignment). Already-assigned targets are left
+    /// alone, so re-running after a roster change re-randomizes the remainder.
+    /// `role` defaults to `"primary"`. Returns the number assigned.
+    #[pyo3(signature = (bundle_id, annotators, seed, *, role=None))]
+    fn assign_targets_randomly(
+        &self,
+        bundle_id: i64,
+        annotators: Vec<String>,
+        seed: i64,
+        role: Option<&str>,
+    ) -> PyResult<usize> {
+        self.inner
+            .assign_targets_randomly(bundle_id, &annotators, seed, role)
             .map_err(engine_err_to_py)
     }
 
@@ -3098,6 +3243,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLabelCheck>()?;
     m.add_class::<PyCriterion>()?;
     m.add_class::<PyTarget>()?;
+    m.add_class::<PyAssignment>()?;
     m.add_class::<PyDerivedSignal>()?;
     m.add_class::<PyFormantFrame>()?;
     m.add_class::<PyLtas>()?;

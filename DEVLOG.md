@@ -6,6 +6,24 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-05-31 — Annotation workflow S4b: the `assignment` object + seeded random distribution (shipped)
+
+Second piece of the campaign layer (the S4 decomposition is in the entry below): **assignments** distribute S4a targets to annotators. Built across the three surfaces.
+
+**Engine** (migration **V12** + `corpus.rs`): an `assignment` table — `(target_id FK, annotator, role, status, seed, extra, timestamps)`, `UNIQUE(target_id, annotator)` + index + 3 audit triggers (V3/B1). A **dedicated object**, separate from annotation data and the rubric, so roster churn never bumps the rubric and the QA dashboard queries it directly. `role ∈ {primary, secondary}` (overlap → S5 agreement); `status ∈ {assigned, in_progress, done}` is *per-annotator progress* — deliberately distinct from S1's user-defined *annotation* `status` vocabulary and from the *target*'s campaign status. API: `add_assignment`, `assignments(bundle)` (joined through targets), `assignments_for_target`, `update_assignment_status`, `set_assignment_annotator` (editable throughout), `delete_assignment`, and the headline `assign_targets_randomly(bundle, roster, seed, role)`.
+
+**Target ↔ assignment coupling (decided):** creating an assignment advances its target `unassigned → assigned`; deleting the *last* assignment reverts the target to `unassigned` *only if* it was merely `assigned` (a manually-advanced `in_progress`/`done`/`flagged` is left alone); `delete_target` cascades to its assignments (no orphans, since SQLite FK enforcement isn't relied on). This makes the target's campaign status a faithful rollup of "is anyone on it" without a separate bookkeeping step.
+
+**Seeded distribution (decided):** `assign_targets_randomly` takes the bundle's currently-`unassigned` targets, shuffles them with a **deterministic, dependency-free** Fisher–Yates over a **splitmix64** stream seeded by the caller's `seed` (Steele et al., OOPSLA 2014; Lemire's unbiased bounded reduction for the index) — matching the project's hand-rolled, no-`Math.random` ethos (cf. `criteria/expr.rs`). It round-robins the shuffled order so per-annotator counts differ by ≤1, records `seed` on each assignment, and — because it only touches `unassigned` — *is itself* the "re-randomize-of-remaining" when the roster changes. Same `(seed, roster, targets)` → identical assignment (tested across two fresh projects). Annotators are **free-text identifiers** in v1 (no roster entity table; the roster is just a `&[String]`), which keeps assignment decoupled from any person/speaker model — a roster object can come later if needed.
+
+**Python**: a frozen `Assignment` pyclass surfaced as provisional `sadda.Assignment` + the 7 `Project` methods (`assign_targets_randomly` takes a `list[str]` roster). Stubs regenerated (additive only).
+
+**GUI**: the **Annotate → Targets…** panel gained assignment controls — an *Annotator* field with a per-row **Assign** button, an **Assign randomly** row (comma-separated roster + seed), and a per-target assignee summary via a pure, unit-tested `format_assignment_summary` (`→ alice(primary), bob(secondary)` / `— unassigned`). Same read-live / apply-after-borrow shape.
+
+**Deferred to S4c:** per-annotator export *sub-project* package + import/merge (disjoint union; overlap → adjudication) — the heavy/risky part. Also later: a roster/annotator entity; assignment-aware target regeneration (today `generate_targets_from_criterion` still replaces a criterion's targets wholesale); the assignment color-overlay on the waveform.
+
+**Gate (all green):** engine 278 lib + integration (incl. `assignment_crud_and_target_status_management`, `assign_targets_randomly_is_deterministic_balanced_and_remainder_only`, `deterministic_shuffle_is_seed_stable_and_a_permutation`), clippy clean; python 174 passed / 6 skipped (`test_assignments.py`); app 74 (incl. `assignment_summary_lists_annotators_or_unassigned`), clippy clean; stubs no drift. **Next: S4c — per-annotator export package + import/merge.**
+
 ## 2026-05-31 — Annotation workflow S4a: the campaign `target` object (shipped) + the S4 decomposition
 
 S3 done, the roadmap is at **S4 — the campaign layer** (the PI / annotator-team layer: distribute annotation work across N annotators, track it, compile it back). Scoping it surfaced that S4-as-one-line is really three sub-slices on an unbuilt foundation, so this session **decomposed S4 and shipped its first piece (S4a)**.

@@ -8,6 +8,7 @@ import os
 import pathlib
 import typing
 __all__ = [
+    "Assignment",
     "Audio",
     "Bundle",
     "Calibration",
@@ -61,6 +62,55 @@ __all__ = [
     "version",
     "voiced_pitch",
 ]
+
+@typing.final
+class Assignment:
+    r"""
+    An **assignment** (slice S4b): distributes a `Target` to an annotator. A
+    dedicated object; a target may carry several (overlap → agreement). Created
+    by hand (`Project.add_assignment`) or in bulk (`assign_targets_randomly`).
+    """
+    @property
+    def id(self) -> builtins.int:
+        r"""
+        Assignment id (primary key).
+        """
+    @property
+    def target_id(self) -> builtins.int:
+        r"""
+        The target this assignment distributes.
+        """
+    @property
+    def annotator(self) -> builtins.str:
+        r"""
+        The annotator (free-text identifier).
+        """
+    @property
+    def role(self) -> builtins.str:
+        r"""
+        `"primary"` or `"secondary"`.
+        """
+    @property
+    def status(self) -> builtins.str:
+        r"""
+        Per-annotator progress: `assigned` / `in_progress` / `done`.
+        """
+    @property
+    def seed(self) -> typing.Optional[builtins.int]:
+        r"""
+        The `assign_targets_randomly` seed when batch-assigned, else `None`.
+        """
+    @property
+    def created_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC creation timestamp.
+        """
+    @property
+    def updated_at(self) -> builtins.str:
+        r"""
+        ISO 8601 UTC timestamp of the last update.
+        """
+    def __repr__(self) -> builtins.str: ...
 
 @typing.final
 class Audio:
@@ -970,6 +1020,43 @@ class Project:
         criterion's target tier and back-linked via `criterion_id`. Replaces
         this criterion's prior targets on the bundle. Returns the count.
         `python` criteria are rejected (run them in `sadda.criteria`).
+        """
+    def add_assignment(self, target_id: builtins.int, annotator: builtins.str, *, role: typing.Optional[builtins.str] = None, status: typing.Optional[builtins.str] = None, seed: typing.Optional[builtins.int] = None, extra: typing.Optional[builtins.str] = None) -> builtins.int:
+        r"""
+        Assigns a target to an annotator. `role` defaults to `"primary"`,
+        `status` to `"assigned"`. Advances the target `unassigned` → `assigned`.
+        Raises if the target is missing or it is already assigned to `annotator`.
+        Returns the new assignment id.
+        """
+    def assignments(self, bundle_id: builtins.int) -> builtins.list[Assignment]:
+        r"""
+        Lists a bundle's assignments (across all its targets).
+        """
+    def assignments_for_target(self, target_id: builtins.int) -> builtins.list[Assignment]:
+        r"""
+        Lists the assignments on a single target.
+        """
+    def update_assignment_status(self, id: builtins.int, status: builtins.str) -> None:
+        r"""
+        Sets an assignment's per-annotator `status` (`assigned` / `in_progress`
+        / `done`).
+        """
+    def set_assignment_annotator(self, id: builtins.int, annotator: builtins.str) -> None:
+        r"""
+        Reassigns an assignment to a different annotator.
+        """
+    def delete_assignment(self, id: builtins.int) -> None:
+        r"""
+        Deletes an assignment (idempotent). Reverts the target to `unassigned`
+        when its last assignment is removed and it was merely `assigned`.
+        """
+    def assign_targets_randomly(self, bundle_id: builtins.int, annotators: typing.Sequence[builtins.str], seed: builtins.int, *, role: typing.Optional[builtins.str] = None) -> builtins.int:
+        r"""
+        Distributes a bundle's currently-`unassigned` targets across `annotators`
+        with a deterministic, seed-driven shuffle (reproducible — same seed +
+        roster + targets → same assignment). Already-assigned targets are left
+        alone, so re-running after a roster change re-randomizes the remainder.
+        `role` defaults to `"primary"`. Returns the number assigned.
         """
     def run_criterion(self, id: builtins.int, bundle_id: builtins.int) -> builtins.int:
         r"""
