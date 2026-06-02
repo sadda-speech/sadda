@@ -411,19 +411,58 @@ pub fn windowed_autocorrelation(audio: &Audio, config: &PitchConfig) -> Vec<Pitc
     frames
 }
 
-/// Computes `r[τ] = Σ_n x[n] · x[n+τ]` for `τ = 0..=max_lag`.
+/// Computes `r[τ] = Σ_n x[n] · x[n+τ]` for `τ = 0..=max_lag` via the FFT
+/// (`autocorr = IFFT(|FFT(x)|²)`), in `O(N log N)` instead of the naive
+/// `O(N · max_lag)`. Returns the same (un-normalised) values as the time-domain
+/// sum — the signal is zero-padded to `≥ N + max_lag` so the result is the
+/// *linear* (not circular) autocorrelation over the requested lags. The FFT
+/// plans are cached per thread, so repeated calls (one per analysis frame)
+/// reuse them.
 fn autocorr_full(x: &[f32], max_lag: usize) -> Vec<f32> {
+    use realfft::RealFftPlanner;
+    use rustfft::num_complex::Complex;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static PLANNER: RefCell<RealFftPlanner<f32>> =
+            RefCell::new(RealFftPlanner::<f32>::new());
+    }
+
     let n = x.len();
     let max_lag = max_lag.min(n.saturating_sub(1));
-    let mut r = vec![0.0_f32; max_lag + 1];
-    for tau in 0..=max_lag {
-        let mut sum = 0.0_f32;
-        for i in 0..(n - tau) {
-            sum += x[i] * x[i + tau];
-        }
-        r[tau] = sum;
+    if n == 0 {
+        return vec![0.0; max_lag + 1];
     }
-    r
+    // Zero-pad to avoid circular wraparound for lags 0..=max_lag.
+    let fft_len = (n + max_lag + 1).next_power_of_two().max(2);
+
+    PLANNER.with(|p| {
+        let mut planner = p.borrow_mut();
+        let fwd = planner.plan_fft_forward(fft_len);
+        let inv = planner.plan_fft_inverse(fft_len);
+
+        let mut input = fwd.make_input_vec();
+        input[..n].copy_from_slice(x);
+        for v in input[n..].iter_mut() {
+            *v = 0.0;
+        }
+        let mut spectrum = fwd.make_output_vec();
+        fwd.process(&mut input, &mut spectrum)
+            .expect("rfft autocorrelation");
+
+        // Power spectrum (real); the inverse real-FFT of |X|² is the
+        // autocorrelation. `realfft`'s inverse is un-normalised, so we divide
+        // by `fft_len` to recover the time-domain sums exactly.
+        for c in spectrum.iter_mut() {
+            *c = Complex::new(c.re * c.re + c.im * c.im, 0.0);
+        }
+        let mut out = inv.make_output_vec();
+        inv.process(&mut spectrum, &mut out)
+            .expect("irfft autocorrelation");
+
+        let scale = 1.0 / fft_len as f32;
+        (0..=max_lag).map(|tau| out[tau] * scale).collect()
+    })
 }
 
 #[allow(dead_code)]
@@ -1652,6 +1691,27 @@ pub fn swipe(audio: &Audio, config: &PitchConfig) -> Vec<PitchFrame> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The FFT-based `autocorr_full` must return the same values as the naive
+    /// time-domain sum it replaced (so the pitch trackers' behaviour is
+    /// unchanged — only faster). Checks an arbitrary signal across all lags.
+    #[test]
+    fn fft_autocorrelation_matches_naive_sum() {
+        let x: Vec<f32> = (0..1500)
+            .map(|i| (i as f32 * 0.047).sin() + 0.3 * (i as f32 * 0.131).sin() - 0.2)
+            .collect();
+        let max_lag = 600;
+        let fft = autocorr_full(&x, max_lag);
+        for tau in 0..=max_lag {
+            let naive: f32 = (0..(x.len() - tau)).map(|i| x[i] * x[i + tau]).sum();
+            let tol = 1e-3 * (1.0 + naive.abs());
+            assert!(
+                (fft[tau] - naive).abs() <= tol,
+                "lag {tau}: fft {} vs naive {naive}",
+                fft[tau]
+            );
+        }
+    }
 
     fn sine_audio(sample_rate: u32, channels: u16, freq_hz: f32, duration_s: f32) -> Audio {
         let n_frames = (sample_rate as f32 * duration_s) as usize;

@@ -6,6 +6,16 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-01 — Perf: FFT-based pitch autocorrelation — ~700× faster, behaviour-preserving (P1)
+
+The `SADDA_PERF` instrumentation (design entry below) showed `measure_tracks` dominating a bundle switch — **52.8 s for a 104 s recording** (~0.5× realtime; a 1-hour sociophonetic session would be ~30 min, unusable). Cause: `windowed_autocorrelation`'s per-frame autocorrelation was the naive time-domain `O(N · max_lag)` double loop (`autocorr_full`) — ~1–5M strided mults/frame over ~10 k frames.
+
+Replaced `autocorr_full` with an **FFT autocorrelation** (`IFFT(|FFT(x)|²)`, zero-padded to `N + max_lag` for the *linear* result), `O(N log N)`, reusing thread-cached `realfft` plans (the spectrogram already pulls in `realfft`/`rustfft`). It returns the **same values** as the naive sum — new test `fft_autocorrelation_matches_naive_sum` asserts ≤0.1 % across all lags — so every tracker that uses it is unchanged; all 31 lib + 5 integration pitch tests stay green. Measured (`voiced_pitch` on synthetic tones): **~1300× realtime** (120 s → 83 ms), i.e. ~700× faster than before; an hour-long file's pitch now costs single-digit seconds. Both `autocorr_full` call sites benefit, and Python's `sadda.dsp` gets the speedup for free.
+
+**Surfaced separately (pre-existing, NOT from this change — the value-equality test proves it):** `windowed_autocorrelation` makes **octave-down errors** on pure tones when `2·period ≤ max_lag` (200 Hz→100, 150 Hz→75; 120 Hz ok) — the `r_a/r_w` window-correction boosts subharmonics, and the method's docstring already flags the missing octave-cost / Viterbi terms. Backlogged; the app's default measure-track f0 may want pYIN/SWIPE or octave-cost terms.
+
+Next in P1: the per-bundle LRU cache (free revisits) + frame parallelisation; then P2 async. The spectrogram is now the larger residual for very long files.
+
 ## 2026-06-01 — Design: bundle-switch responsiveness + the aggregate view — one signal-cache + async-compute layer (logged, not built)
 
 Responsiveness when switching bundles across a corpus is, per the user, make-or-break for sadda being usable as intended. The user also flagged that this is **coupled** to the planned "aggregate" view (all of a query's tokens shown as one concatenated timeline) — and they're right: the machinery that makes a switch snappy is exactly what the aggregate view needs. So this designs **one shared layer** for both, before any code.
