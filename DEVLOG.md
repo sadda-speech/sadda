@@ -6,6 +6,14 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-01 — Perf: the bundle-switch "slowness" was mostly a DEBUG build — optimise DSP in the dev profile
+
+Per-lane instrumentation revealed the alarming `measure_tracks` numbers were a `cargo run` **debug** build. Same 104 s signal, release vs debug: **f0 73 ms vs 4033 ms (55×)**, **formants 664 ms vs 10491 ms (16×)** — unoptimised Rust strips the SIMD + inlining that `rustfft` and the autocorr/LPC inner loops depend on. So every numeric lane was 16–55× slower than reality in debug, swamping the algorithmic picture (and explaining why the f0 FFT win "didn't show" — debug penalty hid it; the FFT fix still cut `measure_tracks` 52.8 → 14 s in debug, then this took it to ~1 s).
+
+Fix (workspace `Cargo.toml`): optimise *only the hot crates* in the dev profile — `[profile.dev.package.{sadda-engine, rustfft, realfft}] opt-level = 3` — leaving the app + binding crates at opt-level 0 (debuggable). **Verified**: a debug build's f0 dropped 4033 → 106 ms and formants 10491 → 893 ms (release-like). So plain `cargo run` is now usable for audio analysis; no `--release` needed for day-to-day testing. (One-time cost: a clean build recompiles those three crates optimised; incremental app rebuilds stay fast.)
+
+Net for a 104 s bundle switch (debug, after both perf fixes): `measure_tracks` ~1 s (f0 ~0.1 s + formants ~0.9 s + intensity ~0.01 s), from 52.8 s. **Residual for HOUR-long files**: formants (~30 s/hr) is now the dominant DSP lane → next optimisation target (FFT-based LPC autocorrelation and/or frame parallelisation), alongside the spectrogram and the LRU-cache / async layer (P1/P2) for compute-once + non-blocking. Per-lane track timing (`· f0 / · formants / · intensity`) added to the `SADDA_PERF` output.
+
 ## 2026-06-01 — Perf: FFT-based pitch autocorrelation — ~700× faster, behaviour-preserving (P1)
 
 The `SADDA_PERF` instrumentation (design entry below) showed `measure_tracks` dominating a bundle switch — **52.8 s for a 104 s recording** (~0.5× realtime; a 1-hour sociophonetic session would be ~30 min, unusable). Cause: `windowed_autocorrelation`'s per-frame autocorrelation was the naive time-domain `O(N · max_lag)` double loop (`autocorr_full`) — ~1–5M strided mults/frame over ~10 k frames.

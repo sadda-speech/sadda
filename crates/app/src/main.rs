@@ -4575,15 +4575,19 @@ fn compute_measure_tracks(env: &EnvelopeCache, cfg: MeasureTrackConfig) -> Measu
                 voicing_threshold: cfg.f0_voicing_threshold,
                 ..PitchConfig::default()
             };
+            let t = std::time::Instant::now();
             f0 = pitch(audio, &pcfg, PitchMethod::WindowedAutocorrelation);
+            perf_log("  · f0", t.elapsed());
         }
         if cfg.vad_visible {
             // VAD needs ONNX Runtime at runtime; a missing/incompatible
             // ORT surfaces as an error, shown as a hint in the lane.
+            let t = std::time::Instant::now();
             match vad_bundled(audio) {
                 Ok(frames) => vad = frames,
                 Err(e) => vad_error = Some(e.to_string()),
             }
+            perf_log("  · vad", t.elapsed());
         }
     }
 
@@ -4592,7 +4596,10 @@ fn compute_measure_tracks(env: &EnvelopeCache, cfg: MeasureTrackConfig) -> Measu
             n_formants: cfg.formant_count,
             ..FormantsConfig::default()
         };
-        formants(&env.mono_samples, sr, &fcfg)
+        let t = std::time::Instant::now();
+        let r = formants(&env.mono_samples, sr, &fcfg);
+        perf_log("  · formants", t.elapsed());
+        r
     } else {
         Vec::new()
     };
@@ -4600,7 +4607,10 @@ fn compute_measure_tracks(env: &EnvelopeCache, cfg: MeasureTrackConfig) -> Measu
     let intensity_frames = if cfg.intensity_visible {
         // 30 ms / 10 ms — the standard Praat-like intensity analysis
         // window; long enough to span a pitch period at the low end.
-        intensity(&env.mono_samples, sr, 0.030, 0.010)
+        let t = std::time::Instant::now();
+        let r = intensity(&env.mono_samples, sr, 0.030, 0.010);
+        perf_log("  · intensity", t.elapsed());
+        r
     } else {
         Vec::new()
     };
