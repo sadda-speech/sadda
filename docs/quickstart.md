@@ -62,6 +62,34 @@ bundle_id = proj.add_bundle(
 )
 ```
 
+## Large recordings
+
+Loading a bundle decodes the whole file into memory, so a single very
+long recording (hours) can be slow — or exceed RAM on a smaller machine.
+You can **probe** a file's size from its header alone first, with no
+samples decoded:
+
+```python
+info = sadda.probe_wav(Path("interview_3h.wav"))
+print(info.duration_seconds, info.decoded_bytes)  # decoded_bytes ≈ the RAM a full load costs
+```
+
+If a file is too large to work with comfortably, split it into
+contiguous pieces — each registered as its own bundle (`<prefix>_001`,
+`_002`, …). The split **streams** the source, so memory stays flat
+regardless of length:
+
+```python
+ids = proj.add_bundle_split(
+    "interview", Path("interview_3h.wav"), chunk_seconds=600  # 10-minute pieces
+)
+```
+
+In the desktop app this is automatic: **File → Add Bundle…** probes the
+file first, and if it's large enough to be risky it offers to split it
+(or add it as-is) before loading. (`probe_wav` is provisional and warns
+once on first use.)
+
 ## Run pitch and formants
 
 The DSP surface (`sadda.dsp.*`) is functional — every function takes

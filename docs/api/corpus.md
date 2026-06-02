@@ -22,6 +22,7 @@ Project loaders live at the top of the `sadda` package:
         - root
         - name
         - add_bundle
+        - add_bundle_split
         - bundles
         - rename_bundle
         - delete_bundle
@@ -73,6 +74,8 @@ Project loaders live at the top of the `sadda` package:
 ## Data types
 
 ::: sadda.Audio
+
+::: sadda.AudioProbe
 
 ::: sadda.Bundle
 
