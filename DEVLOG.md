@@ -6,6 +6,20 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-02 — GUI: selection timestamps + reset-spectrogram-settings button
+
+Two small app conveniences:
+- The **waveform header** now shows the active span selection's boundary times
+  and duration — `sel A–B s  (Δ C s)`, rendered strong against the weak
+  bundle/view line — whenever a selection exists (pure `format_selection`,
+  unit-tested; reads `TimelineState.selection`).
+- The **spectrogram toolbar** gained a **Reset** button (after Colormap) that
+  reverts window / hop / range / colormap to `SpectrogramConfig::default()`
+  (25 ms / 5 ms / Viridis / 70 dB); disabled when already at default (so it
+  reads as a no-op).
+
+App-only; +3 tests; gate green.
+
 ## 2026-06-02 — README + docs screenshot
 
 Wired the existing `assets/sadda_screenshot.png` (waveform + spectrogram + f0 /
