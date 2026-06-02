@@ -9276,7 +9276,7 @@ impl SaddaApp {
                         .desired_rows(8)
                         .code_editor()
                         .layouter(&mut layouter)
-                        .hint_text("# Python — pure stdlib only at E8.\n# `import sadda` lands in E9.\nprint('hello from sadda')\n"),
+                        .hint_text("# Embedded Python (stdlib). `import sadda.app` reads the live GUI:\nimport sadda.app\nprint(sadda.app.active_bundle())\n"),
                 );
             });
 
