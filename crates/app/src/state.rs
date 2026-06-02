@@ -288,7 +288,9 @@ pub struct EnvelopeCache {
     /// Mono-mixdown samples. Used by the waveform pane's per-frame
     /// re-bucketer (C5) and by the spectrogram cache's STFT
     /// (rebuilt on (window, hop, colormap, dynamic-range) change).
-    pub mono_samples: Vec<f32>,
+    /// `Arc` so the async-analysis worker (P2) can share it with the UI
+    /// without copying — important for hour-long recordings.
+    pub mono_samples: std::sync::Arc<Vec<f32>>,
 }
 
 /// Computes a min/max envelope over `samples` at `target_buckets`

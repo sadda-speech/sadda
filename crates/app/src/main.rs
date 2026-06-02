@@ -255,6 +255,14 @@ struct SaddaApp {
     /// switching back to a recently viewed bundle is instant (no re-load /
     /// re-DSP). `select_bundle` swaps `active_*` in and out of here.
     signal_cache: SignalCache,
+    /// P2: results from the async-analysis worker threads (spectrogram +
+    /// measure tracks computed off the UI thread). Drained each frame.
+    analysis_tx: std::sync::mpsc::Sender<AnalysisResult>,
+    analysis_rx: std::sync::mpsc::Receiver<AnalysisResult>,
+    /// The (bundle, config) a spectrogram / measure-track job is currently in
+    /// flight for, so we don't re-dispatch every frame while it computes.
+    pending_spectrogram: Option<(i64, SpectrogramConfig)>,
+    pending_tracks: Option<(i64, MeasureTrackConfig)>,
     /// D10: resolved reference-distribution overlay bands per lane.
     /// Refreshed when the View-menu selection changes.
     overlays: OverlayCache,
@@ -1050,6 +1058,7 @@ impl SaddaApp {
             .storage
             .and_then(|s| eframe::get_value::<PersistedState>(s, eframe::APP_KEY))
             .unwrap_or_default();
+        let (analysis_tx, analysis_rx) = std::sync::mpsc::channel();
         Self {
             app_state: AppState::NoProject,
             persisted,
@@ -1059,6 +1068,10 @@ impl SaddaApp {
             active_spectrogram: None,
             active_tracks: None,
             signal_cache: SignalCache::new(SIGNAL_CACHE_BUDGET_BYTES),
+            analysis_tx,
+            analysis_rx,
+            pending_spectrogram: None,
+            pending_tracks: None,
             overlays: OverlayCache::default(),
             reference: ReferenceView::default(),
             selected_annotation: None,
@@ -2160,7 +2173,7 @@ impl SaddaApp {
                         bundle_id,
                         sample_rate: audio.sample_rate,
                         duration_seconds: audio.duration_seconds(),
-                        mono_samples: mono,
+                        mono_samples: std::sync::Arc::new(mono),
                     }),
                     spectrogram: None,
                     tracks: None,
@@ -4367,9 +4380,11 @@ impl SaddaApp {
         }
     }
 
-    /// Rebuilds the spectrogram cache if stale (i.e. cached bundle id
-    /// or config differs from the current pair). On error, sets the
-    /// error banner and leaves the previous cache (if any) in place.
+    /// Dispatches a background spectrogram build if the cache is stale (P2):
+    /// the heavy STFT runs on a worker thread, the result is uploaded as a GPU
+    /// texture when [`poll_analysis`](Self::poll_analysis) receives it. No-op
+    /// while a build for this exact (bundle, config) is already in flight, so
+    /// the UI never blocks and we don't re-dispatch every frame.
     fn rebuild_spectrogram_if_stale(&mut self, ctx: &egui::Context) {
         let Some(env) = &self.active_envelope else {
             return;
@@ -4381,12 +4396,71 @@ impl SaddaApp {
                 return;
             }
         }
-        let t = std::time::Instant::now();
-        let built = build_spectrogram_texture(ctx, env, cfg);
-        perf_log("spectrogram", t.elapsed());
-        match built {
-            Ok(sc) => self.active_spectrogram = Some(sc),
-            Err(msg) => self.set_error(msg),
+        if self.pending_spectrogram == Some((bundle_id, cfg)) {
+            return;
+        }
+        let env = env.clone(); // cheap — mono samples are Arc-shared
+        let tx = self.analysis_tx.clone();
+        let ctx = ctx.clone();
+        self.pending_spectrogram = Some((bundle_id, cfg));
+        std::thread::spawn(move || {
+            let t = std::time::Instant::now();
+            let image = compute_spectrogram_image(&env, cfg);
+            perf_log("spectrogram", t.elapsed());
+            let _ = tx.send(AnalysisResult::Spectrogram {
+                bundle_id,
+                config: cfg,
+                image,
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    /// Drains completed async-analysis jobs (P2) and installs any that are
+    /// still current (the user may have switched bundles or changed config
+    /// while a job ran). Called once per frame before the `rebuild_*_if_stale`
+    /// dispatchers, so a just-arrived result is installed before we decide
+    /// whether to dispatch a fresh one.
+    fn poll_analysis(&mut self, ctx: &egui::Context) {
+        while let Ok(result) = self.analysis_rx.try_recv() {
+            match result {
+                AnalysisResult::Spectrogram {
+                    bundle_id,
+                    config,
+                    image,
+                } => {
+                    if self.pending_spectrogram == Some((bundle_id, config)) {
+                        self.pending_spectrogram = None;
+                    }
+                    let current = self.active_envelope.as_ref().map(|e| e.bundle_id)
+                        == Some(bundle_id)
+                        && self.persisted.spectrogram == config;
+                    if current {
+                        match image {
+                            Ok(img) => {
+                                self.active_spectrogram =
+                                    Some(spectrogram_cache_from_image(ctx, bundle_id, config, img));
+                            }
+                            Err(msg) => self.set_error(msg),
+                        }
+                    }
+                }
+                AnalysisResult::Tracks {
+                    bundle_id,
+                    config,
+                    tracks,
+                } => {
+                    if self.pending_tracks == Some((bundle_id, config)) {
+                        self.pending_tracks = None;
+                    }
+                    let current = self.active_envelope.as_ref().map(|e| e.bundle_id)
+                        == Some(bundle_id)
+                        && self.persisted.tracks == config;
+                    if current {
+                        self.active_tracks = Some(tracks);
+                    }
+                }
+            }
         }
     }
 
@@ -4429,11 +4503,12 @@ impl SaddaApp {
         }
     }
 
-    /// D10: recompute the measure tracks if the cache is stale for the
-    /// selected bundle + current [`MeasureTrackConfig`]. Pure CPU work
-    /// (no GPU upload, unlike the spectrogram), so it takes no `ctx`.
-    /// Skips the analysis entirely when every lane is hidden.
-    fn rebuild_tracks_if_stale(&mut self) {
+    /// D10 / P2: dispatch a background measure-track build (f0 / formants /
+    /// intensity) if the cache is stale. Runs the FFT/LPC work on a worker
+    /// thread; [`poll_analysis`](Self::poll_analysis) installs the result.
+    /// Skips entirely when every lane is hidden, and won't re-dispatch while a
+    /// build for this exact (bundle, config) is already in flight.
+    fn rebuild_tracks_if_stale(&mut self, ctx: &egui::Context) {
         let Some(env) = &self.active_envelope else {
             return;
         };
@@ -4450,10 +4525,24 @@ impl SaddaApp {
             // just toggled off doesn't pay to recompute.
             return;
         }
-        let t = std::time::Instant::now();
-        let tracks = compute_measure_tracks(env, cfg);
-        perf_log("measure_tracks", t.elapsed());
-        self.active_tracks = Some(tracks);
+        if self.pending_tracks == Some((bundle_id, cfg)) {
+            return;
+        }
+        let env = env.clone();
+        let tx = self.analysis_tx.clone();
+        let ctx = ctx.clone();
+        self.pending_tracks = Some((bundle_id, cfg));
+        std::thread::spawn(move || {
+            let t = std::time::Instant::now();
+            let tracks = compute_measure_tracks(&env, cfg);
+            perf_log("measure_tracks", t.elapsed());
+            let _ = tx.send(AnalysisResult::Tracks {
+                bundle_id,
+                config: cfg,
+                tracks,
+            });
+            ctx.request_repaint();
+        });
     }
 
     /// D10: refresh the per-lane overlay bands if the View-menu selection
@@ -4529,15 +4618,35 @@ fn perf_log(label: &str, elapsed: std::time::Duration) {
     }
 }
 
-/// Runs STFT + power-spectrogram + dB-normalise + colormap on the
-/// envelope cache's mono samples and uploads the result as an egui
-/// texture. Returns a fresh [`SpectrogramCache`] or an error message
-/// suitable for the bottom banner.
-fn build_spectrogram_texture(
-    ctx: &egui::Context,
+/// The CPU half of a spectrogram render — STFT + power + dB-normalise +
+/// colormap into an [`egui::ColorImage`]. Pure CPU (no `egui::Context`), so it
+/// runs on the async-analysis worker (P2); the UI thread then uploads the image
+/// as a texture (`SpectrogramImage` → [`SpectrogramCache`]).
+struct SpectrogramImage {
+    image: egui::ColorImage,
+    duration_seconds: f64,
+    nyquist_hz: f32,
+}
+
+/// A completed async analysis job (P2). It carries the bundle + config it was
+/// computed for, so the UI installs it only if that's still what's selected.
+enum AnalysisResult {
+    Spectrogram {
+        bundle_id: i64,
+        config: SpectrogramConfig,
+        image: Result<SpectrogramImage, String>,
+    },
+    Tracks {
+        bundle_id: i64,
+        config: MeasureTrackConfig,
+        tracks: MeasureTrackCache,
+    },
+}
+
+fn compute_spectrogram_image(
     env: &EnvelopeCache,
     cfg: SpectrogramConfig,
-) -> Result<SpectrogramCache, String> {
+) -> Result<SpectrogramImage, String> {
     let sr = env.sample_rate as f32;
     let window_samples = ((cfg.window_ms / 1000.0) * sr).round() as usize;
     let hop_samples = ((cfg.hop_ms / 1000.0) * sr).round() as usize;
@@ -4585,15 +4694,30 @@ fn build_spectrogram_texture(
 
     let rgba = colormap_bake(&display, display_width, shape.n_freq_bins, cfg.colormap);
     let image = egui::ColorImage::from_rgba_unmultiplied([display_width, shape.n_freq_bins], &rgba);
-    let texture = ctx.load_texture("spectrogram", image, egui::TextureOptions::LINEAR);
 
-    Ok(SpectrogramCache {
-        bundle_id: env.bundle_id,
-        config: cfg,
-        texture,
+    Ok(SpectrogramImage {
+        image,
         duration_seconds: env.duration_seconds,
         nyquist_hz: sr / 2.0,
     })
+}
+
+/// Uploads a worker-computed [`SpectrogramImage`] as a GPU texture (UI thread)
+/// and wraps it as a [`SpectrogramCache`] for the given bundle + config.
+fn spectrogram_cache_from_image(
+    ctx: &egui::Context,
+    bundle_id: i64,
+    config: SpectrogramConfig,
+    img: SpectrogramImage,
+) -> SpectrogramCache {
+    let texture = ctx.load_texture("spectrogram", img.image, egui::TextureOptions::LINEAR);
+    SpectrogramCache {
+        bundle_id,
+        config,
+        texture,
+        duration_seconds: img.duration_seconds,
+        nyquist_hz: img.nyquist_hz,
+    }
 }
 
 /// Reads the selected `continuous_vector` tier, normalises + bakes a
@@ -4695,7 +4819,7 @@ fn compute_measure_tracks(env: &EnvelopeCache, cfg: MeasureTrackConfig) -> Measu
     // either lane needs it. Recompute is rare (bundle / config change
     // only), so the one-off sample clone is fine.
     let audio = (cfg.f0_visible || cfg.vad_visible).then(|| sadda_engine::Audio {
-        samples: env.mono_samples.clone(),
+        samples: env.mono_samples.as_ref().clone(),
         sample_rate: sr,
         channels: 1,
     });
@@ -7069,7 +7193,11 @@ impl SaddaApp {
         // because egui stacks the first-registered bottom panel
         // outermost. Only shown when a bundle is loaded and the lane is
         // enabled in View → Measure Tracks.
-        self.rebuild_tracks_if_stale();
+        // P2: install any completed async analysis first, then dispatch fresh
+        // builds for whatever's still stale (so a just-arrived result is used
+        // rather than re-dispatched).
+        self.poll_analysis(ui.ctx());
+        self.rebuild_tracks_if_stale(ui.ctx());
         self.rebuild_overlays_if_stale();
         self.rebuild_embedding_heatmap_if_stale(ui.ctx());
         if self.active_envelope.is_some() {
@@ -9354,7 +9482,7 @@ mod rubric_ui_tests {
                     bundle_id: 0,
                     sample_rate: 16_000,
                     duration_seconds: 1.0,
-                    mono_samples: vec![0.0; samples],
+                    mono_samples: std::sync::Arc::new(vec![0.0; samples]),
                 }),
                 spectrogram: None,
                 tracks: None,
