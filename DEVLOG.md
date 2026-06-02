@@ -6,6 +6,16 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-02 — README + docs screenshot
+
+Wired the existing `assets/sadda_screenshot.png` (waveform + spectrogram + f0 /
+formant / intensity measure tracks + bundle sidebar + reference panel) into the
+README hero slot and the mkdocs landing page — copied to `docs/assets/` for the
+site (mkdocs serves only under `docs/`), referenced as `assets/sadda_screenshot.png`
+from both, matching the existing `annotation-cycle.svg` pattern. Validated with
+`mkdocs build --strict`. The asset predates today's f0 fix — fine as a
+representative shot; a fresh capture is worth doing eventually.
+
 ## 2026-06-02 — Help → Memory report (diagnostic)
 
 A snapshot diagnostic under the Help menu: system RAM (total / used / available,

@@ -84,6 +84,4 @@ _Raw captures land here; groomed into the sections below on request._
 
 ## Docs
 
-- [ ] **Add a screenshot to the README** (mechanical). Capture under WSLg during
-  a run, commit the asset (`assets/` or `docs/`), add a markdown image to
-  `README.md`. (raised 2026-06-01)
+_(empty)_
