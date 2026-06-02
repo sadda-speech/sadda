@@ -12,6 +12,7 @@ __all__ = [
     "AnnotatorProgress",
     "Assignment",
     "Audio",
+    "AudioProbe",
     "Bundle",
     "Calibration",
     "Citation",
@@ -68,6 +69,7 @@ __all__ = [
     "new_project",
     "open_project",
     "perturbation",
+    "probe_wav",
     "schema_version",
     "spectrogram",
     "stft",
@@ -267,6 +269,41 @@ class Audio:
     def mono(self) -> numpy.typing.NDArray[numpy.float32]:
         r"""
         Mono mixdown of the audio as a 1-D float32 NumPy array.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class AudioProbe:
+    r"""
+    Header-only summary of a WAV file (see `sadda.probe_wav`): its size without
+    the cost of decoding. Lets a caller gauge a file's in-memory footprint
+    before loading it.
+    """
+    @property
+    def sample_rate(self) -> builtins.int:
+        r"""
+        Sample rate in Hz.
+        """
+    @property
+    def channels(self) -> builtins.int:
+        r"""
+        Number of channels.
+        """
+    @property
+    def n_frames(self) -> builtins.int:
+        r"""
+        Number of frames (samples per channel).
+        """
+    @property
+    def duration_seconds(self) -> builtins.float:
+        r"""
+        Duration in seconds.
+        """
+    @property
+    def decoded_bytes(self) -> builtins.int:
+        r"""
+        Bytes a full decode would occupy (interleaved f32): the RAM cost of
+        loading this file whole.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -1080,6 +1117,15 @@ class Project:
         `signals/original/` directory and recording its metadata in the corpus
         database. Returns the new bundle's id. Optional kwargs attach the
         bundle to a Session / Speaker and set a JSON `extra` payload.
+        """
+    def add_bundle_split(self, name_prefix: builtins.str, source_audio_path: builtins.str | os.PathLike | pathlib.Path, chunk_seconds: builtins.float) -> builtins.list[builtins.int]:
+        r"""
+        Splits a (typically very long) WAV into contiguous chunks of about
+        `chunk_seconds` each, writing every chunk into the project as its own
+        bundle named `"<name_prefix>_NNN"`. The source is streamed, so memory
+        stays flat regardless of length — this is how a file too large to load
+        whole still gets in. Chunk audio preserves the source format; the final
+        chunk holds the remainder. Returns the new bundle ids in order.
         """
     def bundles(self) -> builtins.list[Bundle]:
         r"""
@@ -2296,6 +2342,13 @@ def perturbation(audio: Audio, *, pitch_floor_hz: builtins.float = 75.0, pitch_c
     Computes jitter + shimmer for a sustained phonation. Raises
     `ValueError` if no voiced f0 is found or too few periods are
     detected (no-silent-fallback). Praat is the validation reference.
+    """
+
+def probe_wav(path: builtins.str | os.PathLike | pathlib.Path) -> AudioProbe:
+    r"""
+    Reads only a WAV file's header (no samples decoded) to learn its size.
+    Returns a sadda.AudioProbe — cheap regardless of file length. Use it to
+    decide whether a file is large enough to warrant splitting before loading.
     """
 
 def schema_version() -> builtins.int:

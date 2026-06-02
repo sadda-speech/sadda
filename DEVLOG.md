@@ -6,6 +6,54 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-02 — Large-file ingest guard: warn-and-split on add
+
+The pragmatic stand-in for the (deferred) windowed reader — meet the problem where it bites, at ingest. When a user adds a WAV whose **full decode would exceed ~512 MiB** of RAM (interleaved f32; the honest predictor of the load cost — ≈ a 2.3 h mono 16 kHz file, or ~13 min of 44.1 kHz stereo, same RAM hit), warn them and offer to **split it into contiguous pieces**, each its own bundle. The split **streams** the source (read-a-sample-write-a-sample, rolling to a fresh chunk file every N frames), so memory stays flat regardless of length — a file too large to *load* still gets *in*. Also the key low-RAM mitigation: it turns one un-openable long file into pieces that fit a 4 GB box.
+
+Three surfaces:
+- **Engine**: `Audio::probe(path) -> AudioProbe` (header-only — `hound` `duration()` reads the data-chunk size, no samples decoded; reports `decoded_bytes`); `Project::add_bundle_split(name_prefix, source, chunk_seconds) -> Vec<i64>` streaming chunked split, preserving the source's exact format (sample rate / channels / bit depth), final chunk = remainder, clean cuts (no overlap), each chunk landed as `"<prefix>_NNN"`. Refactored the bundle INSERT into a shared `insert_bundle_row`. `TierType: Hash` (from P3) unrelated. 2 tests (probe header math; 1000-frame file → 400/400/200 chunks summing back, format preserved, files on disk).
+- **Python**: `sadda.probe_wav(path) -> AudioProbe` + `Project.add_bundle_split(...)`, provisional; stubs regenerated; 2 pytests.
+- **GUI**: `add_bundle_guarded` probes on Add Bundle…; over-threshold raises a "Large audio file" dialog (live piece-count as you edit the per-piece minutes, default ≈ half the ceiling capped at 15 min) offering **Split / Add as-is / Cancel**. Pure helpers `human_bytes` + `split_piece_count`, both tested.
+
+Gate: engine 203 lib tests, python +2, app 83 tests, clippy clean, stubs no-drift. Deliberately *not* built: the windowed reader / peak cache (deferred — see the design entry below), reference-in-place ingest, FLAC. v1 cut: split is whole-file contiguous only (no per-RoI or silence-aware splitting).
+
+## 2026-06-02 — Design: windowed reader + multi-resolution peak cache (scale to long files) — DEFERRED
+
+> **UPDATE 2026-06-02 (course correction):** on reflection the user judged this **premature / possibly unnecessary** for now — ultra-long *single* files are uncommon in practice. So this full design is **deferred to "planning for if long files become an issue"** (backlogged), NOT built. What ships *instead* is a small, pragmatic **warn-and-split-on-ingest guard**: when a user adds a file large enough to be problematic, warn them and offer to break it into manageable contiguous pieces (each its own bundle). The design below is kept verbatim as the record for if/when the windowed reader is revisited; treat the "Decisions / Slices (W0–W3)" as the *future* plan, not the current one.
+>
+> **Low-RAM framing (2026-06-02 follow-up):** the stronger argument for the windowed reader isn't "hundreds of hours" — it's *older / lower-RAM machines*. Today peak RAM ≈ longest open file × ~3–4 (decode + mono copy + spectrogram), so a single ~6 hr file (~4–5 GB working set) is un-openable on a 4–8 GB box, while short-file phonetics work is already fine there. So: **warn-and-split is the low-RAM mitigation now** (splitting streams, flat memory; turns one un-openable file into pieces that fit), and the **windowed reader is what would let long files open on the *least* capable hardware without splitting** — more valuable on small machines than big ones. Two cheap low-RAM wins captured separately in BACKLOG: (1) make the P1 cache budget `min(768 MiB, ~15% system RAM)` instead of a constant; (2) reference-in-place / FLAC ingest to ease disk doubling (small SSD/eMMC).
+
+Scoping the engine for "hundreds of hours" corpora (ML-research / long sociophonetic sessions). Per the user, ultra-long *single* files are uncommon — the goal is for the engine to **do something sensible** at the extremes rather than OOM. The windowed reader + peak cache were sketched as the eventual proper fix; this entry records that design before any build. (Superseded for now by the warn-and-split guard — see the update banner above and the dedicated ship entry.)
+
+### The hard wall today
+`load_audio` → `Audio::from_wav_path` decodes the *entire* WAV into a `Vec<f32>`, and the renderer `.collect()`s a mono copy on top — no windowed/streaming read anywhere. Numbers (16 kHz mono): 1 hr ≈ 230 MB for `samples` alone; the 768 MB P1 cache holds ~2 such bundles; a single ~6 hr file (~1.4 GB) is effectively un-openable. Ingest also `std::fs::copy`s every file (2× disk; WAV uncompressed ≈ 115 MB/hr mono, ≈ 635 MB/hr 44.1k stereo). The just-shipped P3 `build_concordance` loads *all* matched bundles into one HashMap → OOMs on a big corpus (acute, easy fix: stream bundle-by-bundle since tokens are already bundle-sorted).
+
+### The two pieces, and their division of labor
+- **Peak cache** — whole-file, tiny (~1 MB/hr), persisted. Answers *"what does the file look like, zoomed out."* A waveform pane is ~1500 px; one column covers tens of thousands of samples and can only draw a **min/max** vertical line. So the cache stores the exact per-bucket **min/max(/rms)** — NOT an interpolation; at a given zoom a peak-drawn waveform is pixel-identical to a sample-drawn one. **Multi-resolution**: precompute at geometric decimation levels (base bucket 256, ×4 per level, up to ~1 peak/file). min/max compose associatively, so rendering any zoom = pick the finest level whose bucket ≤ the column span and aggregate a handful of peaks (min-of-mins/max-of-maxes), exact. Build folds `hound`'s sample *iterator* into buckets (streamed, O(1) memory) → safe for arbitrarily long files. Storage ≈ 1.3× the finest level.
+- **Windowed reader** — `read_window(start_frame, n_frames) -> Audio` via `hound` seek-to-frame + read N (fixed-stride PCM; WAV-only, our only ingest format). Answers *"give me real samples for the slab on screen"* for spectrogram / f0+intensity / playback / deep zoom. Short files just call it once for the whole range (the eager fast path).
+
+### How it generalizes P1/P2 (not thrown away)
+`EnvelopeCache { Arc<Vec<f32>> }` goes from *whole file* → *current window* (+ frame offset) + a handle to the whole-file peak cache. Waveform renders from `PeakCache::render_range(view, n_px)` (never touches raw samples); spectrogram/measure-tracks compute over the **visible window** read via `read_window`. P1 `SignalCache` splits into many tiny **peak caches** (whole working set) + a bounded **window-signal cache** keyed by `(bundle, window, config)`. P2 async now fires on **bundle switch AND pan/zoom past the loaded window**; `poll_analysis` staleness key gains the window range. The renderer's `active_*` reads keep their shape; only what fills them changes.
+
+### Behavior change (explicit)
+Detail views cover the **visible slab + margin** and **recompute on pan** (the Praat-LongSound / Audacity tradeoff) for files past a **size threshold**; short files keep the eager whole-file path (free panning, simpler). Nothing regresses for the common case; long files trade free-pan for being openable.
+
+### Prior art
+Praat **LongSound** (in-RAM `Sound` vs on-demand-windowed `LongSound` — the direct precedent); Audacity block files + 256:1/65536:1 **summary** levels; BBC `audiowaveform`/peaks.js precomputed peak files; Lhotse/WebDataset manifest-of-references (reference-not-copy) from speech-ML; DAW `.reapeaks` + streaming + reference-in-place media.
+
+### Decisions (Q&A 2026-06-02)
+- **Storage**: compact **binary blob** per bundle in `signals/derived/peaks/` (display infra, not analysis data — keep it tiny/fast; own a minor format rather than bend Parquet to it).
+- **Build timing**: **configurable** — lazy-on-first-open by default (persist, rebuild if missing or `n_frames` mismatch), with an opt-in **precompute-on-ingest** for bulk imports you'll browse later.
+- **v1 scope**: **all of W0–W3 in one push** — long files work end-to-end, not just navigable.
+
+### Slices (three-surface each)
+- **W0** — sensible guard: refuse/warn on open if decoded size would blow a RAM ceiling (the safety net; lands first).
+- **W1** — peak cache: engine build+persist (streaming)+`render_range`; Python `bundle.waveform_peaks(start,end,cols)`; app waveform renders from peaks. (Helps short files too — cheaper render.)
+- **W2** — windowed reader: engine `read_window`; Python `bundle.read_window`; tests. (Pure addition.)
+- **W3** — window-driven detail views (the invasive integration): spectrogram + measure-tracks over the visible window; generalize P1/P2 cache + staleness to `(bundle, window, config)`; eager-vs-windowed threshold; async re-read on pan/zoom.
+
+Tactical aside to fold in: fix `build_concordance` to stream bundle-by-bundle (don't hold all source audio at once), and FLAC/compressed ingest stays on the backlog (orthogonal ~2× disk win).
+
 ## 2026-06-01 — P3: aggregate concordance view — concatenate corpus tokens into one bundle
 
 The "aggregate view" the user asked for (see the design entry below): a single waveform/spectrogram/tier view that shows *all* of a query's tokens as if they were one sound file in sequence. Built as `Project::build_concordance(tier_name, labels, dest_name, gap_seconds)` — chosen design (per the user): **tier + label filter** as the token source, **token + remapped context**, materialised as a **read-only derived bundle** (not a virtual overlay), so it rides the *existing* render + P1/P2 cache/async layer for free rather than needing a new playback path.

@@ -26,7 +26,7 @@ pub mod refdist;
 pub mod storage;
 pub mod units;
 
-pub use audio::Audio;
+pub use audio::{Audio, AudioProbe};
 pub use citation::{Citation, citation_for};
 pub use clinical::{
     CppsConfig, GneConfig, H1H2Config, HnrConfig, HnrDConfig, PerturbationConfig,

@@ -1975,6 +1975,23 @@ impl PyProject {
             .map_err(engine_err_to_py)
     }
 
+    /// Splits a (typically very long) WAV into contiguous chunks of about
+    /// `chunk_seconds` each, writing every chunk into the project as its own
+    /// bundle named `"<name_prefix>_NNN"`. The source is streamed, so memory
+    /// stays flat regardless of length — this is how a file too large to load
+    /// whole still gets in. Chunk audio preserves the source format; the final
+    /// chunk holds the remainder. Returns the new bundle ids in order.
+    fn add_bundle_split(
+        &self,
+        name_prefix: &str,
+        source_audio_path: PathBuf,
+        chunk_seconds: f64,
+    ) -> PyResult<Vec<i64>> {
+        self.inner
+            .add_bundle_split(name_prefix, source_audio_path, chunk_seconds)
+            .map_err(engine_err_to_py)
+    }
+
     /// Lists all bundles in id order.
     fn bundles(&self) -> PyResult<Vec<PyBundle>> {
         self.inner
@@ -3295,6 +3312,68 @@ fn load_wav(path: PathBuf) -> PyResult<PyAudio> {
     Ok(PyAudio { inner: audio })
 }
 
+/// Reads only a WAV file's header (no samples decoded) to learn its size.
+/// Returns a sadda.AudioProbe — cheap regardless of file length. Use it to
+/// decide whether a file is large enough to warrant splitting before loading.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn probe_wav(path: PathBuf) -> PyResult<PyAudioProbe> {
+    let inner = sadda_engine::Audio::probe(&path).map_err(engine_err_to_py)?;
+    Ok(PyAudioProbe { inner })
+}
+
+/// Header-only summary of a WAV file (see `sadda.probe_wav`): its size without
+/// the cost of decoding. Lets a caller gauge a file's in-memory footprint
+/// before loading it.
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "AudioProbe", frozen)]
+struct PyAudioProbe {
+    inner: sadda_engine::AudioProbe,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyAudioProbe {
+    /// Sample rate in Hz.
+    #[getter]
+    fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate
+    }
+    /// Number of channels.
+    #[getter]
+    fn channels(&self) -> u16 {
+        self.inner.channels
+    }
+    /// Number of frames (samples per channel).
+    #[getter]
+    fn n_frames(&self) -> u64 {
+        self.inner.n_frames
+    }
+    /// Duration in seconds.
+    #[getter]
+    fn duration_seconds(&self) -> f64 {
+        self.inner.duration_seconds
+    }
+    /// Bytes a full decode would occupy (interleaved f32): the RAM cost of
+    /// loading this file whole.
+    #[getter]
+    fn decoded_bytes(&self) -> u64 {
+        self.inner.decoded_bytes
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AudioProbe(sample_rate={}, channels={}, n_frames={}, duration_seconds={:.4}, \
+             decoded_bytes={})",
+            self.inner.sample_rate,
+            self.inner.channels,
+            self.inner.n_frames,
+            self.inner.duration_seconds,
+            self.inner.decoded_bytes,
+        )
+    }
+}
+
 /// Creates a new sadda project at `path` (which must not already exist).
 /// Returns a sadda.Project handle ready for `.add_speaker(...)` /
 /// `.add_session(...)` / `.add_bundle(...)` calls.
@@ -4115,6 +4194,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(load_wav, m)?)?;
+    m.add_function(wrap_pyfunction!(probe_wav, m)?)?;
     m.add_function(wrap_pyfunction!(f0, m)?)?;
     m.add_function(wrap_pyfunction!(hann, m)?)?;
     m.add_function(wrap_pyfunction!(hamming, m)?)?;
@@ -4141,6 +4221,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(new_project, m)?)?;
     m.add_function(wrap_pyfunction!(open_project, m)?)?;
     m.add_class::<PyAudio>()?;
+    m.add_class::<PyAudioProbe>()?;
     m.add_class::<PyBundle>()?;
     m.add_class::<PySpeaker>()?;
     m.add_class::<PySession>()?;
