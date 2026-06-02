@@ -5216,7 +5216,11 @@ fn compute_measure_tracks(env: &EnvelopeCache, cfg: MeasureTrackConfig) -> Measu
                 ..PitchConfig::default()
             };
             let t = std::time::Instant::now();
-            f0 = pitch(audio, &pcfg, PitchMethod::WindowedAutocorrelation);
+            // Boersma (the canonical default) is octave-robust; the simpler
+            // windowed-autocorrelation tracker latched onto subharmonics of
+            // clean tones (150→75, 250→83.3). ~1.6× slower but still ~40 ms for
+            // 30 s of 44.1 kHz audio, and this lane is computed async (P2).
+            f0 = pitch(audio, &pcfg, PitchMethod::default());
             perf_log("  · f0", t.elapsed());
         }
         if cfg.vad_visible {

@@ -6,6 +6,41 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-02 — Fix: f0 octave-down errors — default tracker → Boersma
+
+The app's measure-track f0 — and Python `voiced_pitch`, and the criteria `f0`
+signal — defaulted to `windowed_autocorrelation`, which on clean tones latches
+onto **subharmonics**. A diagnostic across the band showed **150→75, 250→83.3,
+300→100** under `PitchConfig::default()`: the tracker picks the global max of
+`r_a(τ)/r_w(τ)`, and the window-correction over-inflates long-lag subharmonic
+peaks because it has no octave cost and no path-finding. The faithful `Boersma`
+tracker (octave-cost + octave-jump-cost + Viterbi) — which already existed and
+already had an octave-robustness test — reports every tone correctly
+(150/200/220/250/300/400). It simply predated the app default and was never
+wired in.
+
+**Fix:** make `PitchMethod::Boersma` the **canonical default** (`impl Default
+for PitchMethod`) and route all three default call sites through
+`PitchMethod::default()`: app `compute_measure_tracks`, engine `signal_set`
+(criteria `f0`), and Python `voiced_pitch(method="boersma")` (docstring + stub
+updated). Perf is a non-issue: Boersma is ~1.6× `windowed_ac` but only ~39 ms
+for 30 s of 44.1 kHz audio (release), and the f0 lane is async (P2).
+`windowed_autocorrelation` stays a selectable method, now with a doc-comment
+warning about its subharmonic weakness.
+
+Three surfaces: **engine** (`impl Default`; `signal_set`; tests
+`default_pitch_method_is_boersma` + `boersma_tracks_pure_sines_without_subharmonic_errors`),
+**Python** (default + docstring + stub + `test_voiced_pitch_default_method_is_boersma_and_octave_robust`
+guarding 150/220/250 Hz), **app** (measure-track default).
+
+While here, hardened the local gate: `just pytest` now rebuilds the extension
+(`maturin develop`, `CONDA_PREFIX` unset) before running — `uv run` alone won't
+rebuild on Rust-source changes, so pytest had been testing a **stale wheel**,
+which masked this fix's Python side until caught. (Separately backlogged: the
+`stubs` recipe's pre-commit `git diff` ergonomics.)
+
+Gate: green — fmt · clippy · build · test · download · stubs · pytest (221 passed / 6 skipped).
+
 ## 2026-06-02 — Large-file ingest guard: warn-and-split on add
 
 The pragmatic stand-in for the (deferred) windowed reader — meet the problem where it bites, at ingest. When a user adds a WAV whose **full decode would exceed ~512 MiB** of RAM (interleaved f32; the honest predictor of the load cost — ≈ a 2.3 h mono 16 kHz file, or ~13 min of 44.1 kHz stereo, same RAM hit), warn them and offer to **split it into contiguous pieces**, each its own bundle. The split **streams** the source (read-a-sample-write-a-sample, rolling to a fresh chunk file every N frames), so memory stays flat regardless of length — a file too large to *load* still gets *in*. Also the key low-RAM mitigation: it turns one un-openable long file into pieces that fit a 4 GB box.

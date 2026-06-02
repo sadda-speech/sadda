@@ -88,18 +88,24 @@ def test_voiced_pitch_returns_three_arrays() -> None:
         assert len(times) == len(freqs) == len(voicing)
 
 
-def test_voiced_pitch_default_method_is_windowed_autocorrelation() -> None:
-    """Default method should produce sub-Hz precision on a clean sine
-    (windowed_autocorrelation does parabolic interpolation; the naive
-    'autocorrelation' method is capped at integer-lag precision)."""
-    with tempfile.TemporaryDirectory() as td:
-        wav = Path(td) / "sine.wav"
-        _write_sine_wav(wav, freq=220.0, sample_rate=16_000, duration_s=0.5)
-        audio = sadda.load_wav(str(wav))
-        times, freqs, voicing = sadda.dsp.voiced_pitch(audio)
-        mid = len(freqs) // 2
-        assert abs(float(freqs[mid]) - 220.0) < 1.0
-        assert float(voicing[mid]) > 0.7
+def test_voiced_pitch_default_method_is_boersma_and_octave_robust() -> None:
+    """The default tracker is now the octave-robust Boersma (was
+    windowed_autocorrelation, which latched onto subharmonics of clean
+    tones — 150→75, 250→83.3). The default must report the true f0, not a
+    subharmonic, across the band."""
+    for freq in (150.0, 220.0, 250.0):
+        with tempfile.TemporaryDirectory() as td:
+            wav = Path(td) / "sine.wav"
+            _write_sine_wav(wav, freq=freq, sample_rate=16_000, duration_s=0.6)
+            audio = sadda.load_wav(str(wav))
+            _times, freqs, voicing = sadda.dsp.voiced_pitch(audio)
+            voiced = freqs[voicing >= 0.45]
+            assert len(voiced) > 5, f"expected voiced frames at {freq} Hz"
+            median_f0 = float(np.median(voiced))
+            assert abs(median_f0 - freq) < 3.0, (
+                f"default voiced_pitch octave/subharmonic error at {freq} Hz: "
+                f"got {median_f0:.1f} Hz"
+            )
 
 
 def test_voiced_pitch_naive_method_also_works() -> None:
