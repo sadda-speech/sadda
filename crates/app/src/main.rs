@@ -1010,11 +1010,105 @@ impl CachedBundleSignals {
     }
 }
 
-/// Cap on bytes retained by the [`SignalCache`] (≈ the mono envelopes). Memory-
-/// bounded rather than count-bounded because recordings span seconds to hours;
-/// at ~3.5 MB per minute of mono f32 this holds tens of short clips or a couple
-/// of hour-long sessions. Tunable.
-const SIGNAL_CACHE_BUDGET_BYTES: usize = 768 * 1024 * 1024;
+/// Upper bound on the adaptive [`SignalCache`] budget (see
+/// [`signal_cache_budget_bytes`]). Memory-bounded rather than count-bounded
+/// because recordings span seconds to hours; at ~3.5 MB per minute of mono f32
+/// this holds tens of short clips or a couple of hour-long sessions.
+const SIGNAL_CACHE_BUDGET_CAP_BYTES: usize = 768 * 1024 * 1024;
+
+/// Total physical RAM in bytes, or `None` when it can't be determined on this
+/// platform. Uses POSIX `sysconf` (Linux + macOS — `libc` is already in the
+/// tree); returns `None` elsewhere (e.g. Windows), where callers fall back to
+/// the fixed cap.
+fn system_ram_bytes() -> Option<u64> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `sysconf` is a side-effect-free query with no preconditions;
+        // it returns -1 for an unsupported name or on error, treated as unknown.
+        let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        (pages > 0 && page_size > 0).then(|| pages as u64 * page_size as u64)
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Adaptive cache budget: the smaller of the fixed cap and ~15% of system RAM,
+/// so a low-RAM box (e.g. 4 GB) doesn't surrender a third of its memory to the
+/// swap cache. Falls back to the full cap when RAM is unknown. Pure, so the
+/// policy is unit-testable without touching the real machine.
+fn cache_budget_for_ram(ram_bytes: Option<u64>, cap: usize) -> usize {
+    match ram_bytes {
+        // `ram / 100 * 15` (not `ram * 15 / 100`) avoids overflow on absurd RAM;
+        // the lost precision is sub-byte.
+        Some(ram) => (ram / 100 * 15).min(cap as u64) as usize,
+        None => cap,
+    }
+}
+
+/// The signal-cache budget for this machine; logged once under `SADDA_DEBUG`.
+fn signal_cache_budget_bytes() -> usize {
+    let ram = system_ram_bytes();
+    let budget = cache_budget_for_ram(ram, SIGNAL_CACHE_BUDGET_CAP_BYTES);
+    use std::sync::OnceLock;
+    static LOGGED: OnceLock<()> = OnceLock::new();
+    LOGGED.get_or_init(|| {
+        let ram_str = ram
+            .map(|r| format!("{} MiB", r / (1024 * 1024)))
+            .unwrap_or_else(|| "unknown".to_string());
+        crate::debug::log(&format!(
+            "signal-cache budget: {} MiB (system RAM: {ram_str})",
+            budget / (1024 * 1024),
+        ));
+    });
+    budget
+}
+
+#[cfg(test)]
+mod cache_budget_tests {
+    use super::{SIGNAL_CACHE_BUDGET_CAP_BYTES as CAP, cache_budget_for_ram, system_ram_bytes};
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    #[test]
+    fn caps_at_the_ceiling_on_large_ram() {
+        // 16 GiB → 15% ≈ 2.4 GiB, clamped to the cap.
+        assert_eq!(cache_budget_for_ram(Some(16 * GIB), CAP), CAP);
+    }
+
+    #[test]
+    fn shrinks_to_15pct_on_low_ram() {
+        let ram = 4 * GIB; // 4 GB box
+        let got = cache_budget_for_ram(Some(ram), CAP);
+        assert_eq!(got, (ram / 100 * 15) as usize); // ≈ 614 MiB
+        assert!(got < CAP, "low-RAM budget should be below the cap");
+    }
+
+    #[test]
+    fn falls_back_to_cap_when_ram_unknown() {
+        assert_eq!(cache_budget_for_ram(None, CAP), CAP);
+    }
+
+    #[test]
+    fn boundary_at_just_over_5gib_returns_cap() {
+        // 15% crosses the 768 MiB cap at RAM = cap / 0.15 ≈ 5.0 GiB.
+        assert_eq!(cache_budget_for_ram(Some(6 * GIB), CAP), CAP);
+        assert!(cache_budget_for_ram(Some(5 * GIB), CAP) < CAP);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn system_ram_is_plausible_on_unix() {
+        let ram = system_ram_bytes();
+        assert!(ram.is_some(), "sysconf returned no RAM on a unix host");
+        assert!(
+            ram.unwrap() >= 512 * 1024 * 1024,
+            "implausibly small RAM: {ram:?}",
+        );
+    }
+}
 
 /// A small most-recently-used cache of per-bundle derived signals, bounded by a
 /// byte budget. Used as a *swap* store: `select_bundle` pops the target (if
@@ -1133,7 +1227,7 @@ impl SaddaApp {
             active_envelope: None,
             active_spectrogram: None,
             active_tracks: None,
-            signal_cache: SignalCache::new(SIGNAL_CACHE_BUDGET_BYTES),
+            signal_cache: SignalCache::new(signal_cache_budget_bytes()),
             analysis_tx,
             analysis_rx,
             pending_spectrogram: None,
@@ -1188,7 +1282,7 @@ impl SaddaApp {
                 self.clear_bundle_selection();
                 // Bundle ids are per-project — drop any cached signals so a new
                 // project can't hit a stale entry under a colliding id.
-                self.signal_cache = SignalCache::new(SIGNAL_CACHE_BUDGET_BYTES);
+                self.signal_cache = SignalCache::new(signal_cache_budget_bytes());
                 self.error = None;
             }
             Err(e) => self.set_error(format!("Failed to open project: {e}")),
@@ -1206,7 +1300,7 @@ impl SaddaApp {
                     name,
                 };
                 self.clear_bundle_selection();
-                self.signal_cache = SignalCache::new(SIGNAL_CACHE_BUDGET_BYTES);
+                self.signal_cache = SignalCache::new(signal_cache_budget_bytes());
                 self.error = None;
             }
             Err(e) => self.set_error(format!("Failed to create project: {e}")),

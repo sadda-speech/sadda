@@ -51,13 +51,6 @@ _Raw captures land here; groomed into the sections below on request._
   views) in the DEVLOG entry. (deferred 2026-06-02; interim mitigation =
   warn-and-split-on-ingest, shipped)
 
-- [ ] **Adaptive signal-cache budget** (cheap low-RAM win, independent of the
-  above). Today `SIGNAL_CACHE_BUDGET_BYTES` is a hard 768 MiB — fine on a 16 GB
-  workstation, hostile on a 4 GB box where it competes with everything else.
-  Query total system RAM at startup and set the budget to `min(768 MiB, ~15% of
-  system RAM)`. Makes sadda behave much better on constrained machines with a
-  few lines. (raised 2026-06-02 during the low-resource-machines discussion)
-
 ## Views
 
 - [ ] **Aggregate "concatenated-timeline" view over a corpus** (design-laden;
