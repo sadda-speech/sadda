@@ -6,6 +6,15 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-02 — Fix: script-panel placeholder was outdated (E8/E9 jargon)
+
+The embedded Python panel's ghost text read "pure stdlib only at E8 / `import
+sadda` lands in E9" — internal slice codes, and "lands in E9" implied the GUI
+namespace wasn't available yet. E9 shipped long ago, so updated to "Embedded
+Python (stdlib). `import sadda.app` reads the live GUI:" with a runnable example
+(`sadda.app.active_bundle()`) — correct because `run_script_buffer` executes
+inside `with_snapshot_active`. One-line `hint_text` change.
+
 ## 2026-06-02 — GUI: selection timestamps + reset-spectrogram-settings button
 
 Two small app conveniences:
