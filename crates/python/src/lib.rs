@@ -3683,17 +3683,19 @@ fn parse_lpc_method(s: &str) -> PyResult<sadda_engine::dsp::LpcMethod> {
 /// both Praat-faithful and librosa-faithful expectations:
 ///
 /// **Autocorrelation family:**
-/// - `"windowed_autocorrelation"` (default) — adopts Boersma 1993's
-///   window-correction idea (divides windowed-signal autocorrelation by
-///   window autocorrelation); fast single-peak tracker. Strict
-///   improvement on `"autocorrelation"`.
+/// - `"boersma"` (**default**) — **faithful Boersma 1993 / Praat `Sound:
+///   To Pitch (ac)…`** with `very_accurate = false`. Multi-candidate
+///   per-frame detection + Viterbi path-finder with octave-cost /
+///   octave-jump-cost / voiced-unvoiced-cost terms. Robust to halving /
+///   doubling / transient errors; Praat-validated. The default because it
+///   does not latch onto subharmonics of clean tones the way the simpler
+///   trackers below do (e.g. 150→75, 250→83.3).
+/// - `"windowed_autocorrelation"` — adopts Boersma 1993's window-correction
+///   idea (divides windowed-signal autocorrelation by window
+///   autocorrelation); fast single-peak tracker, but **prone to
+///   subharmonic / octave-down errors** (no octave cost or path-finding).
 /// - `"autocorrelation"` — naive time-domain autocorrelation (Phase-0
 ///   tracker; what `sadda.dsp.f0(...)` calls).
-/// - `"boersma"` — **faithful Boersma 1993 / Praat `Sound: To Pitch
-///   (ac)…`** with `very_accurate = false`. Multi-candidate per-frame
-///   detection + Viterbi path-finder with octave-cost / octave-jump-cost
-///   / voiced-unvoiced-cost terms. Robust to halving / doubling /
-///   transient errors; Praat-validated.
 ///
 /// **Cumulative-mean-normalized-difference family:**
 /// - `"yin"` — de Cheveigné & Kawahara 2002. Difference function +
@@ -3716,7 +3718,7 @@ fn parse_lpc_method(s: &str) -> PyResult<sadda_engine::dsp::LpcMethod> {
     audio, *,
     frame_size_seconds=0.030, hop_size_seconds=0.010,
     min_freq_hz=75.0, max_freq_hz=500.0,
-    method="windowed_autocorrelation",
+    method="boersma",
     voicing_threshold=0.45,
 ))]
 #[allow(clippy::too_many_arguments)]

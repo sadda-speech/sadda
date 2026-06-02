@@ -84,6 +84,10 @@ pub enum PitchMethod {
     /// Window-corrected autocorrelation. Adopts the central insight of
     /// Boersma (1993) — divide windowed-signal autocorrelation by window
     /// autocorrelation — but is **not** a faithful Boersma implementation.
+    /// **Prone to subharmonic / octave-down errors** on clean tones (it
+    /// picks the global max of `r_a/r_w`, which over-inflates long-lag
+    /// subharmonic peaks: 150→75, 250→83.3): it has no octave cost or
+    /// path-finding. Prefer [`PitchMethod::Boersma`] (the default).
     /// See [`windowed_autocorrelation`].
     WindowedAutocorrelation,
     /// Faithful Boersma 1993 / Praat `Sound: To Pitch (ac)…` with
@@ -215,7 +219,18 @@ pub struct PitchFrame {
     pub voicing: f32,
 }
 
-/// Dispatches to one of the five pitch trackers.
+impl Default for PitchMethod {
+    /// The canonical default tracker is [`PitchMethod::Boersma`] — the faithful
+    /// Praat-equivalent with octave-cost + Viterbi path-finding. It is robust to
+    /// the subharmonic (octave-down / ⅓-rate) errors that the simpler
+    /// [`windowed_autocorrelation`] latches onto on clean tones (e.g. 150→75,
+    /// 250→83.3). App / Python / criteria all default to this.
+    fn default() -> Self {
+        PitchMethod::Boersma
+    }
+}
+
+/// Dispatches to one of the six pitch trackers.
 pub fn pitch(audio: &Audio, config: &PitchConfig, method: PitchMethod) -> Vec<PitchFrame> {
     match method {
         PitchMethod::Autocorrelation => autocorrelation(audio, config),
@@ -1844,6 +1859,34 @@ mod tests {
             "expected high voicing, got {}",
             mid.voicing
         );
+    }
+
+    #[test]
+    fn default_pitch_method_is_boersma() {
+        // The app, Python `voiced_pitch`, and the criteria `f0` signal all rely
+        // on this being the octave-robust tracker.
+        assert!(matches!(PitchMethod::default(), PitchMethod::Boersma));
+    }
+
+    #[test]
+    fn boersma_tracks_pure_sines_without_subharmonic_errors() {
+        // Regression guard for the f0 octave-down bug: the simpler
+        // `windowed_autocorrelation` latches onto subharmonics of clean tones
+        // (150→75, 250→83.3, 300→100 under PitchConfig::default()), so the
+        // default tracker was switched to Boersma. Boersma must report the true
+        // f0 (not ½/⅓ of it) across the band.
+        let sr = 16_000_u32;
+        let cfg = PitchConfig::default();
+        for &f in &[150.0_f32, 200.0, 250.0, 300.0, 400.0] {
+            let audio = sine_audio(sr, 1, f, 0.5);
+            let frames = boersma(&audio, &cfg);
+            assert!(!frames.is_empty());
+            let mid = frames[frames.len() / 2].frequency_hz.value();
+            assert!(
+                (mid - f).abs() < 3.0,
+                "boersma octave/subharmonic error at {f} Hz: got {mid} Hz",
+            );
+        }
     }
 
     #[test]

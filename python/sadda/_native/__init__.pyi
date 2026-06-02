@@ -2378,7 +2378,7 @@ def version() -> builtins.str:
     Returns the underlying engine version string.
     """
 
-def voiced_pitch(audio: Audio, *, frame_size_seconds: builtins.float = 0.029999999329447746, hop_size_seconds: builtins.float = 0.009999999776482582, min_freq_hz: builtins.float = 75.0, max_freq_hz: builtins.float = 500.0, method: builtins.str = 'windowed_autocorrelation', voicing_threshold: builtins.float = 0.44999998807907104) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float32], numpy.typing.NDArray[numpy.float32]]:
+def voiced_pitch(audio: Audio, *, frame_size_seconds: builtins.float = 0.029999999329447746, hop_size_seconds: builtins.float = 0.009999999776482582, min_freq_hz: builtins.float = 75.0, max_freq_hz: builtins.float = 500.0, method: builtins.str = 'boersma', voicing_threshold: builtins.float = 0.44999998807907104) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float32], numpy.typing.NDArray[numpy.float32]]:
     r"""
     Estimates f0 with a voicing decision and returns `(times, frequencies,
     voicing)` as three NumPy arrays. `times` is float64 seconds at frame
@@ -2389,17 +2389,19 @@ def voiced_pitch(audio: Audio, *, frame_size_seconds: builtins.float = 0.0299999
     both Praat-faithful and librosa-faithful expectations:
     
     **Autocorrelation family:**
-    - `"windowed_autocorrelation"` (default) — adopts Boersma 1993's
-      window-correction idea (divides windowed-signal autocorrelation by
-      window autocorrelation); fast single-peak tracker. Strict
-      improvement on `"autocorrelation"`.
+    - `"boersma"` (**default**) — **faithful Boersma 1993 / Praat `Sound:
+      To Pitch (ac)…`** with `very_accurate = false`. Multi-candidate
+      per-frame detection + Viterbi path-finder with octave-cost /
+      octave-jump-cost / voiced-unvoiced-cost terms. Robust to halving /
+      doubling / transient errors; Praat-validated. The default because it
+      does not latch onto subharmonics of clean tones the way the simpler
+      trackers below do (e.g. 150→75, 250→83.3).
+    - `"windowed_autocorrelation"` — adopts Boersma 1993's window-correction
+      idea (divides windowed-signal autocorrelation by window
+      autocorrelation); fast single-peak tracker, but **prone to
+      subharmonic / octave-down errors** (no octave cost or path-finding).
     - `"autocorrelation"` — naive time-domain autocorrelation (Phase-0
       tracker; what `sadda.dsp.f0(...)` calls).
-    - `"boersma"` — **faithful Boersma 1993 / Praat `Sound: To Pitch
-      (ac)…`** with `very_accurate = false`. Multi-candidate per-frame
-      detection + Viterbi path-finder with octave-cost / octave-jump-cost
-      / voiced-unvoiced-cost terms. Robust to halving / doubling /
-      transient errors; Praat-validated.
     
     **Cumulative-mean-normalized-difference family:**
     - `"yin"` — de Cheveigné & Kawahara 2002. Difference function +

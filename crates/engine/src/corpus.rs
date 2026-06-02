@@ -4413,11 +4413,10 @@ impl Project {
                 "f0" => {
                     let a = audio.as_ref().expect("audio loaded for f0");
                     let config = crate::pitch::PitchConfig::default();
-                    let frames = crate::pitch::pitch(
-                        a,
-                        &config,
-                        crate::pitch::PitchMethod::WindowedAutocorrelation,
-                    );
+                    // Boersma (the canonical default) — octave-robust, so
+                    // criteria over `f0` aren't corrupted by subharmonic errors.
+                    let frames =
+                        crate::pitch::pitch(a, &config, crate::pitch::PitchMethod::default());
                     let mut times = Vec::new();
                     let mut values = Vec::new();
                     // Voiced frames only — an unvoiced f0 estimate is unreliable,
