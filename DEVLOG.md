@@ -6,6 +6,32 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-02 — Praat-style span playback (Slice 1: scanning ergonomics)
+
+First slice of "make scanning & annotating enjoyable" (plan + Q&A 2026-06-02;
+plan file `fuzzy-shimmying-tulip.md`). The playback engine — which only played
+from a start point **to the end of the file** — now plays an arbitrary **span**
+with **loop** (silent
+inter-repetition gap) and **pause/resume**, all in a pure, real-time-safe
+`next_mono_sample` state machine (paused → inter-loop pause → span body →
+end/loop) that the tests drive **without an audio device**.
+
+- `playback.rs`: `Playback::start_span(samples, sr, start_s, end_s, LoopMode)`,
+  `LoopMode = Once | Loop { pause_seconds }`, `set_paused`/`is_paused`;
+  `PlaybackState` gains span bounds + paused + looping + loop-pause countdown; the
+  three cpal `fill_buffer_*` share `next_mono_sample`. 8 engine tests.
+- `main.rs`: pure `span_for_action(action, view, cursor, selection) → Option<(lo,hi)>`
+  for the five view-relative spans (5 tests); transport methods `play_span` /
+  `play_action` / `toggle_pause` / `stop_and_return` (+ `playback_origin`).
+- Keymap (refinable, just key constants): **Space** = play selection-or-view once /
+  pause-continue while playing; **Ctrl/Cmd+Space** = loop it (0.5 s gap); **`,`/`.`**
+  = left/right of playhead; **`[`/`]`** = left/right of selection; **Ctrl/Cmd+**span =
+  loop; **Esc** = stop + return to span start. Subsumes the simple "play selection on
+  space" backlog item (note: second Space *pauses*; Esc *stops* — refine in testing).
+
+App-only; gate green (+13 tests). Next: Slice 2 (digit tier activation), Slice 3
+(Enter-to-commit + conflict resolution, with a dedicated boundary-reuse key).
+
 ## 2026-06-02 — Fix: script-panel placeholder was outdated (E8/E9 jargon)
 
 The embedded Python panel's ghost text read "pure stdlib only at E8 / `import
