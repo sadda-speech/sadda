@@ -1072,6 +1072,50 @@ impl PyImportSummary {
     }
 }
 
+/// Result of `Project.build_concordance` (P3 aggregate view). Describes the
+/// derived concatenated-timeline bundle that was created.
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "ConcordanceSummary", frozen)]
+struct PyConcordanceSummary {
+    inner: sadda_engine::ConcordanceSummary,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyConcordanceSummary {
+    /// Id of the new derived bundle holding the concatenated tokens.
+    #[getter]
+    fn bundle_id(&self) -> i64 {
+        self.inner.bundle_id
+    }
+    /// Number of tokens (matching intervals) concatenated.
+    #[getter]
+    fn n_tokens(&self) -> usize {
+        self.inner.n_tokens
+    }
+    /// Total duration of the concatenated timeline, in seconds.
+    #[getter]
+    fn duration_seconds(&self) -> f64 {
+        self.inner.duration_seconds
+    }
+    /// Surrounding annotations clipped + remapped onto the timeline.
+    #[getter]
+    fn n_context_annotations(&self) -> usize {
+        self.inner.n_context_annotations
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ConcordanceSummary(bundle_id={}, n_tokens={}, duration_seconds={:.3}, \
+             n_context_annotations={})",
+            self.inner.bundle_id,
+            self.inner.n_tokens,
+            self.inner.duration_seconds,
+            self.inner.n_context_annotations,
+        )
+    }
+}
+
 /// Inter-annotation agreement between two tiers (slice S5) — the result of
 /// `Project.compare_tiers`. Percentages are fractions in [0, 1]; κ is in
 /// (-inf, 1]. Frame fields are 0.0 for point comparisons.
@@ -2752,6 +2796,28 @@ impl PyProject {
             .map_err(engine_err_to_py)
     }
 
+    /// Builds an aggregate "concordance" bundle (P3): every interval on tier
+    /// `tier_name` across the corpus whose label is in `labels` (empty = any)
+    /// becomes a token; the tokens' mono audio is concatenated in sequence
+    /// (with `gap_seconds` of silence between) into a new bundle `dest_name`.
+    /// A `"⟨source⟩"` divider tier marks each token's origin, and each token's
+    /// surrounding annotations are clipped + remapped onto the timeline. The
+    /// matched bundles must share one sample rate. Returns a
+    /// `ConcordanceSummary`.
+    #[pyo3(signature = (tier_name, labels, dest_name, gap_seconds=0.25))]
+    fn build_concordance(
+        &self,
+        tier_name: &str,
+        labels: Vec<String>,
+        dest_name: &str,
+        gap_seconds: f64,
+    ) -> PyResult<PyConcordanceSummary> {
+        self.inner
+            .build_concordance(tier_name, &labels, dest_name, gap_seconds)
+            .map(|inner| PyConcordanceSummary { inner })
+            .map_err(engine_err_to_py)
+    }
+
     /// Unions the annotations of `source_tier_names` into `dest_tier_name` on
     /// `bundle_id` (time-ordered), creating the destination and replacing its
     /// contents. All sources must share one type (interval/point). Returns the
@@ -4092,6 +4158,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyAssignment>()?;
     m.add_class::<PyExportSummary>()?;
     m.add_class::<PyImportSummary>()?;
+    m.add_class::<PyConcordanceSummary>()?;
     m.add_class::<PyAgreementReport>()?;
     m.add_class::<PyProgressCounts>()?;
     m.add_class::<PyAnnotatorProgress>()?;

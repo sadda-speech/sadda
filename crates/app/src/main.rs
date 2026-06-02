@@ -305,6 +305,8 @@ struct SaddaApp {
     dashboard: Option<DashboardWindow>,
     /// Open PI lab-notebook (slice S7), or `None`.
     notebook: Option<NotebookWindow>,
+    /// Open aggregate concordance builder (P3), or `None`.
+    concordance_builder: Option<ConcordanceBuilder>,
     /// Working state for the inline Annotation panel (modal-free editor).
     annotation_inspector: AnnotationInspector,
     /// E8: most recent `script-engine` output (stdout + stderr).
@@ -571,6 +573,24 @@ struct NotebookWindow {
     /// Optional `target_type` filter for the list (empty = all).
     filter: String,
     /// Last action result.
+    status_msg: Option<String>,
+}
+
+/// State for the aggregate concordance builder (P3): draft inputs for the
+/// `Project::build_concordance` call — the token-source tier name, an optional
+/// comma-separated label filter, the gap between tokens, and the destination
+/// bundle name — plus the last result line.
+#[derive(Default)]
+struct ConcordanceBuilder {
+    /// Token-source tier name (an interval tier present across bundles).
+    tier_name: String,
+    /// Comma-separated label filter; empty = any label.
+    labels: String,
+    /// Destination bundle name for the concatenated timeline.
+    dest_name: String,
+    /// Silence between tokens, in seconds (string for the text field).
+    gap_seconds: String,
+    /// Last action result line.
     status_msg: Option<String>,
 }
 
@@ -1086,6 +1106,7 @@ impl SaddaApp {
             targets_panel: None,
             dashboard: None,
             notebook: None,
+            concordance_builder: None,
             annotation_inspector: AnnotationInspector::default(),
             script_output: None,
             script_error: None,
@@ -3817,6 +3838,132 @@ impl SaddaApp {
         }
     }
 
+    /// The aggregate concordance builder (P3): a small form that runs
+    /// [`Project::build_concordance`] and selects the resulting bundle so it
+    /// opens in the normal waveform/spectrogram/tier view.
+    fn concordance_builder_window(&mut self, ctx: &egui::Context) {
+        if self.concordance_builder.is_none() {
+            return;
+        }
+
+        let mut close = false;
+        let mut keep_open = true;
+        let mut build = false;
+
+        egui::Window::new("Build concordance")
+            .open(&mut keep_open)
+            .resizable(true)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                let cb = self.concordance_builder.as_mut().expect("checked above");
+
+                ui.label(
+                    egui::RichText::new(
+                        "Concatenate every interval matching a tier + label across \
+                         the corpus into one aggregate bundle.",
+                    )
+                    .weak(),
+                );
+                ui.separator();
+
+                egui::Grid::new("concordance_form")
+                    .num_columns(2)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Token tier");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut cb.tier_name)
+                                .hint_text("e.g. phone"),
+                        );
+                        ui.end_row();
+                        ui.label("Labels");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut cb.labels)
+                                .hint_text("comma-separated; blank = any"),
+                        );
+                        ui.end_row();
+                        ui.label("New bundle name");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut cb.dest_name)
+                                .hint_text("e.g. f-tokens"),
+                        );
+                        ui.end_row();
+                        ui.label("Gap (s)");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut cb.gap_seconds)
+                                .hint_text("0.25")
+                                .desired_width(80.0),
+                        );
+                        ui.end_row();
+                    });
+
+                let can_build =
+                    !cb.tier_name.trim().is_empty() && !cb.dest_name.trim().is_empty();
+                if ui
+                    .add_enabled(can_build, egui::Button::new("Build"))
+                    .on_disabled_hover_text("A token tier and a bundle name are required")
+                    .clicked()
+                {
+                    build = true;
+                }
+
+                if let Some(msg) = &cb.status_msg {
+                    ui.separator();
+                    ui.label(egui::RichText::new(msg).weak());
+                }
+                ui.separator();
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+
+        if !keep_open || close {
+            self.concordance_builder = None;
+            return;
+        }
+
+        if build {
+            let (tier, labels, dest, gap) = self
+                .concordance_builder
+                .as_ref()
+                .map(|cb| {
+                    let labels = parse_label_filter(&cb.labels);
+                    let gap = cb.gap_seconds.trim().parse::<f64>().unwrap_or(0.25);
+                    (cb.tier_name.trim().to_string(), labels, cb.dest_name.trim().to_string(), gap)
+                })
+                .unwrap_or_default();
+
+            let result = match &self.app_state {
+                AppState::ProjectLoaded { project, .. } => {
+                    Some(project.build_concordance(&tier, &labels, &dest, gap))
+                }
+                _ => None,
+            };
+            match result {
+                Some(Ok(summary)) => {
+                    let bundle_id = summary.bundle_id;
+                    if let Some(cb) = self.concordance_builder.as_mut() {
+                        cb.status_msg = Some(format!(
+                            "Built “{dest}”: {} token{}, {:.2}s, {} context annotation{}.",
+                            summary.n_tokens,
+                            if summary.n_tokens == 1 { "" } else { "s" },
+                            summary.duration_seconds,
+                            summary.n_context_annotations,
+                            if summary.n_context_annotations == 1 { "" } else { "s" },
+                        ));
+                    }
+                    self.select_bundle(bundle_id);
+                }
+                Some(Err(e)) => {
+                    if let Some(cb) = self.concordance_builder.as_mut() {
+                        cb.status_msg = Some(format!("Build failed: {e}"));
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+
     /// Saves the criteria-editor working copy via the engine, then refreshes
     /// the list and selection.
     fn criteria_save(&mut self) {
@@ -4602,6 +4749,17 @@ fn project_name_from_path(path: &Path) -> String {
     path.file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "untitled".into())
+}
+
+/// Parses the concordance builder's comma-separated label field into the label
+/// filter passed to [`Project::build_concordance`]: trims each entry and drops
+/// empties, so a blank field (or one of only commas/spaces) yields an empty
+/// vector, which the engine treats as "any label".
+fn parse_label_filter(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// Emits a one-line timing to stderr when the `SADDA_PERF` environment variable
@@ -6506,6 +6664,7 @@ impl eframe::App for SaddaApp {
         self.targets_panel_window(ui.ctx());
         self.dashboard_window(ui.ctx());
         self.notebook_window(ui.ctx());
+        self.concordance_builder_window(ui.ctx());
 
         // E9 command palette. Same overlay pattern.
         self.command_palette_window(ui.ctx());
@@ -6714,6 +6873,21 @@ impl SaddaApp {
                 ui.close();
                 if self.notebook.is_none() {
                     self.notebook = Some(NotebookWindow::default());
+                }
+            }
+            if ui
+                .add_enabled(project_open, egui::Button::new("Concordance…"))
+                .on_disabled_hover_text("Open or create a project first")
+                .on_hover_text(
+                    "Aggregate view: concatenate every token matching a tier + \
+                     label across the corpus into one bundle, with a source \
+                     divider and remapped context",
+                )
+                .clicked()
+            {
+                ui.close();
+                if self.concordance_builder.is_none() {
+                    self.concordance_builder = Some(ConcordanceBuilder::default());
                 }
             }
         });
@@ -9221,6 +9395,18 @@ mod layout_tests {
             }
         });
         out.expect("run_ui invokes the ui closure once")
+    }
+
+    #[test]
+    fn concordance_label_filter_parses_and_trims() {
+        // Comma-separated, trimmed, empties dropped.
+        assert_eq!(parse_label_filter("f, s ,ʃ"), vec!["f", "s", "ʃ"]);
+        // A blank field (or only separators/space) means "any label".
+        assert!(parse_label_filter("").is_empty());
+        assert!(parse_label_filter("  ").is_empty());
+        assert!(parse_label_filter(" , , ").is_empty());
+        // A single label with surrounding whitespace.
+        assert_eq!(parse_label_filter("  vowel "), vec!["vowel"]);
     }
 
     #[test]
