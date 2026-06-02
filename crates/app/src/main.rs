@@ -413,6 +413,41 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// Formats the active time-span selection as `sel A–B s  (Δ C s)` for the
+/// waveform header, or `None` when nothing is selected. Normalises order so a
+/// right-to-left drag reads the same. Pure → unit-testable.
+fn format_selection(selection: Option<(f64, f64)>) -> Option<String> {
+    let (a, b) = selection?;
+    let (lo, hi) = (a.min(b), a.max(b));
+    Some(format!("sel {lo:.3}–{hi:.3}s  (Δ {:.3}s)", hi - lo))
+}
+
+#[cfg(test)]
+mod selection_format_tests {
+    use super::format_selection;
+
+    #[test]
+    fn none_when_no_selection() {
+        assert_eq!(format_selection(None), None);
+    }
+
+    #[test]
+    fn formats_start_end_and_duration() {
+        let s = format_selection(Some((0.25, 0.75))).unwrap();
+        assert!(s.contains("0.250"), "start: {s}");
+        assert!(s.contains("0.750"), "end: {s}");
+        assert!(s.contains("0.500"), "duration: {s}");
+    }
+
+    #[test]
+    fn normalises_reversed_drag() {
+        assert_eq!(
+            format_selection(Some((0.2, 0.8))),
+            format_selection(Some((0.8, 0.2))),
+        );
+    }
+}
+
 /// A point-in-time snapshot of system + process memory for the Help → Memory
 /// report. Fields are `Option` so a platform / permission that can't supply one
 /// degrades to "unavailable" rather than reporting a misleading zero.
@@ -7909,6 +7944,11 @@ impl SaddaApp {
                 ))
                 .weak(),
             );
+            // Boundary times of the current span selection, when one is active —
+            // shown strong so it stands out against the weak bundle/view info.
+            if let Some(sel) = format_selection(self.timeline.selection) {
+                ui.label(egui::RichText::new(sel).strong());
+            }
         });
 
         let plot_width_px = ui.available_width().max(1.0) as usize;
@@ -8156,6 +8196,20 @@ impl SaddaApp {
                     changed
                 });
             self.persisted.spectrogram.colormap = cmap;
+
+            // Revert window / hop / range / colormap to their defaults. Disabled
+            // when already at default so it reads as a no-op.
+            ui.add_space(12.0);
+            let at_default = self.persisted.spectrogram == SpectrogramConfig::default();
+            if ui
+                .add_enabled(!at_default, egui::Button::new("Reset"))
+                .on_hover_text(
+                    "Reset spectrogram settings (window, hop, range, colormap) to defaults",
+                )
+                .clicked()
+            {
+                self.persisted.spectrogram = SpectrogramConfig::default();
+            }
 
             // The cache invalidates by `==` comparison, so any
             // change to the DragValues / ComboBox above is picked
