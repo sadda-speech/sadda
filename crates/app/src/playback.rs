@@ -11,6 +11,12 @@
 //! callback is "play a static buffer with a moving read head," not
 //! "stream samples through a ring" the way E1 input does.
 //!
+//! A run plays a **span** `[start_sample, end_sample)` rather than the
+//! whole buffer, and can **loop** (with a silent inter-repetition gap)
+//! and **pause** (hold the read head, emit silence). All of that lives
+//! in [`next_mono_sample`], a pure state-machine step the GUI keymap
+//! drives — and which the tests exercise without an audio device.
+//!
 //! cpal::Stream is `!Send` on Linux ALSA. The `Playback` struct
 //! stays on the main thread (where `SaddaApp` lives); we don't try
 //! to move it across threads.
@@ -19,6 +25,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+/// How a span should play: once through, or repeat with a fixed silent gap
+/// between repetitions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LoopMode {
+    /// Play the span once, then finish.
+    Once,
+    /// Loop the span indefinitely, inserting `pause_seconds` of silence between
+    /// each repetition. Stop by dropping the `Playback`.
+    Loop { pause_seconds: f64 },
+}
 
 /// Live playback handle. Drop it to stop. cpal's `Stream` Drop impl
 /// stops the audio callback cleanly.
@@ -41,28 +58,47 @@ struct PlaybackState {
     /// Mono samples to play. Possibly linear-resampled from the
     /// bundle's source rate to the device's preferred rate.
     samples: Vec<f32>,
+    /// First sample of the span (output-rate index). The cursor resets
+    /// here on each loop repetition.
+    start_sample: usize,
+    /// One-past-the-last sample of the span (output-rate index). Playback
+    /// stops (or loops) when the cursor reaches it.
+    end_sample: usize,
     /// Current read position in samples within `samples`. The audio
     /// callback advances; the GUI reads (Relaxed is fine — we tolerate
     /// a one-frame stale read).
     cursor: AtomicUsize,
-    /// Set to `true` once the callback writes the last sample.
+    /// Set to `true` once a non-looping span reaches its end.
     finished: AtomicBool,
+    /// While `true`, the callback emits silence and does not advance the
+    /// cursor (pause). Toggled from the GUI thread.
+    paused: AtomicBool,
+    /// Whether to restart at `start_sample` instead of finishing at the end.
+    looping: bool,
+    /// Silent frames inserted between loop repetitions (output-rate). Zero for
+    /// `Once` or a zero-pause loop.
+    loop_pause_samples: usize,
+    /// Countdown of remaining inter-repetition silent frames. When > 0 the
+    /// callback emits silence and holds the cursor at `start_sample`.
+    loop_pause_remaining: AtomicUsize,
 }
 
 impl Playback {
-    /// Starts playback of the given mono mixdown from a cursor
-    /// `start_seconds` into the bundle. Picks the system default
-    /// output device + its preferred sample rate; if the device
-    /// rate differs from `bundle_sample_rate`, the samples are
+    /// Starts playback of the span `[start_seconds, end_seconds)` of the given
+    /// mono mixdown. `end_seconds == None` plays to the end of the buffer.
+    /// `loop_mode` selects once-through vs looping (with a silent gap). Picks
+    /// the system default output device + its preferred sample rate; if the
+    /// device rate differs from `bundle_sample_rate`, the samples are
     /// linear-resampled once at start.
     ///
-    /// On error returns a human-readable string suitable for the
-    /// app's error banner. cpal failures (no device, format
-    /// mismatch the engine couldn't reconcile) are the main hazards.
-    pub fn start(
+    /// On error returns a human-readable string suitable for the app's error
+    /// banner. cpal failures (no device, format mismatch) are the main hazards.
+    pub fn start_span(
         bundle_mono: &[f32],
         bundle_sample_rate: u32,
         start_seconds: f64,
+        end_seconds: Option<f64>,
+        loop_mode: LoopMode,
     ) -> Result<Self, String> {
         let host = cpal::default_host();
         let device = host
@@ -86,15 +122,28 @@ impl Playback {
             linear_resample(bundle_mono, bundle_sample_rate, output_sample_rate)
         };
 
-        // Convert the bundle-relative start time to an output-rate
-        // sample index.
-        let start_sample = ((start_seconds.max(0.0)) * output_sample_rate as f64).round() as usize;
-        let start_sample = start_sample.min(resampled.len());
+        let to_sample = |secs: f64| (secs.max(0.0) * output_sample_rate as f64).round() as usize;
+        let start_sample = to_sample(start_seconds).min(resampled.len());
+        let end_sample = end_seconds
+            .map(|e| to_sample(e).min(resampled.len()))
+            .unwrap_or(resampled.len())
+            .max(start_sample);
+
+        let (looping, loop_pause_samples) = match loop_mode {
+            LoopMode::Once => (false, 0),
+            LoopMode::Loop { pause_seconds } => (true, to_sample(pause_seconds)),
+        };
 
         let state = Arc::new(PlaybackState {
             samples: resampled,
+            start_sample,
+            end_sample,
             cursor: AtomicUsize::new(start_sample),
             finished: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            looping,
+            loop_pause_samples,
+            loop_pause_remaining: AtomicUsize::new(0),
         });
 
         // Build a stream config matching the device's preferred
@@ -143,10 +192,20 @@ impl Playback {
         secs_in_output
     }
 
-    /// Whether the cursor has reached the end of the buffer.
-    /// Callers should drop `self` when this returns `true`.
+    /// Whether a non-looping span has reached its end. Callers should drop
+    /// `self` when this returns `true`. Always `false` for a looping span.
     pub fn is_finished(&self) -> bool {
         self.state.finished.load(Ordering::Relaxed)
+    }
+
+    /// Pauses (holds the read head, emits silence) or resumes playback.
+    pub fn set_paused(&self, paused: bool) {
+        self.state.paused.store(paused, Ordering::Relaxed);
+    }
+
+    /// Whether playback is currently paused.
+    pub fn is_paused(&self) -> bool {
+        self.state.paused.load(Ordering::Relaxed)
     }
 }
 
@@ -188,63 +247,77 @@ fn build_stream(
     }
 }
 
+/// One step of the playback state machine: returns the next mono sample to emit
+/// and advances the cursor / loop-pause / finished state accordingly. RT-safe
+/// (atomics only, no allocation, no locks) and pure enough to unit-test by
+/// hand-constructing a [`PlaybackState`].
+///
+/// Order of precedence: paused → inter-loop pause → span body → end (loop or
+/// finish). On a loop wrap the cursor resets to `start_sample` and a single
+/// frame of silence is emitted (the gap, or one sample if the gap is zero).
+fn next_mono_sample(state: &PlaybackState) -> f32 {
+    if state.paused.load(Ordering::Relaxed) {
+        return 0.0;
+    }
+    let pause_left = state.loop_pause_remaining.load(Ordering::Relaxed);
+    if pause_left > 0 {
+        state
+            .loop_pause_remaining
+            .store(pause_left - 1, Ordering::Relaxed);
+        return 0.0;
+    }
+    let cursor = state.cursor.load(Ordering::Relaxed);
+    if cursor >= state.end_sample {
+        if state.looping {
+            if state.loop_pause_samples > 0 {
+                state
+                    .loop_pause_remaining
+                    .store(state.loop_pause_samples, Ordering::Relaxed);
+            }
+            state.cursor.store(state.start_sample, Ordering::Relaxed);
+        } else {
+            state.finished.store(true, Ordering::Relaxed);
+        }
+        return 0.0;
+    }
+    let sample = state.samples.get(cursor).copied().unwrap_or(0.0);
+    state.cursor.store(cursor + 1, Ordering::Relaxed);
+    sample
+}
+
 /// Audio-thread callback for F32 output devices. Writes the next
-/// `data.len() / channels` mono samples, fanned out across all
-/// channels. RT-safe: no allocations, no locks.
+/// `data.len() / channels` mono samples (via [`next_mono_sample`]), fanned out
+/// across all channels. RT-safe: no allocations, no locks.
 fn fill_buffer_f32(data: &mut [f32], channels: usize, state: &PlaybackState) {
     let frames = data.len() / channels;
-    let start = state.cursor.load(Ordering::Relaxed);
-    let n_total = state.samples.len();
     for f in 0..frames {
-        let i = start + f;
-        let sample = if i < n_total { state.samples[i] } else { 0.0 };
+        let sample = next_mono_sample(state);
         for c in 0..channels {
             data[f * channels + c] = sample;
         }
-    }
-    let new_cursor = (start + frames).min(n_total);
-    state.cursor.store(new_cursor, Ordering::Relaxed);
-    if new_cursor >= n_total {
-        state.finished.store(true, Ordering::Relaxed);
     }
 }
 
 fn fill_buffer_i16(data: &mut [i16], channels: usize, state: &PlaybackState) {
     let frames = data.len() / channels;
-    let start = state.cursor.load(Ordering::Relaxed);
-    let n_total = state.samples.len();
     for f in 0..frames {
-        let i = start + f;
-        let sample = if i < n_total { state.samples[i] } else { 0.0 };
+        let sample = next_mono_sample(state);
         let s_i16 = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
         for c in 0..channels {
             data[f * channels + c] = s_i16;
         }
     }
-    let new_cursor = (start + frames).min(n_total);
-    state.cursor.store(new_cursor, Ordering::Relaxed);
-    if new_cursor >= n_total {
-        state.finished.store(true, Ordering::Relaxed);
-    }
 }
 
 fn fill_buffer_u16(data: &mut [u16], channels: usize, state: &PlaybackState) {
     let frames = data.len() / channels;
-    let start = state.cursor.load(Ordering::Relaxed);
-    let n_total = state.samples.len();
     for f in 0..frames {
-        let i = start + f;
-        let sample = if i < n_total { state.samples[i] } else { 0.0 };
+        let sample = next_mono_sample(state);
         // U16 mid-scale is 32768; map [-1, 1] → [0, 65535].
         let s_u16 = ((sample.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16;
         for c in 0..channels {
             data[f * channels + c] = s_u16;
         }
-    }
-    let new_cursor = (start + frames).min(n_total);
-    state.cursor.store(new_cursor, Ordering::Relaxed);
-    if new_cursor >= n_total {
-        state.finished.store(true, Ordering::Relaxed);
     }
 }
 
@@ -275,6 +348,86 @@ pub fn linear_resample(input: &[f32], input_rate: u32, output_rate: u32) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds a `PlaybackState` over `[start, end)` of `samples` for driving
+    /// `next_mono_sample` directly (no audio device).
+    fn state(
+        samples: Vec<f32>,
+        start: usize,
+        end: usize,
+        looping: bool,
+        loop_pause_samples: usize,
+    ) -> PlaybackState {
+        PlaybackState {
+            samples,
+            start_sample: start,
+            end_sample: end,
+            cursor: AtomicUsize::new(start),
+            finished: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            looping,
+            loop_pause_samples,
+            loop_pause_remaining: AtomicUsize::new(0),
+        }
+    }
+
+    fn drain(st: &PlaybackState, n: usize) -> Vec<f32> {
+        (0..n).map(|_| next_mono_sample(st)).collect()
+    }
+
+    #[test]
+    fn once_plays_span_then_finishes_with_silence() {
+        let st = state(vec![1.0, 2.0, 3.0, 4.0, 5.0], 1, 4, false, 0);
+        // Span is samples[1..4] = [2,3,4]; then a silence frame flips finished.
+        let out = drain(&st, 5);
+        assert_eq!(&out[..3], &[2.0, 3.0, 4.0]);
+        assert_eq!(out[3], 0.0);
+        assert!(st.finished.load(Ordering::Relaxed));
+        assert_eq!(out[4], 0.0);
+    }
+
+    #[test]
+    fn loop_repeats_span_and_never_finishes() {
+        let st = state(vec![1.0, 2.0, 3.0], 0, 3, true, 0);
+        let out = drain(&st, 8);
+        // [1,2,3] then a one-frame wrap gap, then [1,2,3], wrap, [1] ...
+        assert_eq!(out[0], 1.0);
+        assert_eq!(out[1], 2.0);
+        assert_eq!(out[2], 3.0);
+        assert_eq!(out[3], 0.0); // wrap frame
+        assert_eq!(out[4], 1.0);
+        assert_eq!(out[5], 2.0);
+        assert!(!st.finished.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn loop_inserts_the_silent_pause_between_repetitions() {
+        let st = state(vec![1.0, 2.0], 0, 2, true, 3);
+        let out = drain(&st, 9);
+        // [1,2], wrap(0) + 3 pause frames? The wrap frame schedules the pause,
+        // so: 1,2, then wrap returns 0 and sets pause=3, then 3 pause frames,
+        // then 1,2 again.
+        assert_eq!(out[0], 1.0);
+        assert_eq!(out[1], 2.0);
+        assert_eq!(out[2], 0.0); // wrap (schedules pause)
+        assert_eq!(out[3], 0.0); // pause 1
+        assert_eq!(out[4], 0.0); // pause 2
+        assert_eq!(out[5], 0.0); // pause 3
+        assert_eq!(out[6], 1.0); // back to span start
+        assert_eq!(out[7], 2.0);
+    }
+
+    #[test]
+    fn paused_holds_the_cursor_and_emits_silence() {
+        let st = state(vec![1.0, 2.0, 3.0], 0, 3, false, 0);
+        assert_eq!(next_mono_sample(&st), 1.0);
+        st.paused.store(true, Ordering::Relaxed);
+        assert_eq!(drain(&st, 4), vec![0.0, 0.0, 0.0, 0.0]);
+        st.paused.store(false, Ordering::Relaxed);
+        // Resumes exactly where it paused.
+        assert_eq!(next_mono_sample(&st), 2.0);
+        assert_eq!(next_mono_sample(&st), 3.0);
+    }
 
     #[test]
     fn linear_resample_identity_when_rates_match() {

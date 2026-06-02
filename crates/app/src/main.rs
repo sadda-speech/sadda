@@ -30,7 +30,7 @@ use sadda_engine::{Histogram, MeasureKind, RefDist, RefdistStore, Summary};
 // E11 VAD lane: the engine's `ml` feature is enabled for the app.
 use sadda_engine::{VadFrame, vad_bundled};
 
-use crate::playback::Playback;
+use crate::playback::{LoopMode, Playback};
 use crate::sadda_app::{
     AppSnapshot, BundleInfo, ScriptSessionExtras, SelectionInfo, SelectionKind,
     with_snapshot_active,
@@ -289,6 +289,9 @@ struct SaddaApp {
     /// app polls `is_finished()` each frame and drops it on
     /// completion (or on a second spacebar press).
     playback: Option<Playback>,
+    /// Time (seconds) to restore the cursor to when playback is stopped via Esc
+    /// — the start of the span that is playing. `None` when nothing is playing.
+    playback_origin: Option<f64>,
     /// In-progress mouse-driven edit on an interval lane. Drag-create
     /// or drag-resize lives here between mouse-down and mouse-up.
     draft_edit: DraftEdit,
@@ -444,6 +447,123 @@ mod selection_format_tests {
         assert_eq!(
             format_selection(Some((0.2, 0.8))),
             format_selection(Some((0.8, 0.2))),
+        );
+    }
+}
+
+/// Silent gap between loop repetitions for the span-playback keys (seconds).
+const LOOP_PAUSE_SECONDS: f64 = 0.5;
+
+/// A view-relative span the playback keys can audition. The **playhead** is the
+/// playback line (`timeline.cursor`); the selection is the drag-selected band.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PlayAction {
+    /// The selection if one exists, else the whole visible view.
+    SelectionOrView,
+    /// View start → playhead.
+    LeftOfPlayhead,
+    /// Playhead → view end.
+    RightOfPlayhead,
+    /// View start → selection start (requires a selection).
+    LeftOfSelection,
+    /// Selection end → view end (requires a selection).
+    RightOfSelection,
+}
+
+/// Computes the `[lo, hi)` time span (seconds) to play for `action`, from the
+/// current view window, playhead, and optional selection. Returns `None` when the
+/// span is undefined or empty (a selection-relative action with no selection, or
+/// a zero-width result — e.g. the playhead sitting on a view edge). Pure → tested.
+fn span_for_action(
+    action: PlayAction,
+    view_start: f64,
+    view_end: f64,
+    playhead: f64,
+    selection: Option<(f64, f64)>,
+) -> Option<(f64, f64)> {
+    let sel = selection.map(|(a, b)| (a.min(b), a.max(b)));
+    let in_view = |t: f64| t.clamp(view_start, view_end);
+    let (lo, hi) = match action {
+        PlayAction::SelectionOrView => sel.unwrap_or((view_start, view_end)),
+        PlayAction::LeftOfPlayhead => (view_start, in_view(playhead)),
+        PlayAction::RightOfPlayhead => (in_view(playhead), view_end),
+        PlayAction::LeftOfSelection => (view_start, sel?.0),
+        PlayAction::RightOfSelection => (sel?.1, view_end),
+    };
+    (hi - lo > 1e-6).then_some((lo, hi))
+}
+
+#[cfg(test)]
+mod play_action_tests {
+    use super::{PlayAction, span_for_action};
+
+    #[test]
+    fn selection_or_view_uses_selection_when_present_else_view() {
+        assert_eq!(
+            span_for_action(PlayAction::SelectionOrView, 1.0, 5.0, 3.0, Some((2.0, 4.0))),
+            Some((2.0, 4.0)),
+        );
+        assert_eq!(
+            span_for_action(PlayAction::SelectionOrView, 1.0, 5.0, 3.0, None),
+            Some((1.0, 5.0)),
+        );
+    }
+
+    #[test]
+    fn playhead_splits_the_view() {
+        assert_eq!(
+            span_for_action(PlayAction::LeftOfPlayhead, 1.0, 5.0, 3.0, None),
+            Some((1.0, 3.0)),
+        );
+        assert_eq!(
+            span_for_action(PlayAction::RightOfPlayhead, 1.0, 5.0, 3.0, None),
+            Some((3.0, 5.0)),
+        );
+    }
+
+    #[test]
+    fn playhead_on_a_view_edge_yields_no_span() {
+        assert_eq!(
+            span_for_action(PlayAction::LeftOfPlayhead, 1.0, 5.0, 1.0, None),
+            None,
+        );
+        assert_eq!(
+            span_for_action(PlayAction::RightOfPlayhead, 1.0, 5.0, 5.0, None),
+            None,
+        );
+    }
+
+    #[test]
+    fn selection_relative_requires_a_selection() {
+        assert_eq!(
+            span_for_action(PlayAction::LeftOfSelection, 1.0, 5.0, 3.0, None),
+            None,
+        );
+        assert_eq!(
+            span_for_action(PlayAction::RightOfSelection, 1.0, 5.0, 3.0, None),
+            None,
+        );
+        assert_eq!(
+            span_for_action(PlayAction::LeftOfSelection, 1.0, 5.0, 3.0, Some((2.0, 4.0))),
+            Some((1.0, 2.0)),
+        );
+        assert_eq!(
+            span_for_action(
+                PlayAction::RightOfSelection,
+                1.0,
+                5.0,
+                3.0,
+                Some((2.0, 4.0))
+            ),
+            Some((4.0, 5.0)),
+        );
+    }
+
+    #[test]
+    fn reversed_selection_is_normalised() {
+        assert_eq!(
+            span_for_action(PlayAction::SelectionOrView, 1.0, 5.0, 3.0, Some((4.0, 2.0))),
+            Some((2.0, 4.0)),
         );
     }
 }
@@ -1382,6 +1502,7 @@ impl SaddaApp {
             embedding_heatmap_error: None,
             timeline: TimelineState::default(),
             playback: None,
+            playback_origin: None,
             draft_edit: DraftEdit::None,
             label_edit: None,
             rubric_editor: None,
@@ -4954,20 +5075,51 @@ impl SaddaApp {
         }
     }
 
-    /// Spacebar toggle: start playback from the current cursor, or
-    /// stop if already playing. Surfaces cpal errors in the
-    /// error banner.
-    fn toggle_playback(&mut self) {
-        if self.playback.is_some() {
-            self.playback = None;
-            return;
-        }
+    /// Plays the span `[lo, hi)` of the active bundle (once or looping),
+    /// replacing any current playback. Remembers `lo` as the return point for
+    /// [`stop_and_return`](Self::stop_and_return). Surfaces cpal errors.
+    fn play_span(&mut self, lo: f64, hi: f64, loop_mode: LoopMode) {
         let Some(env) = &self.active_envelope else {
             return;
         };
-        match Playback::start(&env.mono_samples, env.sample_rate, self.timeline.cursor) {
-            Ok(p) => self.playback = Some(p),
+        match Playback::start_span(&env.mono_samples, env.sample_rate, lo, Some(hi), loop_mode) {
+            Ok(p) => {
+                self.playback = Some(p);
+                self.playback_origin = Some(lo);
+            }
             Err(e) => self.set_error(format!("Playback failed: {e}")),
+        }
+    }
+
+    /// Computes the span for `action` from the current timeline state and plays
+    /// it. No-op when the span is empty/undefined (e.g. a selection-relative
+    /// action with no selection).
+    fn play_action(&mut self, action: PlayAction, loop_mode: LoopMode) {
+        if let Some((lo, hi)) = span_for_action(
+            action,
+            self.timeline.view_start,
+            self.timeline.view_end,
+            self.timeline.cursor,
+            self.timeline.selection,
+        ) {
+            self.play_span(lo, hi, loop_mode);
+        }
+    }
+
+    /// Pauses (holds the playhead, emits silence) or resumes the current
+    /// playback. No-op when nothing is playing.
+    fn toggle_pause(&mut self) {
+        if let Some(p) = &self.playback {
+            p.set_paused(!p.is_paused());
+        }
+    }
+
+    /// Stops playback and returns the cursor to the start of the span that was
+    /// playing (Esc). No-op when nothing is playing.
+    fn stop_and_return(&mut self) {
+        self.playback = None;
+        if let Some(origin) = self.playback_origin.take() {
+            self.timeline.set_cursor(origin);
         }
     }
 
@@ -4983,6 +5135,7 @@ impl SaddaApp {
         self.timeline.ensure_cursor_visible();
         if p.is_finished() {
             self.playback = None;
+            self.playback_origin = None;
         }
     }
 
@@ -7043,15 +7196,50 @@ impl eframe::App for SaddaApp {
         // work while the editor is focused.
         let text_editing = ui.ctx().text_edit_focused();
 
-        // Spacebar toggles transport. `consume_key` ensures the
-        // press doesn't fall through to any focused widget. Skipped
-        // while a text field is focused so Space reaches the editor.
-        if !text_editing
-            && ui
-                .ctx()
-                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
-        {
-            self.toggle_playback();
+        // ── Praat-style span playback (Slice 1) ──────────────────────────
+        // Space plays the selection-or-view once; pressed again while playing
+        // it pauses, again continues. Ctrl/Cmd+Space loops it (0.5 s gap). The
+        // directional keys audition view-relative spans: `,`/`.` around the
+        // playhead, `[`/`]` around the selection; their Ctrl/Cmd variants loop.
+        // Esc stops and returns to the span start. All
+        // skipped while a text field is focused (so the keys reach the editor).
+        // `consume_key` keeps the press from falling through to a focused widget.
+        if !text_editing && self.active_envelope.is_some() {
+            let ctx = ui.ctx();
+            let looped = LoopMode::Loop {
+                pause_seconds: LOOP_PAUSE_SECONDS,
+            };
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
+                if self.playback.is_some() {
+                    self.toggle_pause();
+                } else {
+                    self.play_action(PlayAction::SelectionOrView, LoopMode::Once);
+                }
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Space)) {
+                self.play_action(PlayAction::SelectionOrView, looped);
+            }
+            for (key, action) in [
+                (egui::Key::Comma, PlayAction::LeftOfPlayhead),
+                (egui::Key::Period, PlayAction::RightOfPlayhead),
+                (egui::Key::OpenBracket, PlayAction::LeftOfSelection),
+                (egui::Key::CloseBracket, PlayAction::RightOfSelection),
+            ] {
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
+                    self.play_action(action, LoopMode::Once);
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key)) {
+                    self.play_action(action, looped);
+                }
+            }
+            // Esc stops + returns to the span start — only while playing, and
+            // only when no overlay is capturing Esc (e.g. the command palette).
+            if self.playback.is_some()
+                && !self.command_palette_open
+                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+            {
+                self.stop_and_return();
+            }
         }
 
         // Arrow keys scrub the view left / right (a quarter-window per
