@@ -280,7 +280,7 @@ impl BundleSpec {
 /// (`interval`, `point`, `reference`) are exposed in B2; the dense ones
 /// (`continuous_numeric`, `continuous_vector`, `categorical_sampled`) ship
 /// with Parquet sidecars in B3.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TierType {
     /// Time-interval annotations: phones, words, segments.
     Interval,
@@ -772,6 +772,20 @@ pub struct ImportSummary {
     pub annotations_imported: usize,
     /// Assignments advanced to `done`.
     pub assignments_marked_done: usize,
+}
+
+/// Result of [`Project::build_concordance`] (P3 aggregate view): the new derived
+/// bundle whose audio is all matching tokens concatenated in sequence.
+#[derive(Debug, Clone)]
+pub struct ConcordanceSummary {
+    /// The new concordance bundle's id.
+    pub bundle_id: i64,
+    /// Number of matching tokens concatenated.
+    pub n_tokens: usize,
+    /// Total duration of the concatenated audio (seconds, including the gaps).
+    pub duration_seconds: f64,
+    /// Context annotations remapped onto the concordance timeline.
+    pub n_context_annotations: usize,
 }
 
 /// A bundle's target counts by status — the campaign progress readout
@@ -3308,6 +3322,221 @@ impl Project {
             }
         }
         Ok(())
+    }
+
+    // ====================================================================
+    // Concordance / aggregate view (P3). Concatenate all tokens matching a
+    // tier + label filter, across the corpus, into one derived bundle viewable
+    // in the normal waveform/spectrogram/tier view — with a source-divider tier
+    // and each token's surrounding annotations remapped onto the timeline.
+    // ====================================================================
+
+    /// Builds an **aggregate "concordance" bundle**: every interval on tier
+    /// `tier_name` (across all bundles) whose label is in `labels` (empty =
+    /// any) becomes a *token*; the tokens' audio is concatenated in sequence
+    /// (with `gap_seconds` of silence between them) into a new mono bundle named
+    /// `dest_name`. A `"⟨source⟩"` divider tier marks each token with its origin
+    /// (`"<bundle> @ <orig-time>s"`), and every token's surrounding
+    /// interval/point annotations are clipped to the token window and remapped
+    /// onto the concordance timeline (grouped by source tier name), so you can
+    /// scroll the tokens *with* their context.
+    ///
+    /// v1: the matched bundles must share one sample rate (mixed rates error);
+    /// audio is down-mixed to mono; reference/dense tiers and annotation parent
+    /// links are not carried; the result is a read-only derived view (edits do
+    /// not flow back to the sources).
+    pub fn build_concordance(
+        &self,
+        tier_name: &str,
+        labels: &[String],
+        dest_name: &str,
+        gap_seconds: f64,
+    ) -> Result<ConcordanceSummary> {
+        use std::collections::HashMap;
+
+        // 1. Gather matching tokens across the corpus, in (bundle, time) order.
+        struct Token {
+            bundle_id: i64,
+            bundle_name: String,
+            start: f64,
+            end: f64,
+        }
+        let mut tokens: Vec<Token> = Vec::new();
+        for b in self.bundles()? {
+            let Some(tier) = self.tier_by_name(b.id, tier_name)? else {
+                continue;
+            };
+            if tier.r#type != TierType::Interval {
+                continue;
+            }
+            for iv in self.intervals(tier.id)? {
+                let keep = labels.is_empty()
+                    || iv
+                        .label
+                        .as_deref()
+                        .is_some_and(|l| labels.iter().any(|x| x == l));
+                if keep {
+                    tokens.push(Token {
+                        bundle_id: b.id,
+                        bundle_name: b.name.clone(),
+                        start: iv.start_seconds,
+                        end: iv.end_seconds,
+                    });
+                }
+            }
+        }
+        if tokens.is_empty() {
+            return Err(EngineError::Corpus(format!(
+                "concordance: no intervals on tier {tier_name:?} matched"
+            )));
+        }
+        tokens.sort_by(|a, b| {
+            a.bundle_id
+                .cmp(&b.bundle_id)
+                .then(a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal))
+        });
+
+        // 2. Load each source bundle's mono audio once; require one sample rate.
+        let mut audio: HashMap<i64, Vec<f32>> = HashMap::new();
+        let mut sample_rate: Option<u32> = None;
+        for t in &tokens {
+            if let std::collections::hash_map::Entry::Vacant(e) = audio.entry(t.bundle_id) {
+                let a = self.load_audio(t.bundle_id)?;
+                match sample_rate {
+                    None => sample_rate = Some(a.sample_rate),
+                    Some(sr) if sr != a.sample_rate => {
+                        return Err(EngineError::Corpus(format!(
+                            "concordance: mixed sample rates ({sr} vs {}); v1 requires a \
+                             consistent rate across matched bundles",
+                            a.sample_rate
+                        )));
+                    }
+                    _ => {}
+                }
+                e.insert(a.mono_samples().collect());
+            }
+        }
+        let sr = sample_rate.expect("non-empty tokens => some sample rate");
+        let gap_samples = (gap_seconds.max(0.0) * sr as f64).round() as usize;
+
+        // 3. Concatenate token audio; record each token's placement.
+        struct Placed {
+            bundle_id: i64,
+            bundle_name: String,
+            src_start: f64,
+            offset: f64,
+            length: f64,
+        }
+        let mut concat: Vec<f32> = Vec::new();
+        let mut placed: Vec<Placed> = Vec::with_capacity(tokens.len());
+        for (i, t) in tokens.iter().enumerate() {
+            let mono = &audio[&t.bundle_id];
+            let s0 = ((t.start * sr as f64).round() as usize).min(mono.len());
+            let s1 = ((t.end * sr as f64).round() as usize).min(mono.len()).max(s0);
+            let offset = concat.len() as f64 / sr as f64;
+            concat.extend_from_slice(&mono[s0..s1]);
+            placed.push(Placed {
+                bundle_id: t.bundle_id,
+                bundle_name: t.bundle_name.clone(),
+                src_start: t.start,
+                offset,
+                length: (s1 - s0) as f64 / sr as f64,
+            });
+            if i + 1 < tokens.len() {
+                concat.resize(concat.len() + gap_samples, 0.0);
+            }
+        }
+        let total_duration = concat.len() as f64 / sr as f64;
+
+        // 4. Write the concatenated WAV and register it as a new bundle.
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp = std::env::temp_dir().join(format!("sadda_concordance_{unique}.wav"));
+        write_mono_wav_i16(&tmp, &concat, sr)?;
+        let new_bundle = self.add_bundle(dest_name, &tmp);
+        let _ = std::fs::remove_file(&tmp);
+        let new_bundle = new_bundle?;
+
+        // 5. Divider / provenance tier.
+        let divider = self.add_tier(&TierSpec::new(new_bundle, "⟨source⟩", TierType::Interval))?;
+        for p in &placed {
+            self.add_interval(&IntervalSpec {
+                tier_id: divider,
+                start_seconds: p.offset,
+                end_seconds: p.offset + p.length,
+                label: Some(format!("{} @ {:.3}s", p.bundle_name, p.src_start)),
+                ..Default::default()
+            })?;
+        }
+
+        // 6. Remap each token's surrounding context onto the timeline, grouped
+        //    by source tier name. Intervals are clipped to the token window.
+        let mut dest_tier: HashMap<(String, TierType), i64> = HashMap::new();
+        let mut n_context = 0usize;
+        for p in &placed {
+            for st in self.tiers(Some(p.bundle_id))? {
+                if !matches!(st.r#type, TierType::Interval | TierType::Point) {
+                    continue;
+                }
+                if st.name == "⟨source⟩" {
+                    continue; // never clobber the divider
+                }
+                let dest = match dest_tier.get(&(st.name.clone(), st.r#type)) {
+                    Some(&id) => id,
+                    None => {
+                        let id = self.ensure_tier(new_bundle, &st.name, st.r#type)?;
+                        dest_tier.insert((st.name.clone(), st.r#type), id);
+                        id
+                    }
+                };
+                let win_end = p.src_start + p.length;
+                match st.r#type {
+                    TierType::Interval => {
+                        for iv in self.intervals(st.id)? {
+                            let lo = iv.start_seconds.max(p.src_start);
+                            let hi = iv.end_seconds.min(win_end);
+                            if hi - lo > 1e-9 {
+                                self.add_interval(&IntervalSpec {
+                                    tier_id: dest,
+                                    start_seconds: lo - p.src_start + p.offset,
+                                    end_seconds: hi - p.src_start + p.offset,
+                                    label: iv.label.clone(),
+                                    status: iv.status.clone(),
+                                    note: iv.note.clone(),
+                                    ..Default::default()
+                                })?;
+                                n_context += 1;
+                            }
+                        }
+                    }
+                    TierType::Point => {
+                        for pt in self.points(st.id)? {
+                            if pt.time_seconds >= p.src_start && pt.time_seconds < win_end {
+                                self.add_point(&PointSpec {
+                                    tier_id: dest,
+                                    time_seconds: pt.time_seconds - p.src_start + p.offset,
+                                    label: pt.label.clone(),
+                                    status: pt.status.clone(),
+                                    note: pt.note.clone(),
+                                    ..Default::default()
+                                })?;
+                                n_context += 1;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(ConcordanceSummary {
+            bundle_id: new_bundle,
+            n_tokens: placed.len(),
+            duration_seconds: total_duration,
+            n_context_annotations: n_context,
+        })
     }
 
     // ====================================================================
@@ -6131,6 +6360,25 @@ fn read_export_manifest(dir: &Path) -> Result<ExportManifest> {
     serde_json::from_str(&text).map_err(|e| EngineError::Corpus(format!("bad manifest: {e}")))
 }
 
+/// Writes mono `f32` samples (range roughly [-1, 1]) to a 16-bit PCM WAV at
+/// `path`. Used by [`Project::build_concordance`] to materialise the
+/// concatenated aggregate timeline before re-ingesting it as a bundle.
+fn write_mono_wav_i16(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec)?;
+    for &s in samples {
+        let clamped = s.clamp(-1.0, 1.0);
+        writer.write_sample((clamped * i16::MAX as f32) as i16)?;
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6160,6 +6408,113 @@ mod tests {
             writer.write_sample(s).unwrap();
         }
         writer.finalize().unwrap();
+    }
+
+    #[test]
+    fn build_concordance_concatenates_tokens_with_divider_and_context() {
+        let root = unique_dir("concordance");
+        let _ = std::fs::remove_dir_all(&root);
+        let project = Project::create(&root, "concord").unwrap();
+
+        // Two source bundles at the same sample rate, each with a "phone" tier
+        // (the token source) and a "word" context tier.
+        let wav1 = root.join("src1.wav");
+        let wav2 = root.join("src2.wav");
+        write_short_wav(&wav1, 16_000); // 0.25 s of audio
+        write_short_wav(&wav2, 16_000);
+
+        let b1 = project.add_bundle("b1", &wav1).unwrap();
+        let p1 = project
+            .add_tier(&TierSpec::new(b1, "phone", TierType::Interval))
+            .unwrap();
+        // two matching tokens + one non-matching label
+        for (s, e, lab) in [(0.02, 0.05, "f"), (0.10, 0.13, "s"), (0.15, 0.18, "f")] {
+            project
+                .add_interval(&IntervalSpec {
+                    tier_id: p1,
+                    start_seconds: s,
+                    end_seconds: e,
+                    label: Some(lab.to_string()),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let w1 = project
+            .add_tier(&TierSpec::new(b1, "word", TierType::Interval))
+            .unwrap();
+        // a word spanning the first "f" token, should be clipped + remapped
+        project
+            .add_interval(&IntervalSpec {
+                tier_id: w1,
+                start_seconds: 0.0,
+                end_seconds: 0.08,
+                label: Some("fish".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let b2 = project.add_bundle("b2", &wav2).unwrap();
+        let p2 = project
+            .add_tier(&TierSpec::new(b2, "phone", TierType::Interval))
+            .unwrap();
+        project
+            .add_interval(&IntervalSpec {
+                tier_id: p2,
+                start_seconds: 0.05,
+                end_seconds: 0.09,
+                label: Some("f".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        // Build: gather every "f" interval across the corpus.
+        let summary = project
+            .build_concordance("phone", &["f".to_string()], "f-concordance", 0.05)
+            .unwrap();
+
+        // 3 tokens: two from b1, one from b2.
+        assert_eq!(summary.n_tokens, 3);
+        assert!(summary.duration_seconds > 0.0);
+        // tokens 0.03 + 0.03 + 0.04 = 0.10s, plus 2 gaps of 0.05s = 0.20s
+        assert!((summary.duration_seconds - 0.20).abs() < 0.01);
+
+        // The new bundle exists with a "⟨source⟩" divider tier holding 3 marks.
+        let new_id = summary.bundle_id;
+        let divider = project.tier_by_name(new_id, "⟨source⟩").unwrap().unwrap();
+        let marks = project.intervals(divider.id).unwrap();
+        assert_eq!(marks.len(), 3);
+        assert!(marks[0].label.as_deref().unwrap().starts_with("b1 @ 0.020s"));
+
+        // Context: the "word" tier was remapped (clipped to the first token).
+        let word = project.tier_by_name(new_id, "word").unwrap().unwrap();
+        let words = project.intervals(word.id).unwrap();
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].label.as_deref(), Some("fish"));
+        // First token sits at offset 0; the word clipped to [0.02,0.05] of the
+        // source → [0.0, 0.03] on the timeline.
+        assert!(words[0].start_seconds.abs() < 1e-6);
+        assert!((words[0].end_seconds - 0.03).abs() < 1e-3);
+        assert!(summary.n_context_annotations >= 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn build_concordance_rejects_no_match() {
+        let root = unique_dir("concordance_nomatch");
+        let _ = std::fs::remove_dir_all(&root);
+        let project = Project::create(&root, "concord2").unwrap();
+        let wav = root.join("src.wav");
+        write_short_wav(&wav, 16_000);
+        let b1 = project.add_bundle("b1", &wav).unwrap();
+        project
+            .add_tier(&TierSpec::new(b1, "phone", TierType::Interval))
+            .unwrap();
+        let err = project
+            .build_concordance("phone", &["zzz".to_string()], "empty", 0.0)
+            .unwrap_err();
+        assert!(matches!(err, EngineError::Corpus(_)));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

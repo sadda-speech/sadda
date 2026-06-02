@@ -31,6 +31,7 @@ __all__ = [
     "Bundle",
     "Calibration",
     "Citation",
+    "ConcordanceSummary",
     "Criterion",
     "DerivedSignal",
     "ExperimentalAPIWarning",
@@ -122,6 +123,9 @@ Assignment = provisional(_native.Assignment)
 # S4c surface (Phase 4) — per-annotator package export / import summaries.
 ExportSummary = provisional(_native.ExportSummary)
 ImportSummary = provisional(_native.ImportSummary)
+
+# P3 surface — aggregate concordance view summary.
+ConcordanceSummary = provisional(_native.ConcordanceSummary)
 
 # S5 surface (Phase 4) — agreement engine + campaign progress.
 AgreementReport = provisional(_native.AgreementReport)

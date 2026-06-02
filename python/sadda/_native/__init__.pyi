@@ -15,6 +15,7 @@ __all__ = [
     "Bundle",
     "Calibration",
     "Citation",
+    "ConcordanceSummary",
     "Criterion",
     "DerivedSignal",
     "ExportSummary",
@@ -374,6 +375,34 @@ class Citation:
     def doi(self) -> typing.Optional[builtins.str]:
         r"""
         Bare DOI, if one exists.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class ConcordanceSummary:
+    r"""
+    Result of `Project.build_concordance` (P3 aggregate view). Describes the
+    derived concatenated-timeline bundle that was created.
+    """
+    @property
+    def bundle_id(self) -> builtins.int:
+        r"""
+        Id of the new derived bundle holding the concatenated tokens.
+        """
+    @property
+    def n_tokens(self) -> builtins.int:
+        r"""
+        Number of tokens (matching intervals) concatenated.
+        """
+    @property
+    def duration_seconds(self) -> builtins.float:
+        r"""
+        Total duration of the concatenated timeline, in seconds.
+        """
+    @property
+    def n_context_annotations(self) -> builtins.int:
+        r"""
+        Surrounding annotations clipped + remapped onto the timeline.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -1372,6 +1401,17 @@ class Project:
         annotator's work on per-annotator tiers `"<tier> [annotator]"` (use
         `merge_tiers` to reconcile) and marking their assignments `done`.
         Returns an `ImportSummary`.
+        """
+    def build_concordance(self, tier_name: builtins.str, labels: typing.Sequence[builtins.str], dest_name: builtins.str, gap_seconds: builtins.float = 0.25) -> ConcordanceSummary:
+        r"""
+        Builds an aggregate "concordance" bundle (P3): every interval on tier
+        `tier_name` across the corpus whose label is in `labels` (empty = any)
+        becomes a token; the tokens' mono audio is concatenated in sequence
+        (with `gap_seconds` of silence between) into a new bundle `dest_name`.
+        A `"⟨source⟩"` divider tier marks each token's origin, and each token's
+        surrounding annotations are clipped + remapped onto the timeline. The
+        matched bundles must share one sample rate. Returns a
+        `ConcordanceSummary`.
         """
     def merge_tiers(self, bundle_id: builtins.int, source_tier_names: typing.Sequence[builtins.str], dest_tier_name: builtins.str) -> builtins.int:
         r"""

@@ -34,7 +34,8 @@ pub use clinical::{
 };
 pub use corpus::{
     ASSIGNMENT_ROLES, ASSIGNMENT_STATUSES, AnnotatorProgress, Assignment, AssignmentSpec, Bundle,
-    BundleSpec, Calibration, Criterion, DerivedSignal, ExportSummary, ImportSummary, Instrument,
+    BundleSpec, Calibration, ConcordanceSummary, Criterion, DerivedSignal, ExportSummary,
+    ImportSummary, Instrument,
     InstrumentSpec, NOTEBOOK_KINDS, NotebookEntry, NotebookEntrySpec, PairAgreement, QaReport,
     Interval, IntervalSpec, LabelCheck, Point, PointSpec, ProcessingRunKind, ProcessingRunRow,
     ProcessingRunSpec, ProcessingRunStatus, Project, ProgressCounts, RecipeRun, Reference,
