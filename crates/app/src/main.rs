@@ -348,9 +348,12 @@ struct SaddaApp {
     pending_new_tier: Option<NewTierDraft>,
     pending_tier_rename: Option<PendingTierRename>,
     pending_tier_delete: Option<PendingTierDelete>,
-    /// Target tier for span-selection commits (boundaries / points). Set by
-    /// clicking a tier's gutter name; highlighted in the strip.
-    active_tier_id: Option<i64>,
+    /// Active annotation tiers — the targets for span-selection commits
+    /// (boundaries / points). Several can be active at once: click a tier's
+    /// gutter name to toggle it, press a digit 1–9 to select one by lane
+    /// position (Shift+digit toggles), 0 clears. All active tiers are
+    /// highlighted in the strip.
+    active_tier_ids: Vec<i64>,
     /// `(y_axis_gutter_width, data_area_width)` of the signal plots,
     /// measured from the waveform each frame. The painter-based tier lanes
     /// use these *widths* (applied from their own panel's left) so their
@@ -564,6 +567,37 @@ mod play_action_tests {
         assert_eq!(
             span_for_action(PlayAction::SelectionOrView, 1.0, 5.0, 3.0, Some((4.0, 2.0))),
             Some((2.0, 4.0)),
+        );
+    }
+}
+
+/// Status-line text for the active-tier set: a comma-separated list, or a hint
+/// when empty. Pure → unit-tested.
+fn format_active_tiers_status(names: &[String]) -> String {
+    if names.is_empty() {
+        "Active tiers: none — click a name or press 1–9".to_string()
+    } else {
+        format!("Active tiers: {}", names.join(", "))
+    }
+}
+
+#[cfg(test)]
+mod active_tiers_status_tests {
+    use super::format_active_tiers_status;
+
+    #[test]
+    fn empty_shows_the_hint() {
+        let s = format_active_tiers_status(&[]);
+        assert!(s.contains("none"), "{s}");
+        assert!(s.contains("1–9"), "{s}");
+    }
+
+    #[test]
+    fn lists_active_names_comma_separated() {
+        let names = vec!["phones".to_string(), "words".to_string()];
+        assert_eq!(
+            format_active_tiers_status(&names),
+            "Active tiers: phones, words",
         );
     }
 }
@@ -1525,7 +1559,7 @@ impl SaddaApp {
             pending_new_tier: None,
             pending_tier_rename: None,
             pending_tier_delete: None,
-            active_tier_id: None,
+            active_tier_ids: Vec::new(),
             lane_geom: None,
             provenance: None,
         }
@@ -2214,9 +2248,7 @@ impl SaddaApp {
                             // referenced the gone tier.
                             self.selected_annotation = None;
                             self.draft_edit = DraftEdit::None;
-                            if self.active_tier_id == Some(id) {
-                                self.active_tier_id = None;
-                            }
+                            self.active_tier_ids.retain(|&tid| tid != id);
                             self.set_info(format!("Deleted tier “{name}”."));
                         }
                         Err(e) => self.set_error(format!("Delete tier failed: {e}")),
@@ -5123,6 +5155,38 @@ impl SaddaApp {
         }
     }
 
+    /// Activates the tier at lane `position` (1-based, top = 1) for the selected
+    /// bundle. `toggle = false` selects just that tier (replacing the active
+    /// set); `toggle = true` adds/removes it. No-op if the position has no tier.
+    fn set_active_by_position(&mut self, position: usize, toggle: bool) {
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return;
+        };
+        // Resolve the tier id under a scoped `&project` borrow, then mutate the
+        // active set (can't hold the borrow across the mutation).
+        let id = {
+            let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+                return;
+            };
+            match project.tiers(Some(bundle_id)) {
+                Ok(tiers) => tiers.get(position - 1).map(|t| t.id),
+                Err(_) => None,
+            }
+        };
+        let Some(id) = id else {
+            return;
+        };
+        if toggle {
+            if let Some(pos) = self.active_tier_ids.iter().position(|&x| x == id) {
+                self.active_tier_ids.remove(pos);
+            } else {
+                self.active_tier_ids.push(id);
+            }
+        } else {
+            self.active_tier_ids = vec![id];
+        }
+    }
+
     /// Per-frame playback bookkeeping: pull the audio thread's
     /// atomic cursor into `timeline.cursor`, scroll the view if the
     /// cursor went offscreen, and drop the stream when it finishes.
@@ -7242,6 +7306,39 @@ impl eframe::App for SaddaApp {
             }
         }
 
+        // ── Digit keys activate annotation tiers (Slice 2) ────────────────
+        // A bare digit 1–9 selects the tier at that lane position (top = 1),
+        // replacing the active set; Shift+digit toggles it in / out (several
+        // active at once); 0 clears all. Skipped while text-editing so digits
+        // reach the field.
+        if !text_editing && self.selected_bundle_id.is_some() {
+            let ctx = ui.ctx();
+            if ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Num0)
+                    || i.consume_key(egui::Modifiers::SHIFT, egui::Key::Num0)
+            }) {
+                self.active_tier_ids.clear();
+            }
+            for (n, key) in [
+                (1usize, egui::Key::Num1),
+                (2, egui::Key::Num2),
+                (3, egui::Key::Num3),
+                (4, egui::Key::Num4),
+                (5, egui::Key::Num5),
+                (6, egui::Key::Num6),
+                (7, egui::Key::Num7),
+                (8, egui::Key::Num8),
+                (9, egui::Key::Num9),
+            ] {
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
+                    self.set_active_by_position(n, false);
+                }
+                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, key)) {
+                    self.set_active_by_position(n, true);
+                }
+            }
+        }
+
         // Arrow keys scrub the view left / right (a quarter-window per
         // press); Home / End snap to the start / end of the file. This
         // is the discoverable, trackpad-free way to move through a long
@@ -8736,7 +8833,7 @@ impl SaddaApp {
         let view_end = self.timeline.view_end;
         let cursor = self.timeline.cursor;
         let selection = self.timeline.selection;
-        let active_tier_id = self.active_tier_id;
+        let active_tier_ids = self.active_tier_ids.clone();
         let lane_geom = self.lane_geom;
         let tiers = match project.tiers(Some(bundle_id)) {
             Ok(t) => t,
@@ -8753,40 +8850,53 @@ impl SaddaApp {
         // discipline as the selection state.
         let mut tier_op: Option<TierOp> = None;
         let mut clicked_active: Option<i64> = None;
-        let mut selection_commit: Option<(i64, TierType, f64, f64)> = None;
+        let mut selection_commit: Vec<(i64, TierType, f64, f64)> = Vec::new();
         let mut clear_selection = false;
-        let active = active_tier_id.and_then(|aid| tiers.iter().find(|t| t.id == aid));
+        // Active tiers (those in the set), in lane order, and the subset that can
+        // take a span selection (interval / point).
+        let active_names: Vec<String> = tiers
+            .iter()
+            .filter(|t| active_tier_ids.contains(&t.id))
+            .map(|t| truncate_label(&t.name, 16))
+            .collect();
+        let commit_targets: Vec<(i64, TierType)> = tiers
+            .iter()
+            .filter(|t| active_tier_ids.contains(&t.id))
+            .filter(|t| matches!(t.r#type, TierType::Interval | TierType::Point))
+            .map(|t| (t.id, t.r#type))
+            .collect();
         ui.horizontal(|ui| {
             if ui.button("➕ New tier…").clicked() {
                 tier_op = Some(TierOp::New);
             }
             ui.separator();
-            match active {
-                Some(t) => {
-                    ui.label(format!("Active tier: {}", truncate_label(&t.name, 16)));
-                }
-                None => {
-                    ui.label(egui::RichText::new("Active tier: none — click a tier name").weak());
-                }
+            let status = format_active_tiers_status(&active_names);
+            if active_names.is_empty() {
+                ui.label(egui::RichText::new(status).weak());
+            } else {
+                ui.label(status);
             }
             if let Some((lo, hi)) = selection {
                 ui.separator();
                 ui.label(egui::RichText::new(format!("selection {lo:.3}–{hi:.3}s")).small());
-                let can_commit = active
-                    .map(|t| matches!(t.r#type, TierType::Interval | TierType::Point))
-                    .unwrap_or(false);
-                let hint = if active.map(|t| t.r#type) == Some(TierType::Point) {
+                let can_commit = !commit_targets.is_empty();
+                let hint = if can_commit
+                    && commit_targets.iter().all(|(_, t)| *t == TierType::Point)
+                {
                     "Add points at edges"
-                } else {
+                } else if can_commit && commit_targets.iter().all(|(_, t)| *t == TierType::Interval)
+                {
                     "Add interval"
+                } else {
+                    "Add to active tiers"
                 };
                 if ui
                     .add_enabled(can_commit, egui::Button::new(hint))
-                    .on_hover_text("add the selection to the active tier")
+                    .on_hover_text("add the selection to all active interval / point tiers")
                     .clicked()
                 {
-                    if let Some(t) = active {
-                        selection_commit = Some((t.id, t.r#type, lo, hi));
+                    for (id, ty) in &commit_targets {
+                        selection_commit.push((*id, *ty, lo, hi));
                     }
                 }
                 if ui.button("Clear").clicked() {
@@ -8836,9 +8946,9 @@ impl SaddaApp {
                     // `layout_tests` regression test exercises.
                     let (gutter_rect, gutter_resp, rect, response) =
                         allocate_tier_row(ui, lane_geom);
-                    // Active tier (the span-selection target) is highlighted;
+                    // Active tiers (the span-selection targets) are highlighted;
                     // the name is painted into the reserved gutter rect.
-                    let name_color = if active_tier_id == Some(tier.id) {
+                    let name_color = if active_tier_ids.contains(&tier.id) {
                         SELECTION_EDGE
                     } else {
                         ui.visuals().strong_text_color()
@@ -9060,17 +9170,17 @@ impl SaddaApp {
 
         // ---- Active-tier + selection-commit (apply after &project) -
         if let Some(id) = clicked_active {
-            // Toggle off if clicking the already-active tier.
-            self.active_tier_id = if self.active_tier_id == Some(id) {
-                None
+            // Click toggles the tier in / out of the active set.
+            if let Some(pos) = self.active_tier_ids.iter().position(|&x| x == id) {
+                self.active_tier_ids.remove(pos);
             } else {
-                Some(id)
-            };
+                self.active_tier_ids.push(id);
+            }
         }
         if clear_selection {
             self.timeline.clear_selection();
         }
-        if let Some((tier_id, tier_type, lo, hi)) = selection_commit {
+        for (tier_id, tier_type, lo, hi) in selection_commit {
             self.commit_selection_to_tier(tier_id, tier_type, lo, hi);
         }
 

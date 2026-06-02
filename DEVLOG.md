@@ -6,6 +6,25 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-02 — Multi-active tiers + digit activation (Slice 2: scan ergonomics)
+
+Second slice. The single `active_tier_id: Option<i64>` becomes a **set**
+`active_tier_ids: Vec<i64>` — several annotation tiers can be active at once.
+
+- **Digit keys**: bare **1–9** selects the tier at that lane position (top = 1),
+  replacing the set; **Shift+digit** toggles it in/out; **0** clears.
+  `set_active_by_position` resolves the tier id under a scoped `&project` borrow,
+  then mutates the set. Clicking a tier name still toggles it (now into the set).
+- **UI**: all active lanes highlighted (`SELECTION_EDGE`); the strip status lists
+  the active tiers (pure `format_active_tiers_status`, tested) or a hint; the
+  Add-selection button commits to **all** active interval/point tiers (label
+  adapts: Add interval / Add points / Add to active tiers). Delete-tier prunes
+  the set.
+
+Groundwork for Slice 3 (Enter-to-commit + conflict resolution). App-only; +2
+tests. Notes (tweakable): Shift+digit chosen for the toggle; the multi-tier
+commit button has **no conflict checks yet** — that lands in Slice 3.
+
 ## 2026-06-02 — Praat-style span playback (Slice 1: scanning ergonomics)
 
 First slice of "make scanning & annotating enjoyable" (plan + Q&A 2026-06-02;
