@@ -4,6 +4,8 @@ _Sadda_ ([Pali](https://en.wikipedia.org/wiki/Pali): सद्द) — _sound, v
 
 An open-source toolkit for phonetics and speech-science research.
 
+![The sadda desktop app showing a speech recording as a waveform, a spectrogram, and stacked f0, formant, and intensity measure tracks, alongside a bundle-list sidebar and a reference-distribution panel.](assets/sadda_screenshot.png)
+
 ## Intended use
 
 sadda is **for research, education, and non-diagnostic use only.** It is
