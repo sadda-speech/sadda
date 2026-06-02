@@ -82,4 +82,10 @@ features = ["pyo3/extension-module"]
 dev = [
     "maturin>=1.7",
     "pytest>=8",
+    # tools/docs/test_griffe_source_links.py imports griffe (distribution
+    # `griffelib`) to unit-test the source-link extension. The full docs build
+    # (docs.yml) installs it via a separate `uv pip install`, but CI's pytest
+    # runs off `uv sync`, so it must be a declared test dep or collection fails
+    # with ModuleNotFoundError. Matches the version pinned in docs.yml.
+    "griffelib>=2.0.2",
 ]
