@@ -572,7 +572,11 @@ mod tests {
                 "emit": {"kind": "point_expr", "at": "argmax(f0)"}}"#,
         )
         .unwrap();
-        assert!(evaluate(&rule, &rows, &[], &[], &signals).unwrap().is_empty());
+        assert!(
+            evaluate(&rule, &rows, &[], &[], &signals)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

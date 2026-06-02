@@ -2956,7 +2956,11 @@ impl PyProject {
     fn rubric_versions(&self) -> PyResult<Vec<PyRubricVersion>> {
         self.inner
             .rubric_versions()
-            .map(|xs| xs.into_iter().map(|inner| PyRubricVersion { inner }).collect())
+            .map(|xs| {
+                xs.into_iter()
+                    .map(|inner| PyRubricVersion { inner })
+                    .collect()
+            })
             .map_err(engine_err_to_py)
     }
 
@@ -2996,7 +3000,9 @@ impl PyProject {
             measurement,
             bundle_id,
         };
-        self.inner.add_notebook_entry(&spec).map_err(engine_err_to_py)
+        self.inner
+            .add_notebook_entry(&spec)
+            .map_err(engine_err_to_py)
     }
 
     /// Lists notebook entries (newest first), optionally restricted to a
@@ -3005,7 +3011,11 @@ impl PyProject {
     fn notebook_entries(&self, target_type: Option<&str>) -> PyResult<Vec<PyNotebookEntry>> {
         self.inner
             .notebook_entries(target_type)
-            .map(|xs| xs.into_iter().map(|inner| PyNotebookEntry { inner }).collect())
+            .map(|xs| {
+                xs.into_iter()
+                    .map(|inner| PyNotebookEntry { inner })
+                    .collect()
+            })
             .map_err(engine_err_to_py)
     }
 
@@ -3032,7 +3042,9 @@ impl PyProject {
 
     /// Deletes a notebook entry by id (idempotent).
     fn delete_notebook_entry(&self, id: i64) -> PyResult<()> {
-        self.inner.delete_notebook_entry(id).map_err(engine_err_to_py)
+        self.inner
+            .delete_notebook_entry(id)
+            .map_err(engine_err_to_py)
     }
 
     /// Promotes a notebook entry into a criterion (creates it + links the

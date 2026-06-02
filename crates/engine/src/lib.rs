@@ -26,6 +26,7 @@ pub mod refdist;
 pub mod storage;
 pub mod units;
 
+pub use agreement::{AgreementOptions, AgreementReport};
 pub use audio::{Audio, AudioProbe};
 pub use citation::{Citation, citation_for};
 pub use clinical::{
@@ -35,15 +36,13 @@ pub use clinical::{
 pub use corpus::{
     ASSIGNMENT_ROLES, ASSIGNMENT_STATUSES, AnnotatorProgress, Assignment, AssignmentSpec, Bundle,
     BundleSpec, Calibration, ConcordanceSummary, Criterion, DerivedSignal, ExportSummary,
-    ImportSummary, Instrument,
-    InstrumentSpec, NOTEBOOK_KINDS, NotebookEntry, NotebookEntrySpec, PairAgreement, QaReport,
-    Interval, IntervalSpec, LabelCheck, Point, PointSpec, ProcessingRunKind, ProcessingRunRow,
-    ProcessingRunSpec, ProcessingRunStatus, Project, ProgressCounts, RecipeRun, Reference,
-    ReferenceSpec, Rubric, RubricTier, RubricTierSnapshot, RubricVersion, Session, SessionSpec,
-    Speaker, SpeakerSpec, StatusDef, TARGET_STATUSES, Target, TargetSpec, Tier, TierImpact,
-    TierRows, TierSpec, TierType, VocabEntry,
+    ImportSummary, Instrument, InstrumentSpec, Interval, IntervalSpec, LabelCheck, NOTEBOOK_KINDS,
+    NotebookEntry, NotebookEntrySpec, PairAgreement, Point, PointSpec, ProcessingRunKind,
+    ProcessingRunRow, ProcessingRunSpec, ProcessingRunStatus, ProgressCounts, Project, QaReport,
+    RecipeRun, Reference, ReferenceSpec, Rubric, RubricTier, RubricTierSnapshot, RubricVersion,
+    Session, SessionSpec, Speaker, SpeakerSpec, StatusDef, TARGET_STATUSES, Target, TargetSpec,
+    Tier, TierImpact, TierRows, TierSpec, TierType, VocabEntry,
 };
-pub use agreement::{AgreementOptions, AgreementReport};
 pub use criteria::expr::{Expr, SampledSignal, SignalSet};
 pub use criteria::{CriterionRule, Emit, EvalInterval, Proposal, Selector};
 pub use error::{EngineError, Result};

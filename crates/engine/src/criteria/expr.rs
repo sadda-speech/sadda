@@ -243,11 +243,7 @@ fn as_bool(v: Value) -> Result<bool, String> {
 }
 
 /// Evaluates two operands, returning `None` if either is undefined.
-fn eval_pair(
-    a: &Node,
-    b: &Node,
-    ctx: &EvalCtx,
-) -> Result<Option<(Value, Value)>, String> {
+fn eval_pair(a: &Node, b: &Node, ctx: &EvalCtx) -> Result<Option<(Value, Value)>, String> {
     let (Some(x), Some(y)) = (eval_node(a, ctx)?, eval_node(b, ctx)?) else {
         return Ok(None);
     };
@@ -345,11 +341,7 @@ fn scoped_slice<'a>(sig: &'a SampledSignal, scope: Scope, ctx: &EvalCtx) -> &'a 
 }
 
 /// The `(times, values)` slice for a scope (crossings need both).
-fn scoped_pair<'a>(
-    sig: &'a SampledSignal,
-    scope: Scope,
-    ctx: &EvalCtx,
-) -> (&'a [f64], &'a [f64]) {
+fn scoped_pair<'a>(sig: &'a SampledSignal, scope: Scope, ctx: &EvalCtx) -> (&'a [f64], &'a [f64]) {
     match scope {
         Scope::File => (&sig.times, &sig.values),
         Scope::Interval => {
@@ -762,8 +754,8 @@ impl Parser {
     }
 
     fn parse_call(&mut self, name: &str) -> Result<Node, String> {
-        let func = ReduceFunc::from_name(name)
-            .ok_or_else(|| format!("unknown function {name:?}"))?;
+        let func =
+            ReduceFunc::from_name(name).ok_or_else(|| format!("unknown function {name:?}"))?;
         self.eat(&Tok::LParen)?;
         // First arg: the signal name (a bare identifier).
         let signal = match self.bump() {
@@ -843,7 +835,7 @@ mod tests {
             ("start + duration", 3.0),
             ("end - start", 2.0),
             ("start + 20ms", 1.02),
-            ("start + 50%", 2.0),  // 0.5 * 2.0 = 1.0; +start
+            ("start + 50%", 2.0), // 0.5 * 2.0 = 1.0; +start
             ("-duration", -2.0),
         ];
         for (src, want) in cases {
@@ -871,7 +863,10 @@ mod tests {
     fn reducers_over_interval_and_file_scope() {
         let mut signals = SignalSet::new();
         // times 0..4 at 1s spacing; values 10,20,30,40.
-        signals.insert("x".into(), sig(&[0.0, 1.0, 2.0, 3.0], &[10.0, 20.0, 30.0, 40.0]));
+        signals.insert(
+            "x".into(),
+            sig(&[0.0, 1.0, 2.0, 3.0], &[10.0, 20.0, 30.0, 40.0]),
+        );
         // Interval [1,2] selects samples at t=1,2 → values 20,30.
         let ctx = ctx_with(1.0, 2.0, &signals);
         let n = |src: &str| match Expr::parse(src).unwrap().eval(&ctx).unwrap().unwrap() {
@@ -897,8 +892,14 @@ mod tests {
         let ctx = ctx_with(2.0, 3.0, &signals);
         assert_eq!(Expr::parse("mean(x)").unwrap().eval(&ctx).unwrap(), None);
         // Undefined propagates through arithmetic and comparison.
-        assert_eq!(Expr::parse("mean(x) + 1").unwrap().eval(&ctx).unwrap(), None);
-        assert_eq!(Expr::parse("mean(x) > 0").unwrap().eval(&ctx).unwrap(), None);
+        assert_eq!(
+            Expr::parse("mean(x) + 1").unwrap().eval(&ctx).unwrap(),
+            None
+        );
+        assert_eq!(
+            Expr::parse("mean(x) > 0").unwrap().eval(&ctx).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -953,6 +954,9 @@ mod tests {
         assert_eq!(e.signals(), vec!["f0".to_string(), "intensity".to_string()]);
         // crossing threshold sub-expression is also scanned
         let e = Expr::parse("first_crossing(intensity, mean(energy))").unwrap();
-        assert_eq!(e.signals(), vec!["intensity".to_string(), "energy".to_string()]);
+        assert_eq!(
+            e.signals(),
+            vec!["intensity".to_string(), "energy".to_string()]
+        );
     }
 }

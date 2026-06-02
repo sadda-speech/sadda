@@ -210,7 +210,8 @@ pub fn compare_intervals(a: &[Segment], b: &[Segment], opts: &AgreementOptions) 
         .map(|s| s.end)
         .chain(b.iter().map(|s| s.end))
         .fold(0.0_f64, f64::max);
-    let (frame_percent_agreement, frame_kappa) = frame_metrics(a, b, extent, opts.frame_step_seconds);
+    let (frame_percent_agreement, frame_kappa) =
+        frame_metrics(a, b, extent, opts.frame_step_seconds);
 
     AgreementReport {
         tier_type: "interval".to_string(),
@@ -411,12 +412,24 @@ mod tests {
     #[test]
     fn points_match_nearest_and_measure_time_deviation() {
         let a = vec![
-            Mark { time: 0.10, label: Some("x".into()) },
-            Mark { time: 0.50, label: Some("y".into()) },
+            Mark {
+                time: 0.10,
+                label: Some("x".into()),
+            },
+            Mark {
+                time: 0.50,
+                label: Some("y".into()),
+            },
         ];
         let b = vec![
-            Mark { time: 0.12, label: Some("x".into()) },
-            Mark { time: 0.55, label: Some("z".into()) },
+            Mark {
+                time: 0.12,
+                label: Some("x".into()),
+            },
+            Mark {
+                time: 0.55,
+                label: Some("z".into()),
+            },
         ];
         let r = compare_points(&a, &b, &AgreementOptions::default());
         assert_eq!((r.n_a, r.n_b, r.n_matched), (2, 2, 2));
@@ -429,7 +442,9 @@ mod tests {
     #[test]
     fn kappa_corrects_for_chance_on_skewed_labels() {
         // 9/10 "a", 1 disagreement → high raw agreement but κ < raw.
-        let a: Vec<Segment> = (0..10).map(|i| seg(i as f64, i as f64 + 1.0, "a")).collect();
+        let a: Vec<Segment> = (0..10)
+            .map(|i| seg(i as f64, i as f64 + 1.0, "a"))
+            .collect();
         let mut b = a.clone();
         b[0].label = Some("b".into());
         let r = compare_intervals(&a, &b, &AgreementOptions::default());

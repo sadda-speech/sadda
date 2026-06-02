@@ -680,8 +680,7 @@ impl TargetSpec {
 }
 
 /// The valid [`Target::status`] values, in lifecycle order.
-pub const TARGET_STATUSES: [&str; 5] =
-    ["unassigned", "assigned", "in_progress", "done", "flagged"];
+pub const TARGET_STATUSES: [&str; 5] = ["unassigned", "assigned", "in_progress", "done", "flagged"];
 
 /// An **assignment** (slice S4b): distributes a [`Target`] to an annotator. A
 /// dedicated object, separate from annotation data and the rubric. A target may
@@ -1466,7 +1465,9 @@ impl Project {
             (hound::SampleFormat::Float, 32) => {
                 self.split_typed::<_, f32>(reader, spec, name_prefix, chunk_frames)
             }
-            (fmt, bits) => Err(EngineError::UnsupportedFormat(format!("{fmt:?} {bits}-bit"))),
+            (fmt, bits) => Err(EngineError::UnsupportedFormat(format!(
+                "{fmt:?} {bits}-bit"
+            ))),
         }
     }
 
@@ -2824,7 +2825,8 @@ impl Project {
     pub fn delete_target(&self, id: i64) -> Result<()> {
         self.conn
             .execute("DELETE FROM assignment WHERE target_id = ?1", [id])?;
-        self.conn.execute("DELETE FROM target WHERE id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM target WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -2940,9 +2942,9 @@ impl Project {
         if spec.annotator.trim().is_empty() {
             return Err(EngineError::Corpus("assignment annotator is empty".into()));
         }
-        let target = self.get_target(spec.target_id)?.ok_or_else(|| {
-            EngineError::Corpus(format!("no target with id {}", spec.target_id))
-        })?;
+        let target = self
+            .get_target(spec.target_id)?
+            .ok_or_else(|| EngineError::Corpus(format!("no target with id {}", spec.target_id)))?;
         let id: i64 = self.conn.query_row(
             "INSERT INTO assignment (target_id, annotator, role, status, seed) \
              VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
@@ -3136,7 +3138,11 @@ impl Project {
     ///
     /// v1 scope: dense (measure-track / vector) tiers and reference tiers are
     /// NOT copied; rubric *versioning* is S6 (the current rubric is copied as-is).
-    pub fn export_annotator_package(&self, annotator: &str, dest_dir: &Path) -> Result<ExportSummary> {
+    pub fn export_annotator_package(
+        &self,
+        annotator: &str,
+        dest_dir: &Path,
+    ) -> Result<ExportSummary> {
         if annotator.trim().is_empty() {
             return Err(EngineError::Corpus("export: annotator is empty".into()));
         }
@@ -3151,7 +3157,8 @@ impl Project {
             if assigns.is_empty() {
                 continue;
             }
-            let tids: std::collections::HashSet<i64> = assigns.iter().map(|a| a.target_id).collect();
+            let tids: std::collections::HashSet<i64> =
+                assigns.iter().map(|a| a.target_id).collect();
             let targets: Vec<Target> = self
                 .targets(b.id)?
                 .into_iter()
@@ -3331,7 +3338,9 @@ impl Project {
         let mut tiers = Vec::new();
         for name in source_tier_names {
             let t = self.tier_by_name(bundle_id, name)?.ok_or_else(|| {
-                EngineError::Corpus(format!("merge_tiers: no tier {name:?} on bundle {bundle_id}"))
+                EngineError::Corpus(format!(
+                    "merge_tiers: no tier {name:?} on bundle {bundle_id}"
+                ))
             })?;
             tiers.push(t);
         }
@@ -3558,9 +3567,11 @@ impl Project {
             )));
         }
         tokens.sort_by(|a, b| {
-            a.bundle_id
-                .cmp(&b.bundle_id)
-                .then(a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal))
+            a.bundle_id.cmp(&b.bundle_id).then(
+                a.start
+                    .partial_cmp(&b.start)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
         });
 
         // 2. Load each source bundle's mono audio once; require one sample rate.
@@ -3599,7 +3610,9 @@ impl Project {
         for (i, t) in tokens.iter().enumerate() {
             let mono = &audio[&t.bundle_id];
             let s0 = ((t.start * sr as f64).round() as usize).min(mono.len());
-            let s1 = ((t.end * sr as f64).round() as usize).min(mono.len()).max(s0);
+            let s1 = ((t.end * sr as f64).round() as usize)
+                .min(mono.len())
+                .max(s0);
             let offset = concat.len() as f64 / sr as f64;
             concat.extend_from_slice(&mono[s0..s1]);
             placed.push(Placed {
@@ -3879,8 +3892,10 @@ impl Project {
                 report.out_of_vocab = ivs.iter().filter(|i| is_oov(&i.label)).count();
                 report.missing_label = ivs.iter().filter(|i| is_missing(&i.label)).count();
                 // Overlap count: every interval pair sharing positive time.
-                let spans: Vec<(f64, f64)> =
-                    ivs.iter().map(|i| (i.start_seconds, i.end_seconds)).collect();
+                let spans: Vec<(f64, f64)> = ivs
+                    .iter()
+                    .map(|i| (i.start_seconds, i.end_seconds))
+                    .collect();
                 let mut overlaps = 0;
                 for i in 0..spans.len() {
                     for j in (i + 1)..spans.len() {
@@ -3950,9 +3965,9 @@ impl Project {
     /// bumping); to start a new version, `set_rubric` with `version + 1` first.
     /// Returns the published snapshot. Errors if no rubric exists.
     pub fn publish_rubric_version(&self, note: Option<&str>) -> Result<RubricVersion> {
-        let rubric = self
-            .rubric()?
-            .ok_or_else(|| EngineError::Corpus("no rubric to publish; call set_rubric first".into()))?;
+        let rubric = self.rubric()?.ok_or_else(|| {
+            EngineError::Corpus("no rubric to publish; call set_rubric first".into())
+        })?;
         let snapshot = RubricSnapshot {
             statuses: self.rubric_statuses()?,
             tiers: self
@@ -4096,9 +4111,7 @@ impl Project {
                 "SELECT tier_name, description, closed_vocabulary \
                  FROM rubric_tier WHERE rubric_id = 1 ORDER BY tier_name",
             )?
-            .query_map([], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0))
-            })?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)))?
             .collect::<rusqlite::Result<_>>()?;
         let mut out = Vec::with_capacity(tiers.len());
         for (tier_name, description, closed_vocabulary) in tiers {
@@ -4143,7 +4156,13 @@ impl Project {
         let id: i64 = self.conn.query_row(
             "INSERT INTO notebook_entry (target_type, kind, text, measurement, bundle_id) \
              VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
-            rusqlite::params![spec.target_type, kind, spec.text, spec.measurement, spec.bundle_id],
+            rusqlite::params![
+                spec.target_type,
+                kind,
+                spec.text,
+                spec.measurement,
+                spec.bundle_id
+            ],
             |row| row.get(0),
         )?;
         Ok(id)
@@ -4164,9 +4183,9 @@ impl Project {
                     .collect::<rusqlite::Result<Vec<_>>>()?
             }
             None => {
-                let mut stmt = self
-                    .conn
-                    .prepare(&format!("SELECT {cols} FROM notebook_entry ORDER BY id DESC"))?;
+                let mut stmt = self.conn.prepare(&format!(
+                    "SELECT {cols} FROM notebook_entry ORDER BY id DESC"
+                ))?;
                 stmt.query_map([], Self::map_notebook_row)?
                     .collect::<rusqlite::Result<Vec<_>>>()?
             }
@@ -4205,7 +4224,9 @@ impl Project {
             rusqlite::params![text, measurement, id],
         )?;
         if n == 0 {
-            return Err(EngineError::Corpus(format!("no notebook entry with id {id}")));
+            return Err(EngineError::Corpus(format!(
+                "no notebook entry with id {id}"
+            )));
         }
         Ok(())
     }
@@ -4249,7 +4270,10 @@ impl Project {
             .get_notebook_entry(entry_id)?
             .ok_or_else(|| EngineError::Corpus(format!("no notebook entry with id {entry_id}")))?;
         let existing = self.rubric_tier(&entry.target_type)?;
-        let closed = existing.as_ref().map(|r| r.closed_vocabulary).unwrap_or(false);
+        let closed = existing
+            .as_ref()
+            .map(|r| r.closed_vocabulary)
+            .unwrap_or(false);
         let description = match existing.and_then(|r| r.description) {
             Some(d) if !d.trim().is_empty() => format!("{d}\n{}", entry.text),
             _ => entry.text.clone(),
@@ -4372,11 +4396,7 @@ impl Project {
     /// `continuous_numeric` measure-track tier of that name (sample times
     /// reconstructed from its stored sample rate). An unknown name errors. This
     /// is the open "signal registry" — built-ins plus every stored track.
-    fn signal_set(
-        &self,
-        bundle_id: i64,
-        names: &[String],
-    ) -> Result<crate::SignalSet> {
+    fn signal_set(&self, bundle_id: i64, names: &[String]) -> Result<crate::SignalSet> {
         use crate::SampledSignal;
         let mut set = crate::SignalSet::new();
         let needs_audio = names.iter().any(|n| n == "f0" || n == "intensity");
@@ -6650,7 +6670,13 @@ mod tests {
         let divider = project.tier_by_name(new_id, "⟨source⟩").unwrap().unwrap();
         let marks = project.intervals(divider.id).unwrap();
         assert_eq!(marks.len(), 3);
-        assert!(marks[0].label.as_deref().unwrap().starts_with("b1 @ 0.020s"));
+        assert!(
+            marks[0]
+                .label
+                .as_deref()
+                .unwrap()
+                .starts_with("b1 @ 0.020s")
+        );
 
         // Context: the "word" tier was remapped (clipped to the first token).
         let word = project.tier_by_name(new_id, "word").unwrap().unwrap();
@@ -7479,14 +7505,24 @@ mod tests {
         assert!(params["body_sha256"].as_str().unwrap().len() == 64);
 
         // get_processing_run resolves the same row.
-        assert_eq!(project.get_processing_run(run.id).unwrap().unwrap().id, run.id);
+        assert_eq!(
+            project.get_processing_run(run.id).unwrap().unwrap().id,
+            run.id
+        );
         assert!(project.get_processing_run(99_999).unwrap().is_none());
 
         // Each preview proposal carries the run link.
-        let preview = project.tier_by_name(bundle_id, "vowels (auto)").unwrap().unwrap();
+        let preview = project
+            .tier_by_name(bundle_id, "vowels (auto)")
+            .unwrap()
+            .unwrap();
         let proposals = project.intervals(preview.id).unwrap();
         assert_eq!(proposals.len(), 2);
-        assert!(proposals.iter().all(|iv| iv.processing_run_id == Some(run.id)));
+        assert!(
+            proposals
+                .iter()
+                .all(|iv| iv.processing_run_id == Some(run.id))
+        );
 
         // Re-running records a *second* run; the proposals now point at it.
         assert_eq!(project.run_criterion(crit.id, bundle_id).unwrap(), 2);
@@ -7494,14 +7530,22 @@ mod tests {
         assert_eq!(runs.len(), 2);
         let latest = runs[1].id;
         let proposals = project.intervals(preview.id).unwrap();
-        assert!(proposals.iter().all(|iv| iv.processing_run_id == Some(latest)));
+        assert!(
+            proposals
+                .iter()
+                .all(|iv| iv.processing_run_id == Some(latest))
+        );
 
         // Accept: the provenance link survives promotion onto the target tier.
         assert_eq!(project.accept_proposals(bundle_id, "vowels").unwrap(), 2);
         let target = project.tier_by_name(bundle_id, "vowels").unwrap().unwrap();
         let promoted = project.intervals(target.id).unwrap();
         assert_eq!(promoted.len(), 2);
-        assert!(promoted.iter().all(|iv| iv.processing_run_id == Some(latest)));
+        assert!(
+            promoted
+                .iter()
+                .all(|iv| iv.processing_run_id == Some(latest))
+        );
 
         let _ = std::fs::remove_file(&source_wav);
         let _ = std::fs::remove_dir_all(&root);
@@ -7538,7 +7582,9 @@ mod tests {
 
         // Status lifecycle + note; bad status rejected; RoI sanity enforced.
         project.update_target_status(id, "in_progress").unwrap();
-        project.set_target_note(id, Some("ambiguous vs rubric")).unwrap();
+        project
+            .set_target_note(id, Some("ambiguous vs rubric"))
+            .unwrap();
         let t = project.get_target(id).unwrap().unwrap();
         assert_eq!(t.status, "in_progress");
         assert_eq!(t.note.as_deref(), Some("ambiguous vs rubric"));
@@ -7687,7 +7733,9 @@ mod tests {
         );
 
         // Editable: status + reassignment.
-        project.update_assignment_status(aid, "in_progress").unwrap();
+        project
+            .update_assignment_status(aid, "in_progress")
+            .unwrap();
         project.set_assignment_annotator(aid, "carol").unwrap();
         let a = project.get_target(tid).unwrap().unwrap();
         assert_eq!(a.status, "assigned"); // target status unaffected by edits
@@ -7750,7 +7798,12 @@ mod tests {
         let a1 = p1.assignments(b1).unwrap();
         assert_eq!(a1.len(), 10);
         // All targets now assigned; seed recorded.
-        assert!(p1.targets(b1).unwrap().iter().all(|t| t.status == "assigned"));
+        assert!(
+            p1.targets(b1)
+                .unwrap()
+                .iter()
+                .all(|t| t.status == "assigned")
+        );
         assert!(a1.iter().all(|a| a.seed == Some(42)));
         // Balanced: 10 across 3 → counts in {3,4}, difference ≤ 1.
         let mut counts = std::collections::HashMap::new();
@@ -7770,8 +7823,10 @@ mod tests {
         // Second identical project, same seed → identical (target→annotator) map.
         let (root2, wav2, p2, b2, _) = build("rand_assign_2");
         p2.assign_targets_randomly(b2, &roster, 42, None).unwrap();
-        let map1: Vec<(i64, String)> =
-            a1.iter().map(|a| (a.target_id, a.annotator.clone())).collect();
+        let map1: Vec<(i64, String)> = a1
+            .iter()
+            .map(|a| (a.target_id, a.annotator.clone()))
+            .collect();
         let map2: Vec<(i64, String)> = p2
             .assignments(b2)
             .unwrap()
@@ -7786,7 +7841,10 @@ mod tests {
             p1.add_target(&TargetSpec::new(b1, s, s + 0.05, "phones"))
                 .unwrap();
         }
-        assert_eq!(p1.assign_targets_randomly(b1, &roster, 99, None).unwrap(), 2);
+        assert_eq!(
+            p1.assign_targets_randomly(b1, &roster, 99, None).unwrap(),
+            2
+        );
         assert_eq!(p1.assignments(b1).unwrap().len(), 12);
 
         for (root, wav) in [(root1, wav1), (root2, wav2)] {
@@ -7821,8 +7879,7 @@ mod tests {
         let pkg_dir = unique_dir("pkg_export");
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&pkg_dir);
-        let source_wav =
-            std::env::temp_dir().join(format!("sadda_pkg_{}.wav", std::process::id()));
+        let source_wav = std::env::temp_dir().join(format!("sadda_pkg_{}.wav", std::process::id()));
         write_short_wav(&source_wav, 16_000);
 
         let parent = Project::create(&root, "study").unwrap();
@@ -7841,21 +7898,28 @@ mod tests {
             })
             .unwrap();
         // A rubric, to exercise the rubric copy.
-        parent.set_rubric("scheme", 1, Some("annotate vowels")).unwrap();
+        parent
+            .set_rubric("scheme", 1, Some("annotate vowels"))
+            .unwrap();
         // alice and bob each get a "vowels" target; export must include only alice's.
         let ta = parent
             .add_target(&TargetSpec::new(bundle_id, 0.0, 0.2, "vowels"))
             .unwrap();
-        parent.add_assignment(&AssignmentSpec::new(ta, "alice")).unwrap();
+        parent
+            .add_assignment(&AssignmentSpec::new(ta, "alice"))
+            .unwrap();
         let tb = parent
             .add_target(&TargetSpec::new(bundle_id, 0.5, 0.7, "vowels"))
             .unwrap();
-        parent.add_assignment(&AssignmentSpec::new(tb, "bob")).unwrap();
-
-        let summary = parent
-            .export_annotator_package("alice", &pkg_dir)
+        parent
+            .add_assignment(&AssignmentSpec::new(tb, "bob"))
             .unwrap();
-        assert_eq!((summary.bundles, summary.targets, summary.assignments), (1, 1, 1));
+
+        let summary = parent.export_annotator_package("alice", &pkg_dir).unwrap();
+        assert_eq!(
+            (summary.bundles, summary.targets, summary.assignments),
+            (1, 1, 1)
+        );
 
         // Simulate alice working in the package: the context + her target/assignment
         // are present (not bob's); she adds a "vowels" tier and annotates.
@@ -7883,22 +7947,37 @@ mod tests {
         let imp = parent.import_annotator_package(&pkg_dir).unwrap();
         assert_eq!(imp.annotator, "alice");
         assert_eq!(
-            (imp.bundles_matched, imp.tiers_imported, imp.annotations_imported),
+            (
+                imp.bundles_matched,
+                imp.tiers_imported,
+                imp.annotations_imported
+            ),
             (1, 1, 1)
         );
         assert_eq!(imp.assignments_marked_done, 1);
 
         // alice's work landed on its own per-annotator tier.
-        let valice = parent.tier_by_name(bundle_id, "vowels [alice]").unwrap().unwrap();
+        let valice = parent
+            .tier_by_name(bundle_id, "vowels [alice]")
+            .unwrap()
+            .unwrap();
         assert_eq!(parent.intervals(valice.id).unwrap().len(), 1);
         // Her assignment is done; bob's is untouched.
         let assigns = parent.assignments(bundle_id).unwrap();
         assert_eq!(
-            assigns.iter().find(|a| a.annotator == "alice").unwrap().status,
+            assigns
+                .iter()
+                .find(|a| a.annotator == "alice")
+                .unwrap()
+                .status,
             "done"
         );
         assert_eq!(
-            assigns.iter().find(|a| a.annotator == "bob").unwrap().status,
+            assigns
+                .iter()
+                .find(|a| a.annotator == "bob")
+                .unwrap()
+                .status,
             "assigned"
         );
 
@@ -7921,10 +8000,18 @@ mod tests {
         let project = Project::create(&root, "p").unwrap();
         let bundle_id = project.add_bundle("b", &source_wav).unwrap();
         let alice = project
-            .add_tier(&TierSpec::new(bundle_id, "phones [alice]", TierType::Interval))
+            .add_tier(&TierSpec::new(
+                bundle_id,
+                "phones [alice]",
+                TierType::Interval,
+            ))
             .unwrap();
         let bob = project
-            .add_tier(&TierSpec::new(bundle_id, "phones [bob]", TierType::Interval))
+            .add_tier(&TierSpec::new(
+                bundle_id,
+                "phones [bob]",
+                TierType::Interval,
+            ))
             .unwrap();
         for (tier, s) in [(alice, 0.2), (alice, 0.0), (bob, 0.5)] {
             project
@@ -7980,10 +8067,18 @@ mod tests {
         let project = Project::create(&root, "p").unwrap();
         let bundle_id = project.add_bundle("b", &source_wav).unwrap();
         let alice = project
-            .add_tier(&TierSpec::new(bundle_id, "phones [alice]", TierType::Interval))
+            .add_tier(&TierSpec::new(
+                bundle_id,
+                "phones [alice]",
+                TierType::Interval,
+            ))
             .unwrap();
         let bob = project
-            .add_tier(&TierSpec::new(bundle_id, "phones [bob]", TierType::Interval))
+            .add_tier(&TierSpec::new(
+                bundle_id,
+                "phones [bob]",
+                TierType::Interval,
+            ))
             .unwrap();
         // Same spans; bob disagrees on the last label.
         for (tier, flip) in [(alice, false), (bob, true)] {
@@ -8085,8 +8180,12 @@ mod tests {
         let t1 = project
             .add_target(&TargetSpec::new(bundle_id, 0.2, 0.3, "phones"))
             .unwrap();
-        let a0 = project.add_assignment(&AssignmentSpec::new(t0, "alice")).unwrap();
-        let a1 = project.add_assignment(&AssignmentSpec::new(t1, "bob")).unwrap();
+        let a0 = project
+            .add_assignment(&AssignmentSpec::new(t0, "alice"))
+            .unwrap();
+        let a1 = project
+            .add_assignment(&AssignmentSpec::new(t1, "bob"))
+            .unwrap();
         project.update_assignment_status(a0, "done").unwrap();
         project.update_assignment_status(a1, "in_progress").unwrap();
 
@@ -8106,9 +8205,19 @@ mod tests {
             .unwrap();
         project.set_rubric("r", 1, None).unwrap();
         project
-            .set_controlled_vocabulary("phones", &[VocabEntry { value: "a".into(), ..Default::default() }])
+            .set_controlled_vocabulary(
+                "phones",
+                &[VocabEntry {
+                    value: "a".into(),
+                    ..Default::default()
+                }],
+            )
             .unwrap();
-        for (s, e, l) in [(0.0, 0.1, Some("a")), (0.1, 0.2, Some("zzz")), (0.15, 0.25, None)] {
+        for (s, e, l) in [
+            (0.0, 0.1, Some("a")),
+            (0.1, 0.2, Some("zzz")),
+            (0.15, 0.25, None),
+        ] {
             project
                 .add_interval(&IntervalSpec {
                     tier_id: phones,
@@ -8128,7 +8237,11 @@ mod tests {
         // Agreement summary over per-annotator tiers.
         for (annot, last) in [("alice", "a"), ("bob", "b")] {
             let tid = project
-                .add_tier(&TierSpec::new(bundle_id, format!("vowels [{annot}]"), TierType::Interval))
+                .add_tier(&TierSpec::new(
+                    bundle_id,
+                    format!("vowels [{annot}]"),
+                    TierType::Interval,
+                ))
                 .unwrap();
             project
                 .add_interval(&IntervalSpec {
@@ -8142,7 +8255,10 @@ mod tests {
         }
         let pairs = project.agreement_summary(bundle_id, "vowels").unwrap();
         assert_eq!(pairs.len(), 1);
-        assert_eq!((pairs[0].annotator_a.as_str(), pairs[0].annotator_b.as_str()), ("alice", "bob"));
+        assert_eq!(
+            (pairs[0].annotator_a.as_str(), pairs[0].annotator_b.as_str()),
+            ("alice", "bob")
+        );
         assert_eq!(pairs[0].report.n_matched, 1);
 
         let _ = std::fs::remove_file(&source_wav);
@@ -8169,8 +8285,14 @@ mod tests {
             .set_controlled_vocabulary(
                 "phones",
                 &[
-                    VocabEntry { value: "a".into(), ..Default::default() },
-                    VocabEntry { value: "b".into(), ..Default::default() },
+                    VocabEntry {
+                        value: "a".into(),
+                        ..Default::default()
+                    },
+                    VocabEntry {
+                        value: "b".into(),
+                        ..Default::default()
+                    },
                 ],
             )
             .unwrap();
@@ -8199,19 +8321,30 @@ mod tests {
             .set_controlled_vocabulary(
                 "phones",
                 &[
-                    VocabEntry { value: "a".into(), ..Default::default() },
-                    VocabEntry { value: "c".into(), ..Default::default() },
+                    VocabEntry {
+                        value: "a".into(),
+                        ..Default::default()
+                    },
+                    VocabEntry {
+                        value: "c".into(),
+                        ..Default::default()
+                    },
                 ],
             )
             .unwrap();
-        project.publish_rubric_version(Some("dropped b, added c")).unwrap();
+        project
+            .publish_rubric_version(Some("dropped b, added c"))
+            .unwrap();
 
         // History recall.
         assert_eq!(project.rubric_versions().unwrap().len(), 2);
         let recalled = project.get_rubric_version(1).unwrap().unwrap();
         assert_eq!(recalled.guidelines.as_deref(), Some("v1 guide"));
-        let v1_labels: Vec<String> =
-            recalled.tiers[0].vocab.iter().map(|v| v.value.clone()).collect();
+        let v1_labels: Vec<String> = recalled.tiers[0]
+            .vocab
+            .iter()
+            .map(|v| v.value.clone())
+            .collect();
         assert_eq!(v1_labels, vec!["a".to_string(), "b".to_string()]);
         assert!(project.get_rubric_version(99).unwrap().is_none());
 
@@ -8226,7 +8359,13 @@ mod tests {
 
         // criterion_run records the active rubric version.
         let crit = project
-            .set_criterion("c", None, "structured", r#"{"select":{"tier":"phones"},"emit":{"kind":"span"}}"#, "out")
+            .set_criterion(
+                "c",
+                None,
+                "structured",
+                r#"{"select":{"tier":"phones"},"emit":{"kind":"span"}}"#,
+                "out",
+            )
             .unwrap();
         let run_id = project.record_criterion_run(&crit, bundle_id).unwrap();
         let run = project.get_processing_run(run_id).unwrap().unwrap();
@@ -8272,7 +8411,9 @@ mod tests {
         assert_eq!(got.promoted_kind, None);
 
         // Editable; bad kind + empty text rejected.
-        project.update_notebook_entry(e1, "creaky below 115 Hz", None).unwrap();
+        project
+            .update_notebook_entry(e1, "creaky below 115 Hz", None)
+            .unwrap();
         assert_eq!(
             project.get_notebook_entry(e1).unwrap().unwrap().text,
             "creaky below 115 Hz"
@@ -8307,10 +8448,17 @@ mod tests {
         // tier description and links the entry.
         let words_entry = project.notebook_entries(Some("words")).unwrap()[0].id;
         project.set_rubric("scheme", 1, None).unwrap();
-        project.set_rubric_tier("words", Some("existing guidance"), false).unwrap();
-        project.promote_entry_to_rubric_guidance(words_entry).unwrap();
+        project
+            .set_rubric_tier("words", Some("existing guidance"), false)
+            .unwrap();
+        project
+            .promote_entry_to_rubric_guidance(words_entry)
+            .unwrap();
         let rt = project.rubric_tier("words").unwrap().unwrap();
-        assert_eq!(rt.description.as_deref(), Some("existing guidance\nfunction words reduce"));
+        assert_eq!(
+            rt.description.as_deref(),
+            Some("existing guidance\nfunction words reduce")
+        );
         let we = project.get_notebook_entry(words_entry).unwrap().unwrap();
         assert_eq!(we.promoted_kind.as_deref(), Some("rubric_guidance"));
 
