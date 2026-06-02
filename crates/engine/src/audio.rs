@@ -79,6 +79,44 @@ impl Audio {
             .chunks_exact(channels)
             .map(move |chunk| chunk.iter().sum::<f32>() / channels as f32)
     }
+
+    /// Reads only a WAV file's header to learn its size without decoding any
+    /// samples — cheap regardless of file length. Used to decide, *before*
+    /// committing to a full in-memory load, whether a file is large enough to
+    /// warrant warning the user and offering to split it.
+    pub fn probe(path: impl AsRef<Path>) -> Result<AudioProbe> {
+        let reader = hound::WavReader::open(path.as_ref())?;
+        let spec = reader.spec();
+        // `duration()` is frames-per-channel, read from the data-chunk size in
+        // the header — no samples are decoded.
+        let n_frames = reader.duration() as u64;
+        let channels = spec.channels;
+        Ok(AudioProbe {
+            sample_rate: spec.sample_rate,
+            channels,
+            n_frames,
+            duration_seconds: n_frames as f64 / spec.sample_rate as f64,
+            // What a full decode would cost in RAM: interleaved f32 samples.
+            decoded_bytes: n_frames * channels as u64 * 4,
+        })
+    }
+}
+
+/// Cheap, header-only summary of a WAV file (see [`Audio::probe`]). Lets a
+/// caller gauge the in-memory cost of a file before deciding to load it.
+#[derive(Debug, Clone)]
+pub struct AudioProbe {
+    /// Sample rate in Hz.
+    pub sample_rate: u32,
+    /// Number of channels.
+    pub channels: u16,
+    /// Number of frames (samples per channel).
+    pub n_frames: u64,
+    /// Duration in seconds.
+    pub duration_seconds: f64,
+    /// Bytes a full decode would occupy (interleaved f32): `n_frames ×
+    /// channels × 4`. The honest predictor of the load's RAM cost.
+    pub decoded_bytes: u64,
 }
 
 #[cfg(test)]

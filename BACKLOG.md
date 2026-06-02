@@ -21,6 +21,7 @@ _Raw captures land here; groomed into the sections below on request._
 - [ ] Check how we handle stereo / multi-channel WAV files — verify behaviour end to end (down-mix vs per-channel; loader, waveform, DSP, playback) — _added 2026-06-01_
 - [ ] Enable sound file conversion / extraction — import non-WAV audio (convert to WAV) and/or extract audio from other containers/formats on ingest — _added 2026-06-01_
 - [ ] f0 **octave-down errors** in `windowed_autocorrelation` (the app's default measure-track f0): pure 200 Hz→100, 150 Hz→75 when `2·period ≤ max_lag` — the window-correction `r_a/r_w` boosts subharmonics. PRE-EXISTING (proven not the FFT-autocorr change). Fix options: default the measure track to pYIN/SWIPE, or add octave-cost / Viterbi path terms to the Boersma-style tracker. — _added 2026-06-01_
+- [ ] **Custom / interactive aggregate view** — the *imperative* counterpart to P3's query-driven concordance: hand-pick regions across files into an editable "working aggregate" ("add this selection to the aggregate"). Design discussed 2026-06-02 (deferred — user wants to live with P3 first to find the right abstractions). Framing from that conversation: a **persisted ordered "clip-set"** (region refs `(bundle, start, end, label?)`); **two populators, one set** (manual "add selection" + P3's query redirected to append); refactor `build_concordance` into split *select-clips* / *concatenate* steps so it becomes the "flatten/export" terminal for both. Three open forks: (1) **object model** — dedicated clip-set table vs reuse ordered targets vs ephemeral scratch buffer; (2) **rendering** — materialize-and-cache (rebuild bundle on edit, reuse P3 + perf layer; v1) vs truly-virtual EDL (synth in-memory buffer, new render hook, flatten on export); (3) **layout** — main view + dockable side panel vs two windows vs dedicated split workspace. Prior art: EDL/NLE timelines, concordancer KWIC list, ELAN multi-file search. The P1/P2 in-memory `Arc<Vec<f32>>` envelope is what makes virtual render plausible. — _added 2026-06-02_
 
 ---
 
@@ -34,6 +35,27 @@ _Raw captures land here; groomed into the sections below on request._
   sidecar machinery) · async/progressive paint (waveform now, spectrogram/f0
   when ready) · downsampled waveform + tiled/cached spectrogram · virtualize tier
   render · prefetch neighbours. _Measure before optimizing._ (raised 2026-06-01)
+  - **Done so far (0.3.x):** FFT autocorrelation (~700×), dev-profile DSP
+    opt-level, P1 per-bundle signal cache, P2 async DSP. Switching within a
+    working set is now snappy; remaining levers above are for very long files.
+
+- [ ] **Windowed reader + multi-resolution peak cache** (DEFERRED — planned for
+  *if/when long files become an issue*; full design in DEVLOG 2026-06-02). Decode
+  only the visible window instead of whole files; render the waveform from a
+  persisted binary peak cache (min/max(/rms) at geometric zoom levels). Decouples
+  peak RAM from file length. **Low-RAM relevance (the real argument):** on an
+  older/4 GB machine this is what lets a long file open *at all* without
+  splitting — more valuable on the least-capable hardware than on a workstation.
+  Slices W0–W3 (guard → peak cache → windowed reader → window-driven detail
+  views) in the DEVLOG entry. (deferred 2026-06-02; interim mitigation =
+  warn-and-split-on-ingest, shipped)
+
+- [ ] **Adaptive signal-cache budget** (cheap low-RAM win, independent of the
+  above). Today `SIGNAL_CACHE_BUDGET_BYTES` is a hard 768 MiB — fine on a 16 GB
+  workstation, hostile on a 4 GB box where it competes with everything else.
+  Query total system RAM at startup and set the budget to `min(768 MiB, ~15% of
+  system RAM)`. Makes sadda behave much better on constrained machines with a
+  few lines. (raised 2026-06-02 during the low-resource-machines discussion)
 
 ## Views
 

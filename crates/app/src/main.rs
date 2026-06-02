@@ -334,6 +334,9 @@ struct SaddaApp {
     /// H1: pending bundle-deletion confirmation. `Some` while the
     /// confirm modal is open.
     pending_delete: Option<PendingBundleDelete>,
+    /// A picked WAV too large to load whole; `Some` while the warn/split
+    /// dialog is open.
+    pending_large_bundle: Option<PendingLargeBundle>,
     /// Pending bundle rename. `Some` while the rename modal is open;
     /// `name` is the editable buffer, seeded with the current name.
     pending_rename: Option<PendingBundleRename>,
@@ -374,6 +377,49 @@ struct ProvenanceView {
 struct PendingBundleDelete {
     id: i64,
     name: String,
+}
+
+/// A WAV the user picked that's large enough to be risky to load whole. The
+/// ingest flow pauses on this and offers to split it into contiguous pieces
+/// (each its own bundle) or add it as-is. `chunk_minutes` is the live edit
+/// buffer for the per-piece length.
+struct PendingLargeBundle {
+    source: PathBuf,
+    name_prefix: String,
+    probe: sadda_engine::AudioProbe,
+    chunk_minutes: String,
+}
+
+/// Decoded-size ceiling (interleaved f32 bytes) past which [`SaddaApp::
+/// add_bundle_guarded`] warns and offers to split rather than load whole.
+/// ~512 MiB ≈ a 2.3 h mono 16 kHz file, or ~13 min of 44.1 kHz stereo — both
+/// the same RAM hit, which is what actually bites.
+const LARGE_BUNDLE_DECODED_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Human-readable byte size for the warning dialog (GiB/MiB/KiB).
+fn human_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let b = bytes as f64;
+    if b >= GIB {
+        format!("{:.1} GiB", b / GIB)
+    } else if b >= MIB {
+        format!("{:.0} MiB", b / MIB)
+    } else if b >= KIB {
+        format!("{:.0} KiB", b / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Number of contiguous pieces a `total_seconds` recording splits into at
+/// `chunk_seconds` each (the last piece holds the remainder). Always ≥ 1.
+fn split_piece_count(total_seconds: f64, chunk_seconds: f64) -> usize {
+    if chunk_seconds <= 0.0 || total_seconds <= 0.0 {
+        return 1;
+    }
+    (total_seconds / chunk_seconds).ceil().max(1.0) as usize
 }
 
 /// Pending "New tier…" modal: a draft tier awaiting name + type.
@@ -1116,6 +1162,7 @@ impl SaddaApp {
             info: None,
             record_dialog: None,
             pending_delete: None,
+            pending_large_bundle: None,
             pending_rename: None,
             pending_new_tier: None,
             pending_tier_rename: None,
@@ -1180,6 +1227,154 @@ impl SaddaApp {
                 self.select_bundle(id);
             }
             Err(e) => self.set_error(format!("Failed to add bundle: {e}")),
+        }
+    }
+
+    /// Add-bundle entry point that first **probes** the file (header only). If
+    /// a full decode would exceed [`LARGE_BUNDLE_DECODED_BYTES`], it raises the
+    /// warn/split dialog instead of loading; otherwise it adds normally.
+    fn add_bundle_guarded(&mut self, wav_path: PathBuf) {
+        if !matches!(self.app_state, AppState::ProjectLoaded { .. }) {
+            return;
+        }
+        match sadda_engine::Audio::probe(&wav_path) {
+            Ok(probe) if probe.decoded_bytes > LARGE_BUNDLE_DECODED_BYTES => {
+                let name_prefix = wav_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "bundle".into());
+                // Default each piece to ~half the ceiling, capped at 15 min,
+                // floored at 1 min — a sensible, editable starting point.
+                let per_piece_seconds = LARGE_BUNDLE_DECODED_BYTES as f64
+                    / 2.0
+                    / (probe.sample_rate as f64 * probe.channels as f64 * 4.0);
+                let chunk_minutes = (per_piece_seconds / 60.0).clamp(1.0, 15.0).round();
+                self.pending_large_bundle = Some(PendingLargeBundle {
+                    source: wav_path,
+                    name_prefix,
+                    probe,
+                    chunk_minutes: format!("{chunk_minutes:.0}"),
+                });
+            }
+            // Small enough, or unreadable header — fall through to the normal
+            // path (which surfaces any real load error).
+            _ => self.add_bundle_from_wav(wav_path),
+        }
+    }
+
+    /// Commits the pending large-file split: streams the source into chunks of
+    /// `chunk_minutes`, lands each as a bundle, and selects the first.
+    fn commit_large_bundle_split(&mut self) {
+        let Some(pending) = self.pending_large_bundle.take() else {
+            return;
+        };
+        let chunk_seconds = pending
+            .chunk_minutes
+            .trim()
+            .parse::<f64>()
+            .unwrap_or(10.0)
+            .max(0.1)
+            * 60.0;
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        match project.add_bundle_split(&pending.name_prefix, &pending.source, chunk_seconds) {
+            Ok(ids) => {
+                self.error = None;
+                self.set_info(format!(
+                    "Split into {} piece{} (“{}_001” … ).",
+                    ids.len(),
+                    if ids.len() == 1 { "" } else { "s" },
+                    pending.name_prefix,
+                ));
+                if let Some(&first) = ids.first() {
+                    self.select_bundle(first);
+                }
+            }
+            Err(e) => self.set_error(format!("Split failed: {e}")),
+        }
+    }
+
+    /// Renders the large-file warn/split dialog when one is pending: split into
+    /// N pieces, add as-is, or cancel.
+    fn render_pending_large_bundle(&mut self, ctx: &egui::Context) {
+        if self.pending_large_bundle.is_none() {
+            return;
+        }
+        let mut do_split = false;
+        let mut do_add_anyway = false;
+        let mut cancel = false;
+        let mut keep_open = true;
+
+        if let Some(pending) = self.pending_large_bundle.as_mut() {
+            let total_seconds = pending.probe.duration_seconds;
+            egui::Window::new("Large audio file")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut keep_open)
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "“{}” is {:.0} min long and would use about {} in memory if \
+                         loaded whole, which may be slow or unstable.",
+                        pending.name_prefix,
+                        total_seconds / 60.0,
+                        human_bytes(pending.probe.decoded_bytes),
+                    ));
+                    ui.add_space(6.0);
+                    ui.label("Split it into contiguous pieces, each its own bundle?");
+                    ui.add_space(4.0);
+
+                    let chunk_minutes = pending.chunk_minutes.trim().parse::<f64>().unwrap_or(0.0);
+                    let pieces = split_piece_count(total_seconds, chunk_minutes * 60.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Piece length:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut pending.chunk_minutes)
+                                .desired_width(48.0),
+                        );
+                        ui.label("min");
+                        if chunk_minutes > 0.0 {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "→ {pieces} piece{}",
+                                    if pieces == 1 { "" } else { "s" }
+                                ))
+                                .weak(),
+                            );
+                        }
+                    });
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(chunk_minutes > 0.0, egui::Button::new("Split"))
+                            .on_disabled_hover_text("Enter a piece length in minutes")
+                            .clicked()
+                        {
+                            do_split = true;
+                        }
+                        if ui
+                            .button("Add as-is")
+                            .on_hover_text("Load the whole file anyway")
+                            .clicked()
+                        {
+                            do_add_anyway = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+        }
+
+        if !keep_open || cancel {
+            self.pending_large_bundle = None;
+        } else if do_split {
+            self.commit_large_bundle_split();
+        } else if do_add_anyway {
+            if let Some(pending) = self.pending_large_bundle.take() {
+                self.add_bundle_from_wav(pending.source);
+            }
         }
     }
 
@@ -6674,6 +6869,7 @@ impl eframe::App for SaddaApp {
 
         // H1 bundle-delete confirmation modal.
         self.render_pending_delete(ui.ctx());
+        self.render_pending_large_bundle(ui.ctx());
 
         // Bundle-rename modal.
         self.render_pending_rename(ui.ctx());
@@ -6929,7 +7125,7 @@ impl SaddaApp {
                     .set_title("Pick a WAV file to register as a bundle")
                     .pick_file()
                 {
-                    self.add_bundle_from_wav(path);
+                    self.add_bundle_guarded(path);
                 }
             }
             // ---- H1 Import submenu --------------------------------
@@ -9395,6 +9591,27 @@ mod layout_tests {
             }
         });
         out.expect("run_ui invokes the ui closure once")
+    }
+
+    #[test]
+    fn human_bytes_scales_units() {
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(2 * 1024), "2 KiB");
+        assert_eq!(human_bytes(3 * 1024 * 1024), "3 MiB");
+        assert_eq!(human_bytes((1.5 * 1024.0 * 1024.0 * 1024.0) as u64), "1.5 GiB");
+    }
+
+    #[test]
+    fn split_piece_count_ceils_and_floors() {
+        // 25 min into 10-min pieces → 3 (10, 10, 5).
+        assert_eq!(split_piece_count(25.0 * 60.0, 10.0 * 60.0), 3);
+        // Exact multiple.
+        assert_eq!(split_piece_count(20.0 * 60.0, 10.0 * 60.0), 2);
+        // Chunk longer than the file → a single piece.
+        assert_eq!(split_piece_count(5.0 * 60.0, 10.0 * 60.0), 1);
+        // Degenerate inputs never divide by zero or vanish.
+        assert_eq!(split_piece_count(0.0, 10.0), 1);
+        assert_eq!(split_piece_count(100.0, 0.0), 1);
     }
 
     #[test]

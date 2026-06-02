@@ -1385,24 +1385,191 @@ impl Project {
         }
         std::fs::copy(source, &dest_abs)?;
 
+        self.insert_bundle_row(
+            &spec.name,
+            &dest_rel.to_string_lossy(),
+            audio.sample_rate,
+            audio.channels,
+            audio.frame_count() as u64,
+            spec.session_id,
+            spec.speaker_id,
+            spec.extra.as_deref(),
+        )
+    }
+
+    /// Inserts one `bundle` row and returns its id. Shared by
+    /// [`Project::add_bundle_with`] (one row per file) and
+    /// [`Project::add_bundle_split`] (one row per chunk).
+    #[allow(clippy::too_many_arguments)]
+    fn insert_bundle_row(
+        &self,
+        name: &str,
+        audio_relative_path: &str,
+        sample_rate: u32,
+        channels: u16,
+        n_frames: u64,
+        session_id: Option<i64>,
+        speaker_id: Option<i64>,
+        extra: Option<&str>,
+    ) -> Result<i64> {
         let id: i64 = self.conn.query_row(
             "INSERT INTO bundle \
                 (name, audio_relative_path, sample_rate, channels, n_frames,
                  session_id, speaker_id, extra) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) RETURNING id",
             rusqlite::params![
-                spec.name,
-                dest_rel.to_string_lossy().as_ref(),
-                audio.sample_rate as i64,
-                audio.channels as i64,
-                audio.frame_count() as i64,
-                spec.session_id,
-                spec.speaker_id,
-                spec.extra,
+                name,
+                audio_relative_path,
+                sample_rate as i64,
+                channels as i64,
+                n_frames as i64,
+                session_id,
+                speaker_id,
+                extra,
             ],
             |row| row.get(0),
         )?;
         Ok(id)
+    }
+
+    /// Splits a (typically very long) WAV at `source_audio_path` into
+    /// contiguous chunks of about `chunk_seconds` each, writing every chunk as
+    /// its own WAV directly into `signals/original/` and registering it as a
+    /// separate bundle named `"<name_prefix>_NNN"`. Returns the new bundle ids
+    /// in order.
+    ///
+    /// The source is **streamed** (read a sample at a time, written straight to
+    /// the current chunk), so memory stays flat regardless of the file's
+    /// length — this is how a file too large to load whole still gets in. Chunk
+    /// audio preserves the source's exact format (sample rate, channels, bit
+    /// depth); the final chunk holds the remainder. Boundaries are clean cuts
+    /// (no overlap).
+    pub fn add_bundle_split(
+        &self,
+        name_prefix: &str,
+        source_audio_path: impl AsRef<Path>,
+        chunk_seconds: f64,
+    ) -> Result<Vec<i64>> {
+        let source = source_audio_path.as_ref();
+        let reader = hound::WavReader::open(source)?;
+        let spec = reader.spec();
+        let chunk_frames = (chunk_seconds.max(0.1) * spec.sample_rate as f64).round() as u64;
+        let chunk_frames = chunk_frames.max(1);
+
+        match (spec.sample_format, spec.bits_per_sample) {
+            (hound::SampleFormat::Int, 16) => {
+                self.split_typed::<_, i16>(reader, spec, name_prefix, chunk_frames)
+            }
+            (hound::SampleFormat::Int, 24) | (hound::SampleFormat::Int, 32) => {
+                self.split_typed::<_, i32>(reader, spec, name_prefix, chunk_frames)
+            }
+            (hound::SampleFormat::Float, 32) => {
+                self.split_typed::<_, f32>(reader, spec, name_prefix, chunk_frames)
+            }
+            (fmt, bits) => Err(EngineError::UnsupportedFormat(format!("{fmt:?} {bits}-bit"))),
+        }
+    }
+
+    /// Streaming chunked-split worker monomorphised over the WAV sample type
+    /// `S`. Reads interleaved samples from `reader`, rolling to a fresh chunk
+    /// file (and bundle row) every `chunk_frames` frames.
+    fn split_typed<R: std::io::Read, S: hound::Sample + Copy>(
+        &self,
+        reader: hound::WavReader<R>,
+        spec: hound::WavSpec,
+        name_prefix: &str,
+        chunk_frames: u64,
+    ) -> Result<Vec<i64>> {
+        let channels = spec.channels.max(1) as u64;
+        let total_samples = reader.len() as u64;
+        let mut samples = reader.into_samples::<S>();
+
+        let mut ids: Vec<i64> = Vec::new();
+        let mut chunk_idx: u32 = 0;
+        let mut frames_in_chunk: u64 = 0;
+        let mut writer: Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>> = None;
+        let mut current_rel: Option<std::path::PathBuf> = None;
+
+        // Finalises the open chunk (flush WAV + insert its bundle row as
+        // `<prefix>_NNN`, 1-based on `chunk_idx`).
+        let finalize =
+            |this: &Self,
+             writer: &mut Option<hound::WavWriter<std::io::BufWriter<std::fs::File>>>,
+             current_rel: &mut Option<std::path::PathBuf>,
+             chunk_idx: u32,
+             frames: u64,
+             ids: &mut Vec<i64>|
+             -> Result<()> {
+                if let (Some(w), Some(rel)) = (writer.take(), current_rel.take()) {
+                    w.finalize()?;
+                    let name = format!("{name_prefix}_{:03}", chunk_idx + 1);
+                    let id = this.insert_bundle_row(
+                        &name,
+                        &rel.to_string_lossy(),
+                        spec.sample_rate,
+                        spec.channels,
+                        frames,
+                        None,
+                        None,
+                        None,
+                    )?;
+                    ids.push(id);
+                }
+                Ok(())
+            };
+
+        for k in 0..total_samples {
+            let at_frame_start = k % channels == 0;
+            if at_frame_start && (writer.is_none() || frames_in_chunk == chunk_frames) {
+                // Close the current chunk (if any) and advance to the next.
+                if writer.is_some() {
+                    finalize(
+                        self,
+                        &mut writer,
+                        &mut current_rel,
+                        chunk_idx,
+                        frames_in_chunk,
+                        &mut ids,
+                    )?;
+                    chunk_idx += 1;
+                }
+                frames_in_chunk = 0;
+
+                let fname = format!("{name_prefix}_{:03}.wav", chunk_idx + 1);
+                let rel = Path::new("signals").join("original").join(&fname);
+                let abs = self.root.join(&rel);
+                if abs.exists() {
+                    return Err(EngineError::Corpus(format!(
+                        "destination already exists: {}",
+                        abs.display()
+                    )));
+                }
+                writer = Some(hound::WavWriter::create(&abs, spec)?);
+                current_rel = Some(rel);
+            }
+
+            let sample = samples
+                .next()
+                .ok_or_else(|| EngineError::Corpus("unexpected end of WAV stream".into()))??;
+            writer
+                .as_mut()
+                .expect("writer opened at frame start")
+                .write_sample(sample)?;
+
+            if k % channels == channels - 1 {
+                frames_in_chunk += 1;
+            }
+        }
+
+        finalize(
+            self,
+            &mut writer,
+            &mut current_rel,
+            chunk_idx,
+            frames_in_chunk,
+            &mut ids,
+        )?;
+        Ok(ids)
     }
 
     /// Lists all bundles in id order.
@@ -6495,6 +6662,59 @@ mod tests {
         assert!(words[0].start_seconds.abs() < 1e-6);
         assert!((words[0].end_seconds - 0.03).abs() < 1e-3);
         assert!(summary.n_context_annotations >= 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn probe_reads_header_without_decoding() {
+        let root = unique_dir("probe");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let wav = root.join("p.wav");
+        write_short_wav(&wav, 16_000); // mono, sample_rate/4 = 4000 frames
+
+        let probe = Audio::probe(&wav).unwrap();
+        assert_eq!(probe.sample_rate, 16_000);
+        assert_eq!(probe.channels, 1);
+        assert_eq!(probe.n_frames, 4_000);
+        assert!((probe.duration_seconds - 0.25).abs() < 1e-9);
+        assert_eq!(probe.decoded_bytes, 4_000 * 4); // n_frames × 1 channel × 4 bytes
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn add_bundle_split_streams_into_contiguous_chunks() {
+        let root = unique_dir("split");
+        let _ = std::fs::remove_dir_all(&root);
+        let project = Project::create(&root, "split_proj").unwrap();
+        let wav = root.join("long.wav");
+        write_short_wav(&wav, 4_000); // mono, 1000 frames = 0.25 s
+
+        // 0.1 s chunks @ 4 kHz = 400 frames → 400, 400, 200 = 3 bundles.
+        let ids = project.add_bundle_split("long", &wav, 0.1).unwrap();
+        assert_eq!(ids.len(), 3);
+
+        let bundles = project.bundles().unwrap();
+        assert_eq!(bundles.len(), 3);
+        let names: Vec<&str> = bundles.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["long_001", "long_002", "long_003"]);
+
+        // Frames split cleanly and sum back to the original; format preserved.
+        let frames: Vec<usize> = bundles.iter().map(|b| b.n_frames).collect();
+        assert_eq!(frames, [400, 400, 200]);
+        assert_eq!(frames.iter().sum::<usize>(), 1_000);
+        for b in &bundles {
+            let a = project.load_audio(b.id).unwrap();
+            assert_eq!(a.sample_rate, 4_000);
+            assert_eq!(a.channels, 1);
+            assert_eq!(a.frame_count(), b.n_frames);
+        }
+
+        // The chunk WAVs really landed in the project.
+        assert!(root.join("signals/original/long_001.wav").exists());
+        assert!(root.join("signals/original/long_003.wav").exists());
 
         let _ = std::fs::remove_dir_all(&root);
     }

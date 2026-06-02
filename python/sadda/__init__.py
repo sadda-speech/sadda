@@ -28,6 +28,7 @@ __all__ = [
     "AnnotatorProgress",
     "Assignment",
     "Audio",
+    "AudioProbe",
     "Bundle",
     "Calibration",
     "Citation",
@@ -67,6 +68,7 @@ __all__ = [
     "experimental",
     "f0",
     "load_wav",
+    "probe_wav",
     "ml",
     "new_project",
     "open_project",
@@ -83,6 +85,10 @@ Audio = stable(_native.Audio)
 version = stable(_native.version)
 load_wav = stable(_native.load_wav)
 f0 = stable(_native.f0)
+
+# Header-only probe + chunked split (large-file ingest guard).
+AudioProbe = provisional(_native.AudioProbe)
+probe_wav = provisional(_native.probe_wav)
 
 # B1 surface — corpus entry points.
 schema_version = stable(_native.schema_version)
