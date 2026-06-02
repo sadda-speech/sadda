@@ -413,6 +413,114 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// A point-in-time snapshot of system + process memory for the Help → Memory
+/// report. Fields are `Option` so a platform / permission that can't supply one
+/// degrades to "unavailable" rather than reporting a misleading zero.
+struct MemoryReport {
+    system_total: Option<u64>,
+    system_available: Option<u64>,
+    system_used: Option<u64>,
+    process_rss: Option<u64>,
+}
+
+/// Gathers a [`MemoryReport`] via `sysinfo` (cross-platform). `new_all` populates
+/// both system memory and the process table, so this process's resident size is
+/// available without a separate refresh-kind dance. Zero readings (a field the
+/// platform couldn't supply) are mapped to `None`.
+fn gather_memory_report() -> MemoryReport {
+    use sysinfo::{System, get_current_pid};
+    let sys = System::new_all();
+    let nz = |v: u64| (v > 0).then_some(v);
+    let process_rss = get_current_pid()
+        .ok()
+        .and_then(|pid| sys.process(pid))
+        .map(|p| p.memory());
+    MemoryReport {
+        system_total: nz(sys.total_memory()),
+        system_available: nz(sys.available_memory()),
+        system_used: nz(sys.used_memory()),
+        process_rss: process_rss.and_then(nz),
+    }
+}
+
+/// Formats a [`MemoryReport`] for the snapshot dialog. Pure (no `sysinfo`), so
+/// the layout + percentage math are unit-testable. Each system figure is shown
+/// as a fraction of total RAM when total is known.
+fn format_memory_report(r: &MemoryReport) -> String {
+    let field = |v: Option<u64>| match v {
+        Some(b) => human_bytes(b),
+        None => "unavailable".to_string(),
+    };
+    let pct = |num: Option<u64>, den: Option<u64>| match (num, den) {
+        (Some(n), Some(d)) if d > 0 => format!(" ({:.0}%)", n as f64 / d as f64 * 100.0),
+        _ => String::new(),
+    };
+    format!(
+        "System RAM: {total}\n\
+         • used: {used}{used_pct}\n\
+         • available: {avail}{avail_pct}\n\
+         \n\
+         sadda (this process)\n\
+         • resident (RSS): {rss}{rss_pct}",
+        total = field(r.system_total),
+        used = field(r.system_used),
+        used_pct = pct(r.system_used, r.system_total),
+        avail = field(r.system_available),
+        avail_pct = pct(r.system_available, r.system_total),
+        rss = field(r.process_rss),
+        rss_pct = pct(r.process_rss, r.system_total),
+    )
+}
+
+#[cfg(test)]
+mod memory_report_tests {
+    use super::{MemoryReport, format_memory_report};
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+
+    #[test]
+    fn formats_full_report_with_percentages() {
+        let s = format_memory_report(&MemoryReport {
+            system_total: Some(16 * GIB),
+            system_used: Some(8 * GIB),
+            system_available: Some(8 * GIB),
+            process_rss: Some(400 * MIB),
+        });
+        assert!(s.contains("16.0 GiB"), "{s}");
+        assert!(s.contains("8.0 GiB"), "{s}");
+        assert!(s.contains("50%"), "used/available are half of total: {s}");
+        assert!(s.contains("400 MiB"), "{s}");
+    }
+
+    #[test]
+    fn unavailable_fields_degrade_without_panicking_or_percentages() {
+        let s = format_memory_report(&MemoryReport {
+            system_total: None,
+            system_used: None,
+            system_available: None,
+            process_rss: None,
+        });
+        assert!(s.contains("unavailable"), "{s}");
+        assert!(
+            !s.contains('%'),
+            "no percentages when total is unknown: {s}"
+        );
+    }
+
+    #[test]
+    fn process_rss_unavailable_but_system_known() {
+        let s = format_memory_report(&MemoryReport {
+            system_total: Some(8 * GIB),
+            system_used: Some(2 * GIB),
+            system_available: Some(6 * GIB),
+            process_rss: None,
+        });
+        assert!(s.contains("8.0 GiB"), "{s}");
+        assert!(s.contains("unavailable"), "the RSS line: {s}");
+    }
+}
+
 /// Number of contiguous pieces a `total_seconds` recording splits into at
 /// `chunk_seconds` each (the last piece holds the remainder). Always ≥ 1.
 fn split_piece_count(total_seconds: f64, chunk_seconds: f64) -> usize {
@@ -7551,6 +7659,10 @@ impl SaddaApp {
                      Apache-2.0 OR MIT. https://github.com/sadda-speech/sadda",
                     sadda_engine::version()
                 ));
+            }
+            if ui.button("Memory report").clicked() {
+                ui.close();
+                self.set_info(format_memory_report(&gather_memory_report()));
             }
         });
     }

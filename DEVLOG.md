@@ -6,6 +6,27 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-02 — Help → Memory report (diagnostic)
+
+A snapshot diagnostic under the Help menu: system RAM (total / used / available,
+each as a % of total) plus **this process's resident size (RSS)** — sadda's
+actual memory outlay against the machine. Pairs naturally with the adaptive
+cache budget that just landed.
+
+- `sysinfo 0.36` (the `system` feature only — disk / network / component / user
+  off, to keep the build lean) for cross-platform system memory + per-process
+  RSS (Linux / macOS / Windows). Distinct from the budget's `libc` `sysconf`
+  path, which stays for its lighter total-RAM-only query.
+- `MemoryReport` with `Option` fields (a figure the platform can't supply shows
+  "unavailable", not a misleading zero); `gather_memory_report()` (sysinfo
+  `new_all`); pure `format_memory_report()` (reuses `human_bytes`, %-of-total),
+  unit-tested for full / all-unavailable / RSS-unavailable cases.
+- Help → "Memory report" pops the green info panel (`set_info`), matching the
+  About snapshot pattern (chosen: snapshot dialog over a live-refreshing window).
+
+Sample on this 16 GB host: `System RAM: 15.6 GiB · used 1.1 GiB (7%) · available
+14.5 GiB (93%) · sadda RSS: 8 MiB (0%)`. App-only; gate green (+3 tests).
+
 ## 2026-06-02 — Adaptive signal-cache budget (low-RAM win)
 
 The P1 per-bundle signal swap-cache was bounded by a hard 768 MiB — fine on a
