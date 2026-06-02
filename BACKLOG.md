@@ -18,6 +18,9 @@ _Raw captures land here; groomed into the sections below on request._
 
 - [ ] Display selection timestamps — show the boundary times (start + end) of the current selection — _added 2026-06-01_
 - [ ] Refine / reorganize the `annotation-cycle.md` docs page — structure + flow need careful attention; revisit in the coming days (draft is uncommitted in the working tree) — _added 2026-06-01_
+- [ ] Check how we handle stereo / multi-channel WAV files — verify behaviour end to end (down-mix vs per-channel; loader, waveform, DSP, playback) — _added 2026-06-01_
+- [ ] Enable sound file conversion / extraction — import non-WAV audio (convert to WAV) and/or extract audio from other containers/formats on ingest — _added 2026-06-01_
+- [ ] f0 **octave-down errors** in `windowed_autocorrelation` (the app's default measure-track f0): pure 200 Hz→100, 150 Hz→75 when `2·period ≤ max_lag` — the window-correction `r_a/r_w` boosts subharmonics. PRE-EXISTING (proven not the FFT-autocorr change). Fix options: default the measure track to pYIN/SWIPE, or add octave-cost / Viterbi path terms to the Boersma-style tracker. — _added 2026-06-01_
 
 ---
 
