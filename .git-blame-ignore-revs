@@ -1,0 +1,6 @@
+# Bulk reformat commits to skip in 'git blame'.
+# Enable locally:  git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub applies this file automatically in its blame view.
+
+# style: cargo fmt --all — clear 82-place format drift
+cfd3f0ae0245fc8b18020bb0a5135ba3f9c3c929
