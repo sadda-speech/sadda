@@ -82,8 +82,17 @@ stubs: stub-gen
 stub-gen:
     cargo run --bin stub_gen
 
-# Python test suite (library + docs examples), via the uv-managed env.
-pytest:
+# Rebuild the sadda extension into .venv from the current Rust. CI does this
+# via a fresh `uv sync`; `uv run` alone won't rebuild on Rust-source changes,
+# so without this pytest would silently test a STALE extension (a Rust change
+# to the Python surface could pass/fail wrongly). CONDA_PREFIX is unset for the
+# build because maturin refuses when both it and VIRTUAL_ENV are set; conda's
+# libpython stays available via the LD_LIBRARY_PATH exported above.
+develop:
+    env -u CONDA_PREFIX uv run maturin develop --quiet
+
+# Python test suite (library + docs examples) — rebuilds the extension first.
+pytest: develop
     uv run pytest python/tests/ tools/docs/
 
 # ── Convenience ─────────────────────────────────────────────────────────────
