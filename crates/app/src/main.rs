@@ -3101,10 +3101,7 @@ impl SaddaApp {
                             }
                         });
                     if ui
-                        .add_enabled(
-                            panel.gen_criterion.is_some(),
-                            egui::Button::new("Generate"),
-                        )
+                        .add_enabled(panel.gen_criterion.is_some(), egui::Button::new("Generate"))
                         .clicked()
                     {
                         generate = true;
@@ -3293,7 +3290,10 @@ impl SaddaApp {
                             }
                         });
                         let summary = format_assignment_summary(
-                            assigns_by_target.get(&t.id).map(Vec::as_slice).unwrap_or(&[]),
+                            assigns_by_target
+                                .get(&t.id)
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]),
                         );
                         ui.label(egui::RichText::new(summary).weak().small());
                     }
@@ -3343,9 +3343,12 @@ impl SaddaApp {
                 _ if ttype.trim().is_empty() => "Enter a target type.".to_string(),
                 (Ok(s), Ok(e)) => match (bundle_id, &self.app_state) {
                     (Some(bid), AppState::ProjectLoaded { project, .. }) => {
-                        match project
-                            .add_target(&sadda_engine::TargetSpec::new(bid, s, e, ttype.trim()))
-                        {
+                        match project.add_target(&sadda_engine::TargetSpec::new(
+                            bid,
+                            s,
+                            e,
+                            ttype.trim(),
+                        )) {
                             Ok(_) => "Added target.".to_string(),
                             Err(err) => format!("Add failed: {err}"),
                         }
@@ -3371,9 +3374,9 @@ impl SaddaApp {
                 .unwrap_or_default();
             let msg = match &self.app_state {
                 AppState::ProjectLoaded { project, .. } if !annotator.is_empty() => {
-                    match project.add_assignment(&sadda_engine::AssignmentSpec::new(
-                        target_id, &annotator,
-                    )) {
+                    match project
+                        .add_assignment(&sadda_engine::AssignmentSpec::new(target_id, &annotator))
+                    {
                         Ok(_) => format!("Assigned to {annotator}."),
                         Err(e) => format!("Assign failed: {e}"),
                     }
@@ -3395,8 +3398,12 @@ impl SaddaApp {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            let msg = match (names.is_empty(), seed.trim().parse::<i64>(), bundle_id, &self.app_state)
-            {
+            let msg = match (
+                names.is_empty(),
+                seed.trim().parse::<i64>(),
+                bundle_id,
+                &self.app_state,
+            ) {
                 (true, _, _, _) => "Enter a roster (comma-separated).".to_string(),
                 (_, Err(_), _, _) => "Seed must be an integer.".to_string(),
                 (_, Ok(s), Some(bid), AppState::ProjectLoaded { project, .. }) => {
@@ -3472,7 +3479,11 @@ impl SaddaApp {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            let msg = match (names.is_empty() || dest.trim().is_empty(), bundle_id, &self.app_state) {
+            let msg = match (
+                names.is_empty() || dest.trim().is_empty(),
+                bundle_id,
+                &self.app_state,
+            ) {
                 (true, _, _) => "Enter source tiers and a destination.".to_string(),
                 (_, Some(bid), AppState::ProjectLoaded { project, .. }) => {
                     match project.merge_tiers(bid, &names, dest.trim()) {
@@ -3487,13 +3498,13 @@ impl SaddaApp {
             }
         }
         if compare {
-            let ids = self
-                .targets_panel
-                .as_ref()
-                .and_then(|p| match (&p.compare_a, &p.compare_b) {
-                    (Some((a, _)), Some((b, _))) => Some((*a, *b)),
-                    _ => None,
-                });
+            let ids =
+                self.targets_panel
+                    .as_ref()
+                    .and_then(|p| match (&p.compare_a, &p.compare_b) {
+                        (Some((a, _)), Some((b, _))) => Some((*a, *b)),
+                        _ => None,
+                    });
             let msg = match (ids, bundle_id, &self.app_state) {
                 (Some((a, b)), Some(bid), AppState::ProjectLoaded { project, .. }) => {
                     Some(match project.compare_tiers(bid, a, b, None) {
@@ -3726,7 +3737,10 @@ impl SaddaApp {
         }
 
         if run_qa {
-            let tier = self.dashboard.as_ref().and_then(|d| d.qa_tier.as_ref().map(|(i, _)| *i));
+            let tier = self
+                .dashboard
+                .as_ref()
+                .and_then(|d| d.qa_tier.as_ref().map(|(i, _)| *i));
             let msg = match (tier, &self.app_state) {
                 (Some(tid), AppState::ProjectLoaded { project, .. }) => {
                     Some(match project.tier_qa(tid) {
@@ -3998,10 +4012,16 @@ impl SaddaApp {
                         "{{\"select\": {{\"tier\": \"{tt}\"}}, \"emit\": {{\"kind\": \"span\"}}}}"
                     );
                     Some(
-                        match project
-                            .promote_entry_to_criterion(id, &name, "structured", &body, &tt)
-                        {
-                            Ok(c) => format!("Created criterion “{}” — refine it in Criteria.", c.name),
+                        match project.promote_entry_to_criterion(
+                            id,
+                            &name,
+                            "structured",
+                            &body,
+                            &tt,
+                        ) {
+                            Ok(c) => {
+                                format!("Created criterion “{}” — refine it in Criteria.", c.name)
+                            }
                             Err(e) => format!("Promote failed: {e}"),
                         },
                     )
@@ -4067,8 +4087,7 @@ impl SaddaApp {
                     .show(ui, |ui| {
                         ui.label("Token tier");
                         ui.add(
-                            egui::TextEdit::singleline(&mut cb.tier_name)
-                                .hint_text("e.g. phone"),
+                            egui::TextEdit::singleline(&mut cb.tier_name).hint_text("e.g. phone"),
                         );
                         ui.end_row();
                         ui.label("Labels");
@@ -4092,8 +4111,7 @@ impl SaddaApp {
                         ui.end_row();
                     });
 
-                let can_build =
-                    !cb.tier_name.trim().is_empty() && !cb.dest_name.trim().is_empty();
+                let can_build = !cb.tier_name.trim().is_empty() && !cb.dest_name.trim().is_empty();
                 if ui
                     .add_enabled(can_build, egui::Button::new("Build"))
                     .on_disabled_hover_text("A token tier and a bundle name are required")
@@ -4124,7 +4142,12 @@ impl SaddaApp {
                 .map(|cb| {
                     let labels = parse_label_filter(&cb.labels);
                     let gap = cb.gap_seconds.trim().parse::<f64>().unwrap_or(0.25);
-                    (cb.tier_name.trim().to_string(), labels, cb.dest_name.trim().to_string(), gap)
+                    (
+                        cb.tier_name.trim().to_string(),
+                        labels,
+                        cb.dest_name.trim().to_string(),
+                        gap,
+                    )
                 })
                 .unwrap_or_default();
 
@@ -4144,7 +4167,11 @@ impl SaddaApp {
                             if summary.n_tokens == 1 { "" } else { "s" },
                             summary.duration_seconds,
                             summary.n_context_annotations,
-                            if summary.n_context_annotations == 1 { "" } else { "s" },
+                            if summary.n_context_annotations == 1 {
+                                ""
+                            } else {
+                                "s"
+                            },
                         ));
                     }
                     self.select_bundle(bundle_id);
@@ -4351,35 +4378,35 @@ impl SaddaApp {
             .get_tier(tier_id)
             .map(|t| t.name)
             .unwrap_or_default();
-        let (label, status, note, run_id): (String, Option<String>, String, Option<i64>) =
-            match sel {
-                AnnotationSelection::Interval { annotation_id, .. } => project
-                    .intervals(tier_id)
-                    .ok()
-                    .and_then(|rs| rs.into_iter().find(|r| r.id == annotation_id))
-                    .map(|r| {
-                        (
-                            r.label.unwrap_or_default(),
-                            r.status,
-                            r.note.unwrap_or_default(),
-                            r.processing_run_id,
-                        )
-                    })
-                    .unwrap_or_default(),
-                AnnotationSelection::Point { annotation_id, .. } => project
-                    .points(tier_id)
-                    .ok()
-                    .and_then(|rs| rs.into_iter().find(|r| r.id == annotation_id))
-                    .map(|r| {
-                        (
-                            r.label.unwrap_or_default(),
-                            r.status,
-                            r.note.unwrap_or_default(),
-                            r.processing_run_id,
-                        )
-                    })
-                    .unwrap_or_default(),
-            };
+        let (label, status, note, run_id): (String, Option<String>, String, Option<i64>) = match sel
+        {
+            AnnotationSelection::Interval { annotation_id, .. } => project
+                .intervals(tier_id)
+                .ok()
+                .and_then(|rs| rs.into_iter().find(|r| r.id == annotation_id))
+                .map(|r| {
+                    (
+                        r.label.unwrap_or_default(),
+                        r.status,
+                        r.note.unwrap_or_default(),
+                        r.processing_run_id,
+                    )
+                })
+                .unwrap_or_default(),
+            AnnotationSelection::Point { annotation_id, .. } => project
+                .points(tier_id)
+                .ok()
+                .and_then(|rs| rs.into_iter().find(|r| r.id == annotation_id))
+                .map(|r| {
+                    (
+                        r.label.unwrap_or_default(),
+                        r.status,
+                        r.note.unwrap_or_default(),
+                        r.processing_run_id,
+                    )
+                })
+                .unwrap_or_default(),
+        };
         // Resolve a criterion-run link to a provenance one-liner.
         let provenance = run_id
             .and_then(|id| project.get_processing_run(id).ok().flatten())
@@ -9598,7 +9625,10 @@ mod layout_tests {
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(2 * 1024), "2 KiB");
         assert_eq!(human_bytes(3 * 1024 * 1024), "3 MiB");
-        assert_eq!(human_bytes((1.5 * 1024.0 * 1024.0 * 1024.0) as u64), "1.5 GiB");
+        assert_eq!(
+            human_bytes((1.5 * 1024.0 * 1024.0 * 1024.0) as u64),
+            "1.5 GiB"
+        );
     }
 
     #[test]
@@ -9707,7 +9737,10 @@ mod rubric_ui_tests {
     fn provenance_line_strips_prefix_and_trims_timestamp() {
         let line =
             format_provenance_line("sadda.criteria.vowel midpoints", "2026-05-31T12:34:56.789Z");
-        assert_eq!(line, "↻ from criterion “vowel midpoints” · 2026-05-31 12:34:56");
+        assert_eq!(
+            line,
+            "↻ from criterion “vowel midpoints” · 2026-05-31 12:34:56"
+        );
         // A processor_id without the expected prefix is shown verbatim; a
         // timestamp without a fractional part is handled too.
         let line = format_provenance_line("custom.proc", "2026-05-31T00:00:00Z");
@@ -9847,10 +9880,7 @@ mod rubric_ui_tests {
             vocab_removed: vec!["b".into()],
             affected_annotations: 4,
         };
-        assert_eq!(
-            format_tier_impact(&t),
-            "phones: +[c] −[b] · 4 to revisit"
-        );
+        assert_eq!(format_tier_impact(&t), "phones: +[c] −[b] · 4 to revisit");
     }
 
     #[test]
