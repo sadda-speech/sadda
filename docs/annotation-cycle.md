@@ -275,10 +275,34 @@ flagging and criteria, and the cycle repeats.
 In the app: the Dashboard's **Rubric versions** section — publish-with-note, the
 version list, and *Impact since version N*.
 
+## Reviewing tokens together — the concordance view
+
+Both annotating and refining get easier when you can see *all* the tokens of a
+type at once. The **concordance view** (Annotate → Concordance…) concatenates
+every interval matching a tier + label across the whole corpus into a single
+derived bundle — your [f] tokens, in sequence, in the normal
+waveform/spectrogram/tier view — with a `⟨source⟩` divider marking where each
+token came from and each token's surrounding annotations remapped onto the
+timeline (so you see the tokens *with* their context).
+
+```python
+summary = proj.build_concordance("phones", ["f"], "f-concordance", gap_seconds=0.25)
+print(summary.n_tokens, summary.duration_seconds, summary.n_context_annotations)
+```
+
+`labels` empty means *any* label; the matched bundles must share one sample
+rate. The result is a read-only derived bundle, so it opens like any other —
+use it to eyeball consistency across a label, spot outliers to flag, and seed
+new notebook observations, looping back to the start of the cycle.
+
+!!! note "v1 limits"
+    Mono only, single sample rate, and reference/dense tiers aren't carried;
+    edits to the concordance don't flow back to the source bundles.
+
 ## The loop, in one breath
 
 Explore in the notebook → distil into the rubric and criteria → criteria generate
 targets → assign and distribute them → measure agreement and monitor completeness
 → evolve the rubric and revisit what the change affected → repeat. The criteria
 RoI query is the thread running through it: it is the proposal source, the target
-generator, and (soon) the segment list for an aggregate token view.
+generator, and the segment list for the aggregate **concordance view**.
