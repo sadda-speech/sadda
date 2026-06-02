@@ -46,3 +46,7 @@ pyo3 = { version = "0.28", features = ["auto-initialize"] }
 # (Linux + macOS). Already in the tree transitively, so no new build cost;
 # non-unix targets fall back to the fixed cap without it.
 libc = "0.2"
+# Help → Memory report: cross-platform system used/available + this process's
+# resident memory. Only the `system` feature (memory + processes); disk /
+# network / component / user are off to keep the build lean.
+sysinfo = { version = "0.36", default-features = false, features = ["system"] }
