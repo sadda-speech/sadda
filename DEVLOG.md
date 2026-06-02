@@ -6,6 +6,26 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-02 — Adaptive signal-cache budget (low-RAM win)
+
+The P1 per-bundle signal swap-cache was bounded by a hard 768 MiB — fine on a
+16 GB workstation, hostile on a 4 GB box where it competes with everything else.
+Now adaptive: budget = **`min(768 MiB cap, ~15% of system RAM)`**, falling back
+to the cap when RAM can't be determined.
+
+- `system_ram_bytes()` — total physical RAM via POSIX `sysconf(_SC_PHYS_PAGES) ×
+  sysconf(_SC_PAGESIZE)` on Linux + macOS (`libc` was already in the tree
+  transitively → no new build cost); `None` on Windows → cap fallback.
+- `cache_budget_for_ram(ram, cap)` — pure, unit-tested policy fn (16 GB → cap;
+  4 GB → ~614 MiB; `None` → cap; boundary just over ~5 GiB).
+- `signal_cache_budget_bytes()` wires them and logs the choice once under
+  `SADDA_DEBUG`; all three `SignalCache` construction sites use it.
+
+App-only (the cache lives in the app — no engine/Python surface). Verified
+end-to-end: on this 16 GB host the budget stays 768 MiB (15%·16 GB > cap), so
+workstations are unchanged; a 4 GB box now gets ~614 MiB. Gate green (app +5
+tests).
+
 ## 2026-06-02 — Fix: f0 octave-down errors — default tracker → Boersma
 
 The app's measure-track f0 — and Python `voiced_pitch`, and the criteria `f0`

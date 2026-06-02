@@ -42,3 +42,7 @@ sadda-script-engine = { path = "../script-engine" }
 # `append_to_inittab!` is in scope; auto-initialize matches the
 # script-engine's feature set so both share one interpreter.
 pyo3 = { version = "0.28", features = ["auto-initialize"] }
+# Adaptive signal-cache budget: POSIX `sysconf` for total physical RAM
+# (Linux + macOS). Already in the tree transitively, so no new build cost;
+# non-unix targets fall back to the fixed cap without it.
+libc = "0.2"

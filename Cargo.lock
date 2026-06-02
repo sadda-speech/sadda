@@ -4167,6 +4167,7 @@ dependencies = [
  "eframe",
  "egui_plot",
  "image",
+ "libc",
  "pyo3",
  "rfd",
  "rtrb",
