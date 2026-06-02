@@ -251,6 +251,10 @@ struct SaddaApp {
     /// for the selected bundle + current `MeasureTrackConfig`.
     /// Recomputed only when the bundle or the config changes.
     active_tracks: Option<MeasureTrackCache>,
+    /// P1: most-recently-used cache of *other* bundles' derived signals, so
+    /// switching back to a recently viewed bundle is instant (no re-load /
+    /// re-DSP). `select_bundle` swaps `active_*` in and out of here.
+    signal_cache: SignalCache,
     /// D10: resolved reference-distribution overlay bands per lane.
     /// Refreshed when the View-menu selection changes.
     overlays: OverlayCache,
@@ -909,6 +913,85 @@ struct MeasureTrackCache {
     vad_error: Option<String>,
 }
 
+/// One bundle's cached derived signals — its waveform envelope plus the
+/// (config-keyed) spectrogram + measure tracks. Held in the [`SignalCache`] so
+/// that revisiting a bundle skips the audio re-load and the heavy DSP (P1 of the
+/// bundle-switch perf work; DEVLOG 2026-06-01). These are the same `Option`s the
+/// renderer reads as `active_*` — a switch just *swaps* them in and out.
+#[derive(Default)]
+struct CachedBundleSignals {
+    envelope: Option<EnvelopeCache>,
+    spectrogram: Option<SpectrogramCache>,
+    tracks: Option<MeasureTrackCache>,
+}
+
+impl CachedBundleSignals {
+    /// Approximate retained bytes — dominated by the mono envelope; the
+    /// spectrogram texture is capped and the track vectors are comparatively
+    /// small, so the envelope is a good enough proxy for the memory budget.
+    fn approx_bytes(&self) -> usize {
+        self.envelope
+            .as_ref()
+            .map_or(0, |e| e.mono_samples.len() * std::mem::size_of::<f32>())
+    }
+}
+
+/// Cap on bytes retained by the [`SignalCache`] (≈ the mono envelopes). Memory-
+/// bounded rather than count-bounded because recordings span seconds to hours;
+/// at ~3.5 MB per minute of mono f32 this holds tens of short clips or a couple
+/// of hour-long sessions. Tunable.
+const SIGNAL_CACHE_BUDGET_BYTES: usize = 768 * 1024 * 1024;
+
+/// A small most-recently-used cache of per-bundle derived signals, bounded by a
+/// byte budget. Used as a *swap* store: `select_bundle` pops the target (if
+/// present) and stashes the bundle it's leaving, so switching back to a recently
+/// viewed bundle is instant instead of re-loading + re-running the DSP.
+struct SignalCache {
+    /// Most-recently-used at the front.
+    entries: Vec<(i64, CachedBundleSignals)>,
+    byte_budget: usize,
+}
+
+impl SignalCache {
+    fn new(byte_budget: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            byte_budget,
+        }
+    }
+
+    /// Removes and returns a bundle's cached signals, if present.
+    fn take(&mut self, bundle_id: i64) -> Option<CachedBundleSignals> {
+        self.entries
+            .iter()
+            .position(|(id, _)| *id == bundle_id)
+            .map(|pos| self.entries.remove(pos).1)
+    }
+
+    /// Stashes a bundle's signals at the front, evicting the least-recently-used
+    /// entries until within the byte budget (always keeping the just-inserted
+    /// one). Skips empty entries (nothing worth caching).
+    fn stash(&mut self, bundle_id: i64, signals: CachedBundleSignals) {
+        if signals.approx_bytes() == 0 && signals.spectrogram.is_none() && signals.tracks.is_none()
+        {
+            return;
+        }
+        self.entries.retain(|(id, _)| *id != bundle_id);
+        self.entries.insert(0, (bundle_id, signals));
+        let mut total: usize = self.entries.iter().map(|(_, s)| s.approx_bytes()).sum();
+        while self.entries.len() > 1 && total > self.byte_budget {
+            if let Some((_, evicted)) = self.entries.pop() {
+                total = total.saturating_sub(evicted.approx_bytes());
+            }
+        }
+    }
+
+    /// Drops a bundle's cached signals (e.g. when the bundle is deleted).
+    fn invalidate(&mut self, bundle_id: i64) {
+        self.entries.retain(|(id, _)| *id != bundle_id);
+    }
+}
+
 /// D10: a resolved reference-distribution band, ready to draw on a lane.
 /// The `kind` drives the visual encoding so a normative band and a
 /// target zone never look alike (the 2026-05-18 governance rule that the
@@ -975,6 +1058,7 @@ impl SaddaApp {
             active_envelope: None,
             active_spectrogram: None,
             active_tracks: None,
+            signal_cache: SignalCache::new(SIGNAL_CACHE_BUDGET_BYTES),
             overlays: OverlayCache::default(),
             reference: ReferenceView::default(),
             selected_annotation: None,
@@ -1021,6 +1105,9 @@ impl SaddaApp {
                     name,
                 };
                 self.clear_bundle_selection();
+                // Bundle ids are per-project — drop any cached signals so a new
+                // project can't hit a stale entry under a colliding id.
+                self.signal_cache = SignalCache::new(SIGNAL_CACHE_BUDGET_BYTES);
                 self.error = None;
             }
             Err(e) => self.set_error(format!("Failed to open project: {e}")),
@@ -1038,6 +1125,7 @@ impl SaddaApp {
                     name,
                 };
                 self.clear_bundle_selection();
+                self.signal_cache = SignalCache::new(SIGNAL_CACHE_BUDGET_BYTES);
                 self.error = None;
             }
             Err(e) => self.set_error(format!("Failed to create project: {e}")),
@@ -1195,6 +1283,7 @@ impl SaddaApp {
         match project.delete_bundle(pending.id) {
             Ok(()) => {
                 self.error = None;
+                self.signal_cache.invalidate(pending.id);
                 if self.selected_bundle_id == Some(pending.id) {
                     self.selected_bundle_id = None;
                     self.active_envelope = None;
@@ -2038,40 +2127,87 @@ impl SaddaApp {
     /// Invalidates the spectrogram cache; it gets rebuilt lazily on
     /// the next frame.
     fn select_bundle(&mut self, bundle_id: i64) {
-        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+        if self.selected_bundle_id == Some(bundle_id) {
             return;
-        };
-        let t_load = std::time::Instant::now();
-        let audio = match project.load_audio(bundle_id) {
-            Ok(a) => a,
-            Err(e) => {
-                self.set_error(format!("Failed to load bundle audio: {e}"));
-                return;
+        }
+        // Resolve the target's signals first — a cache hit (instant), else a
+        // fresh load (which may fail, aborting cleanly before we touch state).
+        // Popping the target out of the cache up front means stashing the
+        // bundle we're leaving (below) can never evict the one we're entering.
+        let target = match self.signal_cache.take(bundle_id) {
+            Some(cached) => {
+                perf_log("cache_hit", std::time::Duration::ZERO);
+                cached
+            }
+            None => {
+                let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+                    return;
+                };
+                let t_load = std::time::Instant::now();
+                let audio = match project.load_audio(bundle_id) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        self.set_error(format!("Failed to load bundle audio: {e}"));
+                        return;
+                    }
+                };
+                perf_log("load_audio", t_load.elapsed());
+                let t_mix = std::time::Instant::now();
+                let mono: Vec<f32> = audio.mono_samples().collect();
+                perf_log("downmix", t_mix.elapsed());
+                CachedBundleSignals {
+                    envelope: Some(EnvelopeCache {
+                        bundle_id,
+                        sample_rate: audio.sample_rate,
+                        duration_seconds: audio.duration_seconds(),
+                        mono_samples: mono,
+                    }),
+                    spectrogram: None,
+                    tracks: None,
+                }
             }
         };
-        perf_log("load_audio", t_load.elapsed());
-        let t_mix = std::time::Instant::now();
-        let mono: Vec<f32> = audio.mono_samples().collect();
-        perf_log("downmix", t_mix.elapsed());
-        self.active_envelope = Some(EnvelopeCache {
-            bundle_id,
-            sample_rate: audio.sample_rate,
-            duration_seconds: audio.duration_seconds(),
-            mono_samples: mono,
-        });
+
+        // Stash the bundle we're leaving, then install the target. (Its
+        // spectrogram / tracks may be present from the cache — the existing
+        // staleness checks recompute them only if the config changed.)
+        if let Some(old_id) = self.selected_bundle_id {
+            let leaving = CachedBundleSignals {
+                envelope: self.active_envelope.take(),
+                spectrogram: self.active_spectrogram.take(),
+                tracks: self.active_tracks.take(),
+            };
+            self.signal_cache.stash(old_id, leaving);
+        }
+        self.active_envelope = target.envelope;
+        self.active_spectrogram = target.spectrogram;
+        self.active_tracks = target.tracks;
+        let duration = self
+            .active_envelope
+            .as_ref()
+            .map(|e| e.duration_seconds)
+            .unwrap_or(0.0);
+
         self.selected_bundle_id = Some(bundle_id);
-        self.active_spectrogram = None;
         self.active_embedding_heatmap = None;
         self.embedding_heatmap_error = None;
         self.selected_annotation = None;
         self.playback = None;
         self.draft_edit = DraftEdit::None;
         self.label_edit = None;
-        self.timeline
-            .reset_for_bundle(self.active_envelope.as_ref().unwrap().duration_seconds);
+        self.timeline.reset_for_bundle(duration);
     }
 
     fn clear_bundle_selection(&mut self) {
+        // Stash the current bundle's signals so reselecting it is instant.
+        if let Some(old_id) = self.selected_bundle_id {
+            let leaving = CachedBundleSignals {
+                envelope: self.active_envelope.take(),
+                spectrogram: self.active_spectrogram.take(),
+                tracks: self.active_tracks.take(),
+            };
+            self.signal_cache.stash(old_id, leaving);
+        }
         self.selected_bundle_id = None;
         self.active_envelope = None;
         self.active_spectrogram = None;
@@ -9208,6 +9344,46 @@ mod rubric_ui_tests {
             format_notebook_entry(&mk(Some("criterion"))),
             "[vowels · measurement] creaky below 120 Hz  → criterion"
         );
+    }
+
+    #[test]
+    fn signal_cache_is_lru_and_byte_budgeted() {
+        fn cached(samples: usize) -> CachedBundleSignals {
+            CachedBundleSignals {
+                envelope: Some(EnvelopeCache {
+                    bundle_id: 0,
+                    sample_rate: 16_000,
+                    duration_seconds: 1.0,
+                    mono_samples: vec![0.0; samples],
+                }),
+                spectrogram: None,
+                tracks: None,
+            }
+        }
+        let per = 100 * std::mem::size_of::<f32>(); // 400 bytes / entry
+        let mut c = SignalCache::new(per * 2 + 1); // holds two entries
+
+        c.stash(1, cached(100));
+        c.stash(2, cached(100));
+        c.stash(3, cached(100)); // over budget → evict LRU (bundle 1)
+        assert!(c.take(1).is_none(), "least-recently-used should be evicted");
+        assert!(c.take(2).is_some());
+        assert!(c.take(3).is_some());
+
+        // A switch-back pattern: stashing the leaving bundle never evicts the
+        // entering one (caller pops the target first). Two large entries:
+        c.stash(10, cached(100));
+        c.stash(11, cached(100));
+        let entered = c.take(10).expect("pop target before stashing the old one");
+        c.stash(11, cached(100)); // re-stash the leaving bundle
+        assert!(entered.envelope.is_some());
+
+        // Empty signals aren't stored; invalidate drops an entry.
+        c.stash(20, CachedBundleSignals::default());
+        assert!(c.take(20).is_none());
+        c.stash(21, cached(100));
+        c.invalidate(21);
+        assert!(c.take(21).is_none());
     }
 }
 
