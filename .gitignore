@@ -43,5 +43,6 @@ Thumbs.db
 # WSL/NTFS "mark of the web" alternate-data-stream artifacts
 *:Zone.Identifier
 
-# Local scratch — manual-testing recordings / projects
+# Local scratch — manual-testing recordings / projects, informal artifacts
 /ManualTesting/
+/scratch/
