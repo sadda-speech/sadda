@@ -83,8 +83,13 @@ Full walk-through at the [quickstart](https://sadda-speech.github.io/sadda/quick
 - **Corpus model** — projects, bundles, six tier types (interval,
   point, reference, dense numeric / vector / categorical), parent-
   child cardinality, append-only audit log.
+- **Annotation campaign suite** — rubric-as-data + controlled
+  vocabulary, computational criteria that auto-propose annotations,
+  targets / annotator assignment / per-annotator packaging, an
+  inter-annotator agreement engine (Cohen's κ), a QA dashboard,
+  rubric versioning, and a PI lab-notebook.
 - **DSP toolkit** — windowing, STFT, spectrogram, intensity, pitch
-  (autocorrelation + voicing), LPC formants, MFCC, LTAS.
+  (Boersma / YIN / pYIN / SWIPE'), LPC formants, MFCC, LTAS.
 - **Clinical measures** — jitter (local / RAP / PPQ5), shimmer
   (local / dB / APQ3 / APQ5), HNR, CPP / CPPS, H1–H2, GNE, and the
   composite AVQI / ABI dysphonia indices (provisional). Praat-

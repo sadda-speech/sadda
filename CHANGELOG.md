@@ -4,6 +4,70 @@ All notable changes to sadda are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-06-03
+
+Adds the **annotation campaign suite** — a full labeling-campaign platform
+(rubrics, computational criteria, targets, annotator assignment, inter-annotator
+agreement, QA dashboard, lab-notebook) — plus **Praat-style keyboard scan /
+annotate ergonomics** in the desktop app, a corpus-wide **concordance** view, a
+performance pass, and a run of correctness + packaging fixes (notably VAD, which
+had been returning zero for every input). Tagged both `v0.4.0` (Python wheel) and
+`v0.4.0-app` (desktop binaries).
+
+### Added
+
+#### Annotation campaign suite (migrations V8–V14)
+
+- **Rubric-as-data + controlled vocabulary**, with per-annotation status / note.
+- **Computational criteria** — structured rules and a typed *signal-function
+  expression* language over open signal + reducer registries — that propose
+  annotations on a preview tier for review, with full criterion-run provenance.
+- **Targets** (first-class work units), **annotator assignment** with seeded
+  random distribution, and **per-annotator package** export / import + tier merge.
+- **Agreement engine** — Cohen's κ, both unit- and frame-based — plus a work
+  queue, a compile / QA dashboard, **rubric versioning + impact**, and a PI
+  **lab-notebook**.
+
+#### Desktop app
+
+- **Scan & annotate ergonomics** — keyboard span playback with loop + pause;
+  multi-active tiers via digit keys; click-to-place a point; **Enter** to commit
+  an annotation to all active tiers with conflict resolution; **Ctrl-snap** of a
+  selection edge to the nearest existing boundary.
+- **Concordance view** — concatenate every token matching a tier + label across
+  the corpus into one continuous timeline.
+- **Help → Memory report**; selection start / end times in the waveform header; a
+  spectrogram **Reset** button.
+
+#### Other
+
+- **Large-file ingest guard** — warn + streaming-split files that would exceed
+  ~512 MiB decoded.
+- The bundled **Silero VAD now ships inside the Python wheel**, so
+  `sadda.ml.vad()` works out of the box after `pip install "sadda[ml]"`.
+
+### Changed
+
+- The default measure-track / `sadda.dsp.voiced_pitch` f0 tracker is now the
+  octave-robust **Boersma** (was windowed-autocorrelation, which latched onto
+  subharmonics of clean tones — e.g. 150 → 75 Hz).
+- **Performance** — FFT-based pitch autocorrelation (~700×), a per-bundle signal
+  cache, asynchronous DSP, and an adaptive cache budget make bundle switching
+  noticeably snappier.
+
+### Fixed
+
+- **VAD returned ~0 for all audio.** The Silero 2024 model requires a 64-sample
+  context window prepended to each 512-sample frame (model input `[1, 576]`);
+  sadda fed bare frames, so the model never detected speech. Fixed and verified
+  end-to-end on real speech.
+- **f0 octave / subharmonic errors** on clean tones (resolved by the Boersma
+  default above).
+- The Python wheel now includes the bundled VAD model — previously
+  `sadda.ml.vad()` raised "bundled Silero VAD not found" for pip installs.
+- Refreshed the embedded script-panel placeholder text (dropped internal slice
+  codes that meant nothing to users).
+
 ## [0.3.0] — 2026-05-28
 
 Closes Phase 3 of the project plan: clinical voice-quality measures,
