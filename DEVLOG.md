@@ -6,6 +6,23 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-02 — Ctrl-snap boundary reuse (Slice 3c — scan ergonomics COMPLETE)
+
+Holding **Ctrl** while defining/moving a selection edge snaps it to the nearest
+existing interval boundary across the active interval tiers — usable mid-drag or on
+a click. Completes the scan-ergonomics feature (Slices 1–3).
+
+- Pure `snap_to_nearest(t, boundaries, max_dist)` (tested); `active_interval_boundaries`
+  gathers start+end of every interval on active interval tiers.
+- `apply_lane_selection_drag` gains `ctrl_held` + `boundaries`; snaps the drag anchor /
+  drag end / click when Ctrl is held. Wired on the waveform / spectrogram / heatmap
+  panes (the `measure_lane` free fn has no project handle → no snap there; documented
+  cut). Ctrl = egui COMMAND; always snaps to nearest (Ctrl means "reuse a boundary").
+
+App-only; +1 test. **Scan-ergonomics feature COMPLETE: Slice 1 (span playback) → 2
+(multi-active tiers + digits) → 3a (click=point) → 3b (Enter-commit + conflict
+resolution) → 3c (Ctrl-snap).** All on main, each slice green.
+
 ## 2026-06-02 — Enter-to-commit + conflict resolution (Slice 3b: scan ergonomics)
 
 Bare **Enter** (when not text-editing / no modal / no focused widget) commits the

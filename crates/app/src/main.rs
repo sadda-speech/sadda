@@ -450,9 +450,36 @@ fn colliding_points(t: f64, existing: &[f64], tol: f64) -> Vec<usize> {
         .collect()
 }
 
+/// Snaps `t` to the nearest value in `boundaries` (Ctrl-snap). `max_dist =
+/// Some(d)` only snaps when the nearest is within `d`; `None` always snaps to
+/// the nearest when any exist. Returns `t` unchanged with no boundaries.
+fn snap_to_nearest(t: f64, boundaries: &[f64], max_dist: Option<f64>) -> f64 {
+    let mut best: Option<f64> = None;
+    for &b in boundaries {
+        if best.is_none_or(|c| (b - t).abs() < (c - t).abs()) {
+            best = Some(b);
+        }
+    }
+    match best {
+        Some(b) if max_dist.is_none_or(|d| (b - t).abs() <= d) => b,
+        _ => t,
+    }
+}
+
 #[cfg(test)]
 mod conflict_tests {
-    use super::{colliding_points, overlapping_intervals};
+    use super::{colliding_points, overlapping_intervals, snap_to_nearest};
+
+    #[test]
+    fn snap_picks_the_nearest_boundary() {
+        let b = vec![1.0, 2.0, 5.0];
+        assert_eq!(snap_to_nearest(2.1, &b, None), 2.0);
+        assert_eq!(snap_to_nearest(4.4, &b, None), 5.0);
+        assert_eq!(snap_to_nearest(2.1, &[], None), 2.1);
+        // max-distance gate: nearest (2.0) is 0.9 away, beyond 0.5 → unchanged.
+        assert_eq!(snap_to_nearest(2.9, &b, Some(0.5)), 2.9);
+        assert_eq!(snap_to_nearest(2.3, &b, Some(0.5)), 2.0);
+    }
 
     #[test]
     fn overlap_is_positive_only_touching_is_allowed() {
@@ -2411,6 +2438,34 @@ impl SaddaApp {
             }
             Err(e) => self.set_error(format!("Add from selection failed: {e}")),
         }
+    }
+
+    /// Start + end times of every interval on the active interval tiers — the
+    /// snap targets for Ctrl-snap (Slice 3c). Empty when no interval tier is
+    /// active or nothing is loaded.
+    fn active_interval_boundaries(&self) -> Vec<f64> {
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return Vec::new();
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return Vec::new();
+        };
+        let Ok(tiers) = project.tiers(Some(bundle_id)) else {
+            return Vec::new();
+        };
+        let mut bounds = Vec::new();
+        for tier in tiers
+            .iter()
+            .filter(|t| self.active_tier_ids.contains(&t.id) && t.r#type == TierType::Interval)
+        {
+            if let Ok(ivs) = project.intervals(tier.id) {
+                for iv in ivs {
+                    bounds.push(iv.start_seconds);
+                    bounds.push(iv.end_seconds);
+                }
+            }
+        }
+        bounds
     }
 
     /// Enter-commit (Slice 3b): adds the current selection to all active tiers of
@@ -6659,7 +6714,17 @@ fn measure_lane(
         })
         .response;
 
-    apply_lane_selection_drag(timeline, drag_start, drag_to, drag_ended, clicked_time);
+    // Measure lanes don't carry the project handle for boundary snapping; Ctrl-snap
+    // is available on the waveform / spectrogram / heatmap panes instead.
+    apply_lane_selection_drag(
+        timeline,
+        drag_start,
+        drag_to,
+        drag_ended,
+        clicked_time,
+        false,
+        &[],
+    );
     handle_zoom_and_scroll(&plot_response, timeline);
 }
 
@@ -6706,23 +6771,37 @@ fn handle_zoom_and_scroll(response: &egui::Response, timeline: &mut TimelineStat
 /// span selection; a plain click drops a zero-width **selection point** at that
 /// time and moves the playhead there (so it can be committed as a point).
 /// Shared by the waveform / spectrogram / measure / heatmap signal panes.
+///
+/// When `ctrl_held` and `boundaries` is non-empty, each edge being set (drag
+/// anchor, drag end, or click) snaps to the nearest existing interval boundary
+/// across the active interval tiers (Slice 3c — boundary reuse).
 fn apply_lane_selection_drag(
     timeline: &mut TimelineState,
     drag_start: Option<f64>,
     drag_to: Option<f64>,
     drag_ended: bool,
     clicked_time: Option<f64>,
+    ctrl_held: bool,
+    boundaries: &[f64],
 ) {
+    let snap = |t: f64| {
+        if ctrl_held && !boundaries.is_empty() {
+            snap_to_nearest(t, boundaries, None)
+        } else {
+            t
+        }
+    };
     if let Some(t) = drag_start {
-        timeline.begin_selection(t);
+        timeline.begin_selection(snap(t));
     }
     if let Some(t) = drag_to {
-        timeline.update_selection(t);
+        timeline.update_selection(snap(t));
     }
     if drag_ended {
         timeline.end_selection();
     }
     if let Some(t) = clicked_time {
+        let t = snap(t);
         timeline.set_cursor(t);
         timeline.set_point_selection(t);
     }
@@ -8714,12 +8793,22 @@ impl SaddaApp {
             );
         }
 
+        // Ctrl-snap: while Ctrl is held, selection edges snap to the nearest
+        // existing interval boundary across active interval tiers (Slice 3c).
+        let ctrl_snap = ui.input(|i| i.modifiers.command);
+        let snap_bounds = if ctrl_snap {
+            self.active_interval_boundaries()
+        } else {
+            Vec::new()
+        };
         apply_lane_selection_drag(
             &mut self.timeline,
             drag_start,
             drag_to,
             drag_ended,
             clicked_time,
+            ctrl_snap,
+            &snap_bounds,
         );
         handle_zoom_and_scroll(&plot_response.response, &mut self.timeline);
     }
@@ -8807,12 +8896,22 @@ impl SaddaApp {
                 }
             });
 
+        // Ctrl-snap: while Ctrl is held, selection edges snap to the nearest
+        // existing interval boundary across active interval tiers (Slice 3c).
+        let ctrl_snap = ui.input(|i| i.modifiers.command);
+        let snap_bounds = if ctrl_snap {
+            self.active_interval_boundaries()
+        } else {
+            Vec::new()
+        };
         apply_lane_selection_drag(
             &mut self.timeline,
             drag_start,
             drag_to,
             drag_ended,
             clicked_time,
+            ctrl_snap,
+            &snap_bounds,
         );
         handle_zoom_and_scroll(&plot_response.response, &mut self.timeline);
     }
@@ -9189,12 +9288,22 @@ impl SaddaApp {
             })
             .response;
 
+        // Ctrl-snap: while Ctrl is held, selection edges snap to the nearest
+        // existing interval boundary across active interval tiers (Slice 3c).
+        let ctrl_snap = ui.input(|i| i.modifiers.command);
+        let snap_bounds = if ctrl_snap {
+            self.active_interval_boundaries()
+        } else {
+            Vec::new()
+        };
         apply_lane_selection_drag(
             &mut self.timeline,
             drag_start,
             drag_to,
             drag_ended,
             clicked_time,
+            ctrl_snap,
+            &snap_bounds,
         );
         handle_zoom_and_scroll(&plot_response, &mut self.timeline);
     }
