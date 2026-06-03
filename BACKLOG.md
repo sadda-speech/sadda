@@ -22,6 +22,8 @@ _Raw captures land here; groomed into the sections below on request._
 - [ ] **VAD regression test on real speech** (ORT-gated) — vendor a short licensed speech clip + assert `vad()` detects it (max prob ≫ 0). The existing test only ran on *silence*, which is why the missing-Silero-context bug (VAD ~0 for everyone) slipped through. — _added 2026-06-03_
 - [ ] **App-side auto-discovery of a pip-installed `onnxruntime`** — locate `…/onnxruntime/capi/libonnxruntime.so*` from an installed `sadda[ml]` and set `ORT_DYLIB_PATH` automatically, so dev builds find ORT without a manual export (the wheel already does this for the Python side; the app only auto-finds a packaged `<exe-dir>/onnxruntime/` sidecar today). — _added 2026-06-03_
 - [ ] **Corpus fetch passthrough** (dataset analogue of the `hf://` model fetch) + a **prep stage** that formats a fetched corpus for Sadda: convert audio to WAV if needed, ingest existing annotations into tiers (TextGrid/CSV/dataset labels → interval/point tiers), build bundles. — _added 2026-06-03_
+- [ ] Annotation tier navigation/activation when there are more than 9 tiers (digit keys 1–9 only cover the first nine) — _added 2026-06-03_
+- [ ] Make the script panel resizable — _added 2026-06-03_
 - [ ] Reorder annotation tiers — _added 2026-06-02_
 - [ ] Multiple selection for points/boundaries; Mouse2 (right-click) context menu for points/boundaries (e.g. move left 0.3s, move to nearest zero-crossing) — _added 2026-06-02_
 - [ ] Auto-generate demo screenshot, run at each release — _added 2026-06-02_
