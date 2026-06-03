@@ -1,0 +1,29 @@
+id = "sadda/silero-vad"
+version = "1.0.0"
+title = "Silero VAD (voice activity detection)"
+upstream_source = "https://github.com/snakers4/silero-vad"
+license = "MIT"
+
+[model]
+kind = "vad"
+format = "onnx"
+file = "silero_vad.onnx"
+file_checksum = "sha256:1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3"
+
+[input]
+modality = "audio"
+sample_rate_hz = 16000
+channels = 1
+
+[output]
+# VAD inference yields speech regions (intervals) above a threshold.
+tier_kind = "interval"
+
+[compute]
+cpu_min_ram_mb = 256
+gpu = "optional"
+
+[citation]
+authors = ["Silero Team"]
+year = 2024
+bibtex = "@misc{Silero VAD, author = {Silero Team}, title = {Silero VAD}, year = {2024}, howpublished = {\\url{https://github.com/snakers4/silero-vad}}}"

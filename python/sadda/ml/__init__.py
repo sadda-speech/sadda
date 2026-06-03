@@ -77,13 +77,37 @@ def _discover_ort_dylib() -> Optional[str]:
     return str(candidates[0])
 
 
-# Set ORT_DYLIB_PATH from the installed onnxruntime, but never override
-# a user-set value. Failure is silent — the engine raises a clean
-# "set ORT_DYLIB_PATH" error at vad-call time if neither path resolves.
+def _discover_bundled_models() -> Optional[str]:
+    """Locate the bundled-models directory shipped inside this package
+    (``sadda/_bundled/`` — currently the Silero VAD). Returns the directory to
+    point ``SADDA_MODELS_BUNDLED`` at (the parent of ``<name>/model.toml``), or
+    ``None`` if it isn't present.
+
+    This makes ``sadda.ml.vad()`` work out of the box after ``pip install
+    sadda[ml]``: the engine's ``vad_bundled`` searches ``SADDA_MODELS_BUNDLED``
+    first, then next-to-executable, then a compile-time repo path — none of
+    which resolve for a pip wheel, so without this the bundled model is "not
+    found".
+    """
+    base = Path(__file__).resolve().parents[1] / "_bundled"
+    if (base / "silero-vad" / "model.toml").is_file():
+        return str(base)
+    return None
+
+
+# Set ORT_DYLIB_PATH from the installed onnxruntime, and SADDA_MODELS_BUNDLED
+# from the model shipped in this wheel — but never override a user-set value.
+# Failure is silent: the engine raises a clean error at vad-call time if a path
+# still can't be resolved.
 if "ORT_DYLIB_PATH" not in os.environ:
     _found = _discover_ort_dylib()
     if _found is not None:
         os.environ["ORT_DYLIB_PATH"] = _found
+
+if "SADDA_MODELS_BUNDLED" not in os.environ:
+    _models = _discover_bundled_models()
+    if _models is not None:
+        os.environ["SADDA_MODELS_BUNDLED"] = _models
 
 __all__ = [
     "Model",
