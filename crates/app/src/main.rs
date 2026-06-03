@@ -419,13 +419,24 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-/// Formats the active time-span selection as `sel A–B s  (Δ C s)` for the
-/// waveform header, or `None` when nothing is selected. Normalises order so a
-/// right-to-left drag reads the same. Pure → unit-testable.
+/// Whether a selection is a zero-width "point" (placed by a click) rather than a
+/// span (a drag). Real drags are `≥ MIN_SELECTION_SECONDS`; a point is `(t, t)`.
+fn selection_is_point((lo, hi): (f64, f64)) -> bool {
+    hi - lo < 1e-6
+}
+
+/// Formats the active selection for the waveform header: `point A s` for a
+/// zero-width selection, else `sel A–B s  (Δ C s)`. `None` when nothing is
+/// selected. Normalises order so a right-to-left drag reads the same.
+/// Pure → unit-testable.
 fn format_selection(selection: Option<(f64, f64)>) -> Option<String> {
     let (a, b) = selection?;
     let (lo, hi) = (a.min(b), a.max(b));
-    Some(format!("sel {lo:.3}–{hi:.3}s  (Δ {:.3}s)", hi - lo))
+    if selection_is_point((lo, hi)) {
+        Some(format!("point {lo:.3}s"))
+    } else {
+        Some(format!("sel {lo:.3}–{hi:.3}s  (Δ {:.3}s)", hi - lo))
+    }
 }
 
 #[cfg(test)]
@@ -451,6 +462,14 @@ mod selection_format_tests {
             format_selection(Some((0.2, 0.8))),
             format_selection(Some((0.8, 0.2))),
         );
+    }
+
+    #[test]
+    fn zero_width_selection_reads_as_a_point() {
+        let s = format_selection(Some((1.5, 1.5))).unwrap();
+        assert!(s.starts_with("point"), "{s}");
+        assert!(s.contains("1.500"), "{s}");
+        assert!(!s.contains('Δ'), "no duration for a point: {s}");
     }
 }
 
@@ -487,7 +506,12 @@ fn span_for_action(
     let sel = selection.map(|(a, b)| (a.min(b), a.max(b)));
     let in_view = |t: f64| t.clamp(view_start, view_end);
     let (lo, hi) = match action {
-        PlayAction::SelectionOrView => sel.unwrap_or((view_start, view_end)),
+        // A point (zero-width) selection isn't a playable span — fall back to
+        // the whole view so Space still plays after a click placed a point.
+        PlayAction::SelectionOrView => match sel {
+            Some(s) if !selection_is_point(s) => s,
+            _ => (view_start, view_end),
+        },
         PlayAction::LeftOfPlayhead => (view_start, in_view(playhead)),
         PlayAction::RightOfPlayhead => (in_view(playhead), view_end),
         PlayAction::LeftOfSelection => (view_start, sel?.0),
@@ -508,6 +532,11 @@ mod play_action_tests {
         );
         assert_eq!(
             span_for_action(PlayAction::SelectionOrView, 1.0, 5.0, 3.0, None),
+            Some((1.0, 5.0)),
+        );
+        // A point (zero-width) selection is not a playable span → the view.
+        assert_eq!(
+            span_for_action(PlayAction::SelectionOrView, 1.0, 5.0, 3.0, Some((3.0, 3.0))),
             Some((1.0, 5.0)),
         );
     }
@@ -2283,6 +2312,8 @@ impl SaddaApp {
                     ..Default::default()
                 })
                 .map(|_| ()),
+            // A point selection commits a single point at its time; a span on a
+            // point tier is filtered out by the caller (see `commit_targets`).
             TierType::Point => project
                 .add_point(&sadda_engine::PointSpec {
                     tier_id,
@@ -2293,18 +2324,6 @@ impl SaddaApp {
                     note: None,
                     extra: None,
                     ..Default::default()
-                })
-                .and_then(|_| {
-                    project.add_point(&sadda_engine::PointSpec {
-                        tier_id,
-                        time_seconds: hi,
-                        label: None,
-                        parent_annotation_id: None,
-                        status: None,
-                        note: None,
-                        extra: None,
-                        ..Default::default()
-                    })
                 })
                 .map(|_| ()),
             _ => return,
@@ -6193,8 +6212,20 @@ fn draw_selection_band_rect(
         return;
     };
     let x_per_second = rect.width() as f64 / (view_end - view_start).max(1e-6);
-    let x0 = (rect.left() + ((lo - view_start) * x_per_second) as f32).max(rect.left());
-    let x1 = (rect.left() + ((hi - view_start) * x_per_second) as f32).min(rect.right());
+    let to_x = |t: f64| rect.left() + ((t - view_start) * x_per_second) as f32;
+    // A point (zero-width) selection draws as a single vertical line.
+    if selection_is_point((lo, hi)) {
+        let x = to_x(lo);
+        if x >= rect.left() && x <= rect.right() {
+            painter.line_segment(
+                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                egui::Stroke::new(1.0, SELECTION_EDGE),
+            );
+        }
+        return;
+    }
+    let x0 = to_x(lo).max(rect.left());
+    let x1 = to_x(hi).min(rect.right());
     if x1 <= x0 {
         return;
     }
@@ -6343,9 +6374,10 @@ fn handle_zoom_and_scroll(response: &egui::Response, timeline: &mut TimelineStat
     }
 }
 
-/// Applies a signal lane's drag/click outcome to the timeline: a drag
-/// draws a span selection; a plain click clears any selection and moves
-/// the cursor. Shared by the waveform + spectrogram panes.
+/// Applies a signal lane's drag/click outcome to the timeline: a drag draws a
+/// span selection; a plain click drops a zero-width **selection point** at that
+/// time and moves the playhead there (so it can be committed as a point).
+/// Shared by the waveform / spectrogram / measure / heatmap signal panes.
 fn apply_lane_selection_drag(
     timeline: &mut TimelineState,
     drag_start: Option<f64>,
@@ -6364,7 +6396,7 @@ fn apply_lane_selection_drag(
     }
     if let Some(t) = clicked_time {
         timeline.set_cursor(t);
-        timeline.clear_selection();
+        timeline.set_point_selection(t);
     }
 }
 
@@ -8859,12 +8891,6 @@ impl SaddaApp {
             .filter(|t| active_tier_ids.contains(&t.id))
             .map(|t| truncate_label(&t.name, 16))
             .collect();
-        let commit_targets: Vec<(i64, TierType)> = tiers
-            .iter()
-            .filter(|t| active_tier_ids.contains(&t.id))
-            .filter(|t| matches!(t.r#type, TierType::Interval | TierType::Point))
-            .map(|t| (t.id, t.r#type))
-            .collect();
         ui.horizontal(|ui| {
             if ui.button("➕ New tier…").clicked() {
                 tier_op = Some(TierOp::New);
@@ -8877,26 +8903,44 @@ impl SaddaApp {
                 ui.label(status);
             }
             if let Some((lo, hi)) = selection {
-                ui.separator();
-                ui.label(egui::RichText::new(format!("selection {lo:.3}–{hi:.3}s")).small());
-                let can_commit = !commit_targets.is_empty();
-                let hint = if can_commit
-                    && commit_targets.iter().all(|(_, t)| *t == TierType::Point)
-                {
-                    "Add points at edges"
-                } else if can_commit && commit_targets.iter().all(|(_, t)| *t == TierType::Interval)
-                {
-                    "Add interval"
+                // The selection drives the target type: a point (zero-width)
+                // commits to active point tiers; a span to active interval tiers.
+                let is_point = selection_is_point((lo, hi));
+                let want = if is_point {
+                    TierType::Point
                 } else {
-                    "Add to active tiers"
+                    TierType::Interval
+                };
+                let commit_targets: Vec<i64> = tiers
+                    .iter()
+                    .filter(|t| active_tier_ids.contains(&t.id) && t.r#type == want)
+                    .map(|t| t.id)
+                    .collect();
+                ui.separator();
+                let sel_label = if is_point {
+                    format!("point {lo:.3}s")
+                } else {
+                    format!("selection {lo:.3}–{hi:.3}s")
+                };
+                ui.label(egui::RichText::new(sel_label).small());
+                let can_commit = !commit_targets.is_empty();
+                let hint = if is_point {
+                    "Add point"
+                } else {
+                    "Add interval"
+                };
+                let hover = if is_point {
+                    "add a point at this time to all active point tiers"
+                } else {
+                    "add an interval to all active interval tiers"
                 };
                 if ui
                     .add_enabled(can_commit, egui::Button::new(hint))
-                    .on_hover_text("add the selection to all active interval / point tiers")
+                    .on_hover_text(hover)
                     .clicked()
                 {
-                    for (id, ty) in &commit_targets {
-                        selection_commit.push((*id, *ty, lo, hi));
+                    for id in &commit_targets {
+                        selection_commit.push((*id, want, lo, hi));
                     }
                 }
                 if ui.button("Clear").clicked() {
