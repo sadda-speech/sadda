@@ -6,6 +6,29 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-03 — Fix: bundled Silero VAD now ships in the wheel
+
+The PyPI wheel didn't actually include the bundled Silero VAD, so
+`sadda.ml.vad()` failed with "bundled Silero VAD not found" for any pip user
+without the repo checked out + `SADDA_MODELS_BUNDLED` set — the engine's
+`bundled_model_dir` searches that env var, then next-to-exe, then a *compile-time*
+repo path, none of which resolve for a pip wheel. (The GUI app sidesteps it: a dev
+build finds the repo's `models-bundled/`.) Found while testing VAD end-to-end.
+
+Fix (mirrors the existing ORT auto-discovery in `sadda.ml`):
+- Ship the model as **package data**: `python/sadda/_bundled/silero-vad/`
+  {`model.toml`, `silero_vad.onnx`, `LICENSE`}. **Verified it lands in the built
+  wheel** as `sadda/_bundled/silero-vad/…`.
+- `ml/__init__.py` gains `_discover_bundled_models()` and sets
+  `SADDA_MODELS_BUNDLED` to the package dir at import (never overriding a user
+  value), so `vad_bundled` finds it.
+- Tests: ships-with-package + discovery-sets-env + a **drift guard** asserting the
+  in-package copy stays byte-identical to the repo's canonical `models-bundled/`
+  (the copy the engine / GUI build uses). The duplication is deliberate + guarded.
+
+App/wheel-only; gate green (+3 tests). (Separately noted but NOT the cause of the
+near-zero VAD output under investigation — that's the recording/model question.)
+
 ## 2026-06-02 — Ctrl-snap boundary reuse (Slice 3c — scan ergonomics COMPLETE)
 
 Holding **Ctrl** while defining/moving a selection edge snaps it to the nearest
