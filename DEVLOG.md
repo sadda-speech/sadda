@@ -6,6 +6,27 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-02 — Enter-to-commit + conflict resolution (Slice 3b: scan ergonomics)
+
+Bare **Enter** (when not text-editing / no modal / no focused widget) commits the
+current selection to all active tiers of the matching type: a span → intervals on
+active interval tiers, a point → points on active point tiers.
+
+- Pre-insert conflict detection (pure, tested): `overlapping_intervals` (positive
+  overlap only — touching boundaries are allowed) + `colliding_points` (within
+  `POINT_COLLISION_TOL_SECONDS` = 1 ms).
+- `enter_commit`: commits the non-conflicting tiers immediately; queues conflicting
+  tiers into `pending_commit`.
+- Resolution prompt (`render_pending_commit`): per-tier **Skip / Replace** + Skip-all /
+  Replace-all; **Commit** applies, **Cancel** discards. Replace = delete the
+  conflicting existing annotation(s) (`delete_interval`/`delete_point`) then add the
+  new one (`apply_pending_commit`).
+
+App-only; +2 tests (conflict detection). The Enter/modal flow is GUI-driven (not
+unit-tested) — worth an end-to-end check in the app. Flags (tweakable): point
+collision tol = 1 ms; Enter is guarded on "no focused widget", so a rare
+open-but-unfocused modal could still see Enter. Next: 3c (Ctrl-snap boundary reuse).
+
 ## 2026-06-02 — Click places a point selection (Slice 3a: scan ergonomics)
 
 Per the locked Slice 3 decisions, a plain click on a signal pane now drops a

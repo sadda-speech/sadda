@@ -292,6 +292,9 @@ struct SaddaApp {
     /// Time (seconds) to restore the cursor to when playback is stopped via Esc
     /// — the start of the span that is playing. `None` when nothing is playing.
     playback_origin: Option<f64>,
+    /// A pending Enter-commit awaiting conflict resolution (Slice 3b). `None`
+    /// when there's nothing to resolve.
+    pending_commit: Option<PendingCommit>,
     /// In-progress mouse-driven edit on an interval lane. Drag-create
     /// or drag-resize lives here between mouse-down and mouse-up.
     draft_edit: DraftEdit,
@@ -423,6 +426,78 @@ fn human_bytes(bytes: u64) -> String {
 /// span (a drag). Real drags are `≥ MIN_SELECTION_SECONDS`; a point is `(t, t)`.
 fn selection_is_point((lo, hi): (f64, f64)) -> bool {
     hi - lo < 1e-6
+}
+
+/// Two points within this many seconds count as a collision on commit.
+const POINT_COLLISION_TOL_SECONDS: f64 = 0.001;
+
+/// Indices of `existing` intervals that overlap the new span `(lo, hi)`. Shared
+/// endpoints (touching boundaries) do NOT count — only positive overlap.
+fn overlapping_intervals(new: (f64, f64), existing: &[(f64, f64)]) -> Vec<usize> {
+    let (nlo, nhi) = new;
+    (0..existing.len())
+        .filter(|&i| {
+            let (elo, ehi) = existing[i];
+            nhi.min(ehi) - nlo.max(elo) > 1e-9
+        })
+        .collect()
+}
+
+/// Indices of `existing` points within `tol` seconds of the new point `t`.
+fn colliding_points(t: f64, existing: &[f64], tol: f64) -> Vec<usize> {
+    (0..existing.len())
+        .filter(|&i| (existing[i] - t).abs() <= tol)
+        .collect()
+}
+
+#[cfg(test)]
+mod conflict_tests {
+    use super::{colliding_points, overlapping_intervals};
+
+    #[test]
+    fn overlap_is_positive_only_touching_is_allowed() {
+        let existing = vec![(0.0, 1.0), (2.0, 3.0)];
+        assert_eq!(overlapping_intervals((0.5, 1.5), &existing), vec![0]);
+        // (1.0, 2.0) touches both endpoints but overlaps neither.
+        assert!(overlapping_intervals((1.0, 2.0), &existing).is_empty());
+        assert_eq!(overlapping_intervals((0.5, 2.5), &existing), vec![0, 1]);
+        assert!(overlapping_intervals((1.2, 1.8), &existing).is_empty());
+    }
+
+    #[test]
+    fn point_collision_is_within_tolerance() {
+        let existing = vec![1.0, 2.0, 3.0];
+        assert_eq!(colliding_points(2.0005, &existing, 0.001), vec![1]);
+        assert!(colliding_points(2.5, &existing, 0.001).is_empty());
+    }
+}
+
+/// A pending annotation commit (the Enter-commit flow) that hit conflicts and
+/// awaits per-tier resolution. Non-conflicting tiers are already committed by
+/// the time this exists.
+struct PendingCommit {
+    /// The annotation to add: a point at `lo` when `is_point`, else an interval
+    /// `(lo, hi)`.
+    is_point: bool,
+    lo: f64,
+    hi: f64,
+    conflicts: Vec<TierConflict>,
+}
+
+/// One tier whose existing annotation(s) conflict with the pending commit.
+struct TierConflict {
+    tier_id: i64,
+    tier_name: String,
+    /// Existing annotation ids that conflict (deleted on Replace).
+    existing_ids: Vec<i64>,
+    decision: ConflictDecision,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ConflictDecision {
+    Pending,
+    Skip,
+    Replace,
 }
 
 /// Formats the active selection for the waveform header: `point A s` for a
@@ -1566,6 +1641,7 @@ impl SaddaApp {
             timeline: TimelineState::default(),
             playback: None,
             playback_origin: None,
+            pending_commit: None,
             draft_edit: DraftEdit::None,
             label_edit: None,
             rubric_editor: None,
@@ -2334,6 +2410,258 @@ impl SaddaApp {
                 self.set_info("Added annotation from selection.".to_string());
             }
             Err(e) => self.set_error(format!("Add from selection failed: {e}")),
+        }
+    }
+
+    /// Enter-commit (Slice 3b): adds the current selection to all active tiers of
+    /// the matching type — a point selection → active point tiers, a span →
+    /// active interval tiers. Tiers with no conflict commit immediately; tiers
+    /// whose existing annotations would collide/overlap are queued into
+    /// `pending_commit` for the resolution prompt. No-op without a selection or
+    /// any matching active tier.
+    fn enter_commit(&mut self) {
+        let Some((lo, hi)) = self.timeline.selection else {
+            return;
+        };
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return;
+        };
+        let is_point = selection_is_point((lo, hi));
+        let want = if is_point {
+            TierType::Point
+        } else {
+            TierType::Interval
+        };
+        let active = self.active_tier_ids.clone();
+
+        let mut conflicts: Vec<TierConflict> = Vec::new();
+        let mut committed = 0usize;
+        let mut first_err: Option<String> = None;
+        {
+            let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+                return;
+            };
+            match project.tiers(Some(bundle_id)) {
+                Err(e) => first_err = Some(format!("Failed to list tiers: {e}")),
+                Ok(tiers) => {
+                    for tier in tiers
+                        .iter()
+                        .filter(|t| active.contains(&t.id) && t.r#type == want)
+                    {
+                        if is_point {
+                            let existing = project.points(tier.id).unwrap_or_default();
+                            let times: Vec<f64> = existing.iter().map(|p| p.time_seconds).collect();
+                            let hits = colliding_points(lo, &times, POINT_COLLISION_TOL_SECONDS);
+                            if hits.is_empty() {
+                                if let Err(e) = project.add_point(&sadda_engine::PointSpec {
+                                    tier_id: tier.id,
+                                    time_seconds: lo,
+                                    ..Default::default()
+                                }) {
+                                    first_err.get_or_insert(format!("{e}"));
+                                } else {
+                                    committed += 1;
+                                }
+                            } else {
+                                conflicts.push(TierConflict {
+                                    tier_id: tier.id,
+                                    tier_name: tier.name.clone(),
+                                    existing_ids: hits.iter().map(|&i| existing[i].id).collect(),
+                                    decision: ConflictDecision::Pending,
+                                });
+                            }
+                        } else {
+                            let existing = project.intervals(tier.id).unwrap_or_default();
+                            let spans: Vec<(f64, f64)> = existing
+                                .iter()
+                                .map(|iv| (iv.start_seconds, iv.end_seconds))
+                                .collect();
+                            let hits = overlapping_intervals((lo, hi), &spans);
+                            if hits.is_empty() {
+                                if let Err(e) = project.add_interval(&sadda_engine::IntervalSpec {
+                                    tier_id: tier.id,
+                                    start_seconds: lo,
+                                    end_seconds: hi,
+                                    ..Default::default()
+                                }) {
+                                    first_err.get_or_insert(format!("{e}"));
+                                } else {
+                                    committed += 1;
+                                }
+                            } else {
+                                conflicts.push(TierConflict {
+                                    tier_id: tier.id,
+                                    tier_name: tier.name.clone(),
+                                    existing_ids: hits.iter().map(|&i| existing[i].id).collect(),
+                                    decision: ConflictDecision::Pending,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(e) = first_err {
+            self.set_error(format!("Add failed: {e}"));
+        }
+        if conflicts.is_empty() {
+            if committed > 0 {
+                self.set_info(format!("Added to {committed} tier(s)."));
+            }
+        } else {
+            self.pending_commit = Some(PendingCommit {
+                is_point,
+                lo,
+                hi,
+                conflicts,
+            });
+        }
+    }
+
+    /// Renders the conflict-resolution prompt for a pending Enter-commit: a
+    /// Skip / Replace choice per conflicting tier (+ apply-to-all), then Commit
+    /// applies the Replace decisions; Cancel discards the pending commit.
+    fn render_pending_commit(&mut self, ctx: &egui::Context) {
+        if self.pending_commit.is_none() {
+            return;
+        }
+        let mut do_commit = false;
+        let mut do_cancel = false;
+        let mut set_all: Option<ConflictDecision> = None;
+        {
+            let pending = self.pending_commit.as_mut().unwrap();
+            let kind = if pending.is_point {
+                "point"
+            } else {
+                "interval"
+            };
+            egui::Window::new("Resolve conflicts")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "Adding a {kind} conflicts with existing annotations on {} tier(s):",
+                        pending.conflicts.len()
+                    ));
+                    ui.add_space(6.0);
+                    for c in pending.conflicts.iter_mut() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!(
+                                "{} ({} existing)",
+                                truncate_label(&c.tier_name, 18),
+                                c.existing_ids.len()
+                            ));
+                            ui.selectable_value(&mut c.decision, ConflictDecision::Skip, "Skip");
+                            ui.selectable_value(
+                                &mut c.decision,
+                                ConflictDecision::Replace,
+                                "Replace",
+                            );
+                        });
+                    }
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("All:");
+                        if ui.button("Skip all").clicked() {
+                            set_all = Some(ConflictDecision::Skip);
+                        }
+                        if ui.button("Replace all").clicked() {
+                            set_all = Some(ConflictDecision::Replace);
+                        }
+                    });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let ready = pending
+                            .conflicts
+                            .iter()
+                            .all(|c| c.decision != ConflictDecision::Pending);
+                        if ui
+                            .add_enabled(ready, egui::Button::new("Commit"))
+                            .on_hover_text("apply the chosen resolutions")
+                            .clicked()
+                        {
+                            do_commit = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            do_cancel = true;
+                        }
+                    });
+                });
+            if let Some(d) = set_all {
+                for c in pending.conflicts.iter_mut() {
+                    c.decision = d;
+                }
+            }
+        }
+        if do_cancel {
+            self.pending_commit = None;
+        } else if do_commit {
+            self.apply_pending_commit();
+        }
+    }
+
+    /// Applies the resolved `pending_commit`: for each Replace, deletes the
+    /// conflicting existing annotation(s) then adds the new one; Skip does
+    /// nothing. Clears the pending commit.
+    fn apply_pending_commit(&mut self) {
+        let Some(pending) = self.pending_commit.take() else {
+            return;
+        };
+        let mut first_err: Option<String> = None;
+        let mut replaced = 0usize;
+        {
+            let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+                return;
+            };
+            for c in pending
+                .conflicts
+                .iter()
+                .filter(|c| c.decision == ConflictDecision::Replace)
+            {
+                let mut ok = true;
+                for &id in &c.existing_ids {
+                    let r = if pending.is_point {
+                        project.delete_point(id)
+                    } else {
+                        project.delete_interval(id)
+                    };
+                    if let Err(e) = r {
+                        first_err.get_or_insert(format!("{e}"));
+                        ok = false;
+                    }
+                }
+                if !ok {
+                    continue;
+                }
+                let r = if pending.is_point {
+                    project
+                        .add_point(&sadda_engine::PointSpec {
+                            tier_id: c.tier_id,
+                            time_seconds: pending.lo,
+                            ..Default::default()
+                        })
+                        .map(|_| ())
+                } else {
+                    project
+                        .add_interval(&sadda_engine::IntervalSpec {
+                            tier_id: c.tier_id,
+                            start_seconds: pending.lo,
+                            end_seconds: pending.hi,
+                            ..Default::default()
+                        })
+                        .map(|_| ())
+                };
+                if let Err(e) = r {
+                    first_err.get_or_insert(format!("{e}"));
+                } else {
+                    replaced += 1;
+                }
+            }
+        }
+        if let Some(e) = first_err {
+            self.set_error(format!("Replace failed: {e}"));
+        } else {
+            self.set_info(format!("Resolved: replaced on {replaced} tier(s)."));
         }
     }
 
@@ -7371,6 +7699,25 @@ impl eframe::App for SaddaApp {
             }
         }
 
+        // ── Enter commits the selection to active tiers (Slice 3b) ────────
+        // Span → intervals on active interval tiers; point → points on active
+        // point tiers. Skipped while text-editing, while a resolution prompt /
+        // label edit / palette is up, or when any widget has focus (so Enter
+        // reaches dialogs). No-op without a selection.
+        if !text_editing
+            && self.pending_commit.is_none()
+            && self.label_edit.is_none()
+            && !self.command_palette_open
+            && self.selected_bundle_id.is_some()
+            && self.timeline.selection.is_some()
+            && ui.ctx().memory(|m| m.focused().is_none())
+            && ui
+                .ctx()
+                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+        {
+            self.enter_commit();
+        }
+
         // Arrow keys scrub the view left / right (a quarter-window per
         // press); Home / End snap to the start / end of the file. This
         // is the discoverable, trackpad-free way to move through a long
@@ -7438,6 +7785,7 @@ impl eframe::App for SaddaApp {
 
         // Inline label-edit modal. Rendered before the menu so it
         // overlays everything; commit / cancel logic lives inside.
+        self.render_pending_commit(ui.ctx());
         self.label_edit_window(ui.ctx());
         self.rubric_editor_window(ui.ctx());
         self.criteria_editor_window(ui.ctx());
