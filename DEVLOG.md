@@ -6,6 +6,30 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-03 — Fix: VAD returned ~0 for everyone (missing Silero context window)
+
+The big one in the VAD-debugging thread. `sadda.ml.vad()` / the GUI VAD lane
+returned ~0 speech probability on **all** audio. Bisected via raw onnxruntime: the
+bundled model is byte-identical to the official Silero (sha256 `1a153a22…`), and
+the **official model also returns ~0** when fed bare 512-sample windows — so it
+was never a sadda-vs-model or audio problem (the test clip was confirmed real
+speech: 83% energy in 300–3400 Hz, no DC offset).
+
+Root cause: the Silero **2024** model needs **64 "context" samples** (the tail of
+the previous window) prepended to each 512-sample window — the model input is
+`[1, 576]`, not `[1, 512]`. sadda fed bare 512, so the model never saw the
+lookahead it was trained with → flat ~0. The only VAD test ran on *silence*
+(~0 either way), so it never caught it.
+
+Fix (`engine/src/ml.rs::vad`): carry a 64-sample `context` across windows and feed
+`context ++ window`. Verified end-to-end through sadda on real speech: **max
+0.003 → 1.000**, mean 0.640, 226/360 windows detected. Extracted `vad_model_input`
++ a unit test guarding the 576-sample input. (Backlogged: a real-speech ORT-gated
+integration test — the silence-only test was the gap.)
+
+Found while a collaborator stress-tested ML VAD — the same session surfaced the
+wheel-missing-model packaging gap (fixed in the entry below).
+
 ## 2026-06-03 — Fix: bundled Silero VAD now ships in the wheel
 
 The PyPI wheel didn't actually include the bundled Silero VAD, so
