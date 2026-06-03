@@ -1011,6 +1011,15 @@ impl TimelineState {
         self.selection = Some((t, t));
     }
 
+    /// Sets a zero-width "selection point" at `t` (clamped to the bundle). A
+    /// plain click uses this so the time can be committed as a point; a drag
+    /// still produces a span via [`begin_selection`](Self::begin_selection).
+    pub fn set_point_selection(&mut self, t: f64) {
+        let t = t.clamp(0.0, self.duration);
+        self.selection_anchor = None;
+        self.selection = Some((t, t));
+    }
+
     /// Extends the in-progress selection to `t` (sorted into `(lo, hi)`).
     pub fn update_selection(&mut self, t: f64) {
         if let Some(a) = self.selection_anchor {

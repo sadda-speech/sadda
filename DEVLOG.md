@@ -6,6 +6,26 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-02 — Click places a point selection (Slice 3a: scan ergonomics)
+
+Per the locked Slice 3 decisions, a plain click on a signal pane now drops a
+zero-width **selection point** at that time (+ moves the playhead) instead of
+clearing the selection — so a time can be committed as a point. Drag still makes
+a span; clicking an annotation in a tier lane still selects it (separate path).
+
+- `TimelineState::set_point_selection(t)` (selection = `(t, t)`);
+  `apply_lane_selection_drag`'s click branch uses it.
+- The selection now drives the commit **type**: a point commits to active **point**
+  tiers (single point), a span to active **interval** tiers. The strip button + label
+  adapt (Add point / Add interval); `commit_selection_to_tier` no longer adds two
+  points at the span edges.
+- Rendering: a point selection shows as a single vertical line in plot lanes
+  (coincident band edges) and tier lanes (`draw_selection_band_rect`). Header reads
+  `point t s`. Space falls back to the view for a point selection.
+- Pure helper `selection_is_point` + tests.
+
+App-only; +2 tests. Next: 3b (Enter-to-commit + conflict resolution), 3c (Ctrl-snap).
+
 ## 2026-06-02 — Multi-active tiers + digit activation (Slice 2: scan ergonomics)
 
 Second slice. The single `active_tier_id: Option<i64>` becomes a **set**
