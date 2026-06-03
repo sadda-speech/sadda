@@ -23,6 +23,12 @@ pub const VAD_SAMPLE_RATE: u32 = 16_000;
 /// Samples per Silero VAD analysis window at 16 kHz (the model's fixed
 /// frame — 32 ms).
 pub const VAD_WINDOW: usize = 512;
+/// Samples of previous-window context the Silero 2024 model prepends to each
+/// window (its internal `_context`). The model input is therefore
+/// `VAD_CONTEXT + VAD_WINDOW = 576` samples; feeding a bare `VAD_WINDOW` makes
+/// the model return ~0 for every window (it never sees the lookahead it was
+/// trained with).
+const VAD_CONTEXT: usize = 64;
 /// Length of the Silero recurrent state tensor (`[2, 1, 128]` flattened).
 const VAD_STATE_LEN: usize = 2 * 128;
 
@@ -119,6 +125,16 @@ pub struct SpeechSegment {
     pub end_seconds: f64,
 }
 
+/// Assembles one Silero VAD model input: `context` (the tail of the previous
+/// window) followed by the current `window`. The Silero 2024 model needs this
+/// 64-sample lookback prepended — feeding a bare window returns ~0 per frame.
+fn vad_model_input(context: &[f32], window: &[f32]) -> Vec<f32> {
+    let mut buf = Vec::with_capacity(context.len() + window.len());
+    buf.extend_from_slice(context);
+    buf.extend_from_slice(window);
+    buf
+}
+
 /// Runs Silero VAD over `audio` using the ONNX model at `model_path`,
 /// returning a speech probability for each 512-sample window at 16 kHz.
 ///
@@ -146,12 +162,18 @@ pub fn vad(audio: &Audio, model_path: &Path) -> Result<Vec<VadFrame>> {
         .map_err(ml_err)?;
 
     let mut state = vec![0.0f32; VAD_STATE_LEN];
+    // The model input is `[context(64) ++ window(512)]`; the context is the tail
+    // of the previous window, zero for the first. Without it the model returns
+    // ~0 for every window (Silero 2024's `_context` mechanism).
+    let mut context = vec![0.0f32; VAD_CONTEXT];
     let n_windows = samples.len() / VAD_WINDOW;
     let mut frames = Vec::with_capacity(n_windows);
 
     for w in 0..n_windows {
-        let chunk = samples[w * VAD_WINDOW..(w + 1) * VAD_WINDOW].to_vec();
-        let input = Tensor::from_array(([1usize, VAD_WINDOW], chunk)).map_err(ml_err)?;
+        let chunk = &samples[w * VAD_WINDOW..(w + 1) * VAD_WINDOW];
+        let input_buf = vad_model_input(&context, chunk);
+        let input =
+            Tensor::from_array(([1usize, VAD_CONTEXT + VAD_WINDOW], input_buf)).map_err(ml_err)?;
         let state_t = Tensor::from_array(([2usize, 1, 128], state.clone())).map_err(ml_err)?;
         // sr as a 1-element i64 tensor — accepted by the model's scalar
         // `sr` input (verified in the spike).
@@ -177,6 +199,9 @@ pub fn vad(audio: &Audio, model_path: &Path) -> Result<Vec<VadFrame>> {
                 state.copy_from_slice(next);
             }
         }
+
+        // Carry the tail of this window as the next window's context.
+        context.copy_from_slice(&chunk[VAD_WINDOW - VAD_CONTEXT..]);
 
         let centre_sample = w * VAD_WINDOW + VAD_WINDOW / 2;
         frames.push(VadFrame {
@@ -223,6 +248,19 @@ pub fn speech_segments(frames: &[VadFrame], threshold: f32) -> Vec<SpeechSegment
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vad_input_prepends_context_to_window() {
+        // Guards the Silero 2024 calling convention: the model input is
+        // context(64) ++ window(512) = 576, NOT a bare 512 (which returns ~0).
+        let ctx = vec![9.0_f32; VAD_CONTEXT];
+        let win = vec![1.0_f32; VAD_WINDOW];
+        let inp = vad_model_input(&ctx, &win);
+        assert_eq!(inp.len(), VAD_CONTEXT + VAD_WINDOW);
+        assert_eq!(VAD_CONTEXT + VAD_WINDOW, 576);
+        assert_eq!(inp[0], 9.0, "context comes first");
+        assert_eq!(inp[VAD_CONTEXT], 1.0, "then the window");
+    }
 
     #[test]
     fn speech_segments_merges_runs_above_threshold() {
