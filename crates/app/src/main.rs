@@ -7652,6 +7652,11 @@ impl eframe::App for SaddaApp {
         // no-ops when the env var is unset. See `debug.rs`.
         if debug::enabled() {
             let ctx = ui.ctx();
+            // egui's hover-debug overlay (the method *and* its painting) is
+            // `debug_assertions`-only, so guard the call — a dev-build aid that
+            // would otherwise break the release build. F12 screenshot capture
+            // below still works in release.
+            #[cfg(debug_assertions)]
             ctx.set_debug_on_hover(true);
             if ctx.input(|i| i.key_pressed(egui::Key::F12)) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));

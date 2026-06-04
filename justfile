@@ -29,7 +29,7 @@ default:
 # stub-drift → pytest. Fails fast on the first broken step.
 
 # Full pre-commit / pre-push check — a green run here == green CI.
-gate: fmt-check clippy build test test-download stubs pytest
+gate: fmt-check clippy build build-release test test-download stubs pytest
     @echo ""
     @echo "✅ gate passed — fmt · clippy · build · test · download · stubs · pytest"
 
@@ -52,6 +52,13 @@ clippy:
 # Build the whole workspace, all targets.
 build:
     cargo build --workspace --all-targets
+
+# Release compile-check of the app. The gate (and CI) otherwise build only in
+# debug, so `debug_assertions`-gated egui APIs (e.g. `set_debug_on_hover`) that
+# vanish in release slip through and break the app-release workflow's
+# `--release` build. `check` (no codegen) keeps this quick.
+build-release:
+    cargo check --release -p sadda-app
 
 # Run the full Rust test suite.
 test:
