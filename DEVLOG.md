@@ -6,6 +6,23 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-03 — Fix: 0.4.0 app-release broke on a debug-only egui API + gate now release-checks
+
+The `v0.4.0-app` release failed to build on all three platforms:
+`error[E0599]: no method set_debug_on_hover on &egui::Context`. That method is
+`debug_assertions`-gated in egui (present in debug, absent in release), and the
+`just gate` / CI gate build only in **debug** — so a release-only compile error
+sailed straight through to the release workflow's `cargo build --release`.
+
+- Gate the `SADDA_DEBUG` hover-overlay call behind `#[cfg(debug_assertions)]` (a
+  dev-build aid; egui's overlay painting is debug-only anyway). App builds release.
+- **Gate gap closed:** added `cargo check --release -p sadda-app` to the justfile
+  gate and `ci.yml`, so debug-vs-release API drift is caught on every push, not
+  at release time. (`check`, not `build`, to stay quick.)
+
+App-only; the 0.4.0 **PyPI wheel is unaffected** (it builds `sadda-python`, not
+the app). The wheel track published fine; the app binaries get re-cut from the fix.
+
 ## 2026-06-03 — Fix: VAD returned ~0 for everyone (missing Silero context window)
 
 The big one in the VAD-debugging thread. `sadda.ml.vad()` / the GUI VAD lane

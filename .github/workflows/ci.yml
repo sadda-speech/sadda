@@ -47,6 +47,12 @@ jobs:
       - name: cargo build
         run: cargo build --workspace --all-targets
 
+      # Release compile-check of the app: the debug build above misses
+      # `debug_assertions`-gated egui APIs (e.g. set_debug_on_hover) that vanish
+      # in release and break the app-release workflow's --release build.
+      - name: cargo check --release (app)
+        run: cargo check --release -p sadda-app
+
       - name: cargo test
         run: cargo test --workspace
 
