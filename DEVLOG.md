@@ -6,6 +6,59 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-04 — Live recording now populates the main view (waveform + spectrogram + measure tracks)
+
+Recording previously showed only an elapsed timer + a dB-FS level meter in the
+record window — no live visual. The user expected (Praat-style) to *watch* the
+waveform and spectrogram fill in as they speak. Built it: while recording, the
+**main view's own lanes** render the in-progress capture in a scrolling ~10 s
+window (ending at the live edge), then revert to the selected bundle on stop.
+
+Three slices, all app-side (no engine change):
+
+- **Sample tap (waveform).** The engine already had a raw-sample ring feeding the
+  WAV writer + DSP, but nothing exposed samples to the GUI. Rather than touch the
+  engine, the cpal callback now *tees* each sample into a **second, app-owned
+  ring** (`spawn_cpal_input` gained a `display_tap`). A new `LiveView` drains it
+  each frame, downmixes interleaved → mono, and accumulates into an `Arc<Vec<f32>>`.
+  Key property: a UI stall overflows only the *display* ring → a momentary
+  waveform glitch, **never** a dropped sample in the saved file. The waveform pane
+  synthesizes an `EnvelopeCache` (sentinel `bundle_id = -1`) over that buffer so
+  the existing per-visible-range re-bucketer draws it unchanged; the timeline is
+  pinned to `[dur − 10s, dur]` so the window scrolls. `active_envelope` is left
+  untouched, so the prior bundle reappears the instant recording stops.
+- **Live spectrogram.** The async P2 spectrogram path is keyed on
+  `(bundle_id, config)` and `poll_analysis` discards results whose bundle no longer
+  matches — so the `-1` sentinel couldn't reuse it directly. Added a dedicated
+  throttled path: `rebuild_live_spectrogram_if_stale` dispatches a worker STFT of
+  the capture-so-far at ≈5/s (one build in flight at a time), delivered via a new
+  `AnalysisResult::LiveSpectrogram` and installed into `live_spectrogram`. Worker
+  thread, so the UI never blocks. The spectrogram pane already positions its
+  texture over `[0, duration]` and crops to the view, so the scrolling window falls
+  out for free.
+- **Live measure tracks.** The engine was *already* streaming f0 / intensity /
+  formant frames over the result rings — and the dialog was draining-and-discarding
+  them every frame. Now they accumulate into a `live_tracks` cache (the live frame
+  types are field-identical to the dsp `PitchFrame` / `FormantFrame`; intensity
+  back-computes `rms` from `db_fs`). The four measure lanes draw `live_tracks` while
+  recording. No live VAD (not streamed) — that lane stays empty.
+
+Borrow-checker note worth recording: a `current_tracks(&self)` helper returning the
+live-or-active cache borrowed *all* of `self`, colliding with the lane panes' later
+`self.timeline` mutation. Inlining the `if recording { … }` pick makes the borrow
+field-specific (`live_tracks` / `active_tracks`), disjoint from `timeline`. Same
+disjoint-field reasoning lets the per-frame poll write `self.live_*` while `handle`
+holds `self.record_dialog`.
+
+Tested: pure drain/downmix logic (mono passthrough, stereo downmix, partial-frame
+carry across drains, duration) as `live_view_tests`. Live audio itself is a manual
+GUI check (no mic in CI). `just gate` green.
+
+**v1 limits (deferred):** the view auto-follows the live edge (manual scroll/zoom
+won't stick mid-record); the take isn't reviewable in the Stopped state (clears on
+stop, full take shown after Save); the live spectrogram re-STFTs the whole growing
+capture each tick (fine for typical takes, heavier — but non-blocking — on long ones).
+
 ## 2026-06-03 — Fix: 0.4.0 app-release broke on a debug-only egui API + gate now release-checks
 
 The `v0.4.0-app` release failed to build on all three platforms:
