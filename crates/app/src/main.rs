@@ -244,13 +244,30 @@ struct SaddaApp {
     /// Cached waveform envelope (and raw mono samples) for the
     /// selected bundle. Rebuilt only when the selection changes.
     active_envelope: Option<EnvelopeCache>,
+    /// `Some` while a recording is in progress: a live mirror of the
+    /// captured audio that the waveform / spectrogram / measure lanes
+    /// render in place of `active_envelope`, so the main view populates as
+    /// you speak. Cleared when recording stops.
+    live_view: Option<LiveView>,
     /// Cached spectrogram texture for the selected bundle + current
     /// `SpectrogramConfig`. Rebuilt only when either changes.
     active_spectrogram: Option<SpectrogramCache>,
+    /// `Some` while recording: a throttled spectrogram of the in-progress
+    /// capture (rebuilt on a worker thread), shown in place of
+    /// `active_spectrogram` so the lane populates live. `live_spec_pending`
+    /// keeps a single build in flight; `live_spec_last` throttles the cadence.
+    live_spectrogram: Option<SpectrogramCache>,
+    live_spec_pending: bool,
+    live_spec_last: Option<std::time::Instant>,
     /// D10: cached measure-track analysis (f0 / formants / intensity)
     /// for the selected bundle + current `MeasureTrackConfig`.
     /// Recomputed only when the bundle or the config changes.
     active_tracks: Option<MeasureTrackCache>,
+    /// `Some` while recording: f0 / intensity / formant frames streamed live
+    /// from the engine (accumulated each frame from the result rings), shown
+    /// in the measure lanes in place of `active_tracks`. No live VAD — that
+    /// lane stays empty while recording.
+    live_tracks: Option<MeasureTrackCache>,
     /// P1: most-recently-used cache of *other* bundles' derived signals, so
     /// switching back to a recently viewed bundle is instant (no re-load /
     /// re-DSP). `select_bundle` swaps `active_*` in and out of here.
@@ -1201,6 +1218,83 @@ impl Drop for CpalStreamHandle {
     }
 }
 
+/// How many seconds of the in-progress capture the main view shows
+/// while recording. The view scrolls so this window always ends at the
+/// live edge; the full capture stays in `LiveView::mono` (re-bucketing
+/// is per-visible-range, so only this window's worth is touched per frame).
+const LIVE_VIEW_WINDOW_SECONDS: f64 = 10.0;
+
+/// Live mirror of an in-progress recording, feeding the main
+/// waveform / spectrogram / measure lanes so they populate as you speak.
+///
+/// Samples are tee'd from the cpal callback into `tap` — a second ring,
+/// independent of the engine's WAV/DSP ring, so a UI stall drops *display*
+/// samples (a momentary waveform glitch) without ever affecting the saved
+/// file. Each frame we drain `tap`, downmix interleaved frames to mono, and
+/// append to `mono`. The render path synthesizes an [`EnvelopeCache`] over
+/// `mono` so the existing lanes draw it unchanged.
+struct LiveView {
+    /// App-side tap on the captured samples (interleaved, as configured).
+    tap: rtrb::Consumer<f32>,
+    /// Capture sample rate, for the time axis + envelope synthesis.
+    sample_rate: u32,
+    /// Channel count; frames are downmixed to mono for display.
+    channels: u16,
+    /// Full mono capture so far. `Arc` so the per-frame synthesized
+    /// `EnvelopeCache` shares it without copying. The synthesized cache is
+    /// dropped at the end of each frame, so the refcount is back to 1 by the
+    /// next drain and `Arc::make_mut` appends in place (never clones).
+    mono: std::sync::Arc<Vec<f32>>,
+    /// Interleaved samples left over from a drain that ended mid-frame,
+    /// carried to the next drain so channel alignment never slips.
+    partial: Vec<f32>,
+}
+
+impl LiveView {
+    fn new(tap: rtrb::Consumer<f32>, sample_rate: u32, channels: u16) -> Self {
+        Self {
+            tap,
+            sample_rate,
+            channels,
+            mono: std::sync::Arc::new(Vec::new()),
+            partial: Vec::new(),
+        }
+    }
+
+    /// Drains the tap ring, downmixing each complete interleaved frame to a
+    /// single mono sample appended to `mono`. A partial trailing frame is
+    /// held in `partial` for the next call.
+    fn drain(&mut self) {
+        let ch = self.channels.max(1) as usize;
+        let mono = std::sync::Arc::make_mut(&mut self.mono);
+        while let Ok(s) = self.tap.pop() {
+            self.partial.push(s);
+            if self.partial.len() == ch {
+                let sum: f32 = self.partial.iter().sum();
+                mono.push(sum / ch as f32);
+                self.partial.clear();
+            }
+        }
+    }
+
+    /// Seconds of audio captured so far.
+    fn duration_seconds(&self) -> f64 {
+        self.mono.len() as f64 / self.sample_rate.max(1) as f64
+    }
+
+    /// Synthesizes an envelope cache over the whole capture so far so the
+    /// existing waveform / spectrogram panes can render it. `bundle_id` is a
+    /// `-1` sentinel — this is a live signal, not a persisted bundle.
+    fn envelope(&self) -> EnvelopeCache {
+        EnvelopeCache {
+            bundle_id: -1,
+            sample_rate: self.sample_rate,
+            duration_seconds: self.duration_seconds(),
+            mono_samples: std::sync::Arc::clone(&self.mono),
+        }
+    }
+}
+
 impl RecordDialog {
     fn new() -> Self {
         let device_options = enumerate_input_devices();
@@ -1275,6 +1369,7 @@ fn spawn_cpal_input(
     device_label: &str,
     cfg: &LiveConfig,
     mut producer: rtrb::Producer<f32>,
+    mut display_tap: Option<rtrb::Producer<f32>>,
 ) -> std::result::Result<CpalStreamHandle, String> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
@@ -1308,6 +1403,12 @@ fn spawn_cpal_input(
                 move |data: &[f32], _info: &cpal::InputCallbackInfo| {
                     for &s in data {
                         let _ = producer.push(s);
+                        // Best-effort tee to the UI's display ring; a full
+                        // ring (UI stalled) drops display samples only — the
+                        // engine ring above still gets every sample for the WAV.
+                        if let Some(tap) = display_tap.as_mut() {
+                            let _ = tap.push(s);
+                        }
                     }
                 },
                 move |err| eprintln!("sadda-app cpal error: {err}"),
@@ -1538,6 +1639,69 @@ mod cache_budget_tests {
     }
 }
 
+#[cfg(test)]
+mod live_view_tests {
+    use super::LiveView;
+
+    /// A pre-filled ring + its (kept-alive) producer, for driving `drain`.
+    fn ring(samples: &[f32]) -> (rtrb::Producer<f32>, rtrb::Consumer<f32>) {
+        let (mut p, c) = rtrb::RingBuffer::<f32>::new(samples.len() + 1);
+        for &s in samples {
+            p.push(s).unwrap();
+        }
+        (p, c)
+    }
+
+    #[test]
+    fn mono_passes_samples_through_unchanged() {
+        let (_p, c) = ring(&[0.1, 0.2, 0.3]);
+        let mut lv = LiveView::new(c, 16_000, 1);
+        lv.drain();
+        assert_eq!(&lv.mono[..], &[0.1f32, 0.2, 0.3][..]);
+        assert!(lv.partial.is_empty());
+    }
+
+    #[test]
+    fn stereo_downmixes_pairs_to_mono() {
+        // (L,R) pairs: (0.0,1.0) -> 0.5, (0.2,0.4) -> 0.3.
+        let (_p, c) = ring(&[0.0, 1.0, 0.2, 0.4]);
+        let mut lv = LiveView::new(c, 16_000, 2);
+        lv.drain();
+        assert_eq!(lv.mono.len(), 2);
+        assert!((lv.mono[0] - 0.5).abs() < 1e-6);
+        assert!((lv.mono[1] - 0.3).abs() < 1e-6);
+        assert!(lv.partial.is_empty());
+    }
+
+    #[test]
+    fn partial_stereo_frame_carries_across_drains() {
+        // One complete pair plus a dangling left sample.
+        let (mut p, c) = rtrb::RingBuffer::<f32>::new(8);
+        p.push(0.0).unwrap();
+        p.push(1.0).unwrap();
+        p.push(0.6).unwrap();
+        let mut lv = LiveView::new(c, 16_000, 2);
+        lv.drain();
+        assert_eq!(lv.mono.len(), 1, "only the complete pair is emitted");
+        assert!((lv.mono[0] - 0.5).abs() < 1e-6);
+        assert_eq!(lv.partial, vec![0.6f32], "dangling L is held");
+        // The matching R arrives next drain and completes the frame.
+        p.push(0.4).unwrap();
+        lv.drain();
+        assert_eq!(lv.mono.len(), 2);
+        assert!((lv.mono[1] - 0.5).abs() < 1e-6); // (0.6 + 0.4) / 2
+        assert!(lv.partial.is_empty());
+    }
+
+    #[test]
+    fn duration_tracks_mono_sample_count() {
+        let (_p, c) = ring(&[0.0; 8_000]);
+        let mut lv = LiveView::new(c, 16_000, 1);
+        lv.drain();
+        assert!((lv.duration_seconds() - 0.5).abs() < 1e-9);
+    }
+}
+
 /// A small most-recently-used cache of per-bundle derived signals, bounded by a
 /// byte budget. Used as a *swap* store: `select_bundle` pops the target (if
 /// present) and stashes the bundle it's leaving, so switching back to a recently
@@ -1653,8 +1817,13 @@ impl SaddaApp {
             error: None,
             selected_bundle_id: None,
             active_envelope: None,
+            live_view: None,
             active_spectrogram: None,
+            live_spectrogram: None,
+            live_spec_pending: false,
+            live_spec_last: None,
             active_tracks: None,
+            live_tracks: None,
             signal_cache: SignalCache::new(signal_cache_budget_bytes()),
             analysis_tx,
             analysis_rx,
@@ -2868,7 +3037,12 @@ impl SaddaApp {
                 return;
             }
         };
-        let cpal = match spawn_cpal_input(&dialog.device, &cfg, producer) {
+        // App-side tap so the main view can draw the capture live, parallel
+        // to the engine's WAV/DSP ring. ~1 second of headroom between UI
+        // frames; overflow drops display samples only (see the callback).
+        let tap_capacity = (cfg.sample_rate as usize * cfg.channels.max(1) as usize).max(1024);
+        let (tap_producer, tap_consumer) = rtrb::RingBuffer::<f32>::new(tap_capacity);
+        let cpal = match spawn_cpal_input(&dialog.device, &cfg, producer, Some(tap_producer)) {
             Ok(handle) => handle,
             Err(e) => {
                 // Engine session leaks an .in_progress dir if we abandon
@@ -2889,6 +3063,43 @@ impl SaddaApp {
         dialog.status = "Recording…".into();
         dialog.meter_db = -120.0;
         dialog.elapsed_seconds = 0.0;
+        // Start the live mirror; `poll_live_view` drains it each frame and the
+        // waveform / spectrogram panes render it until recording stops.
+        self.live_view = Some(LiveView::new(tap_consumer, cfg.sample_rate, cfg.channels));
+        // Empty measure-track cache to accumulate the engine's streamed f0 /
+        // intensity / formant frames into (drained in `render_record_dialog`).
+        self.live_tracks = Some(MeasureTrackCache {
+            bundle_id: -1,
+            config: self.persisted.tracks,
+            f0: Vec::new(),
+            formants: Vec::new(),
+            intensity: Vec::new(),
+            vad: Vec::new(),
+            vad_error: None,
+        });
+    }
+
+    /// Per-frame live-recording tick: drain freshly captured samples into the
+    /// live view and pin the timeline to a scrolling window at the live edge,
+    /// so the waveform / spectrogram populate as you speak. No-op when not
+    /// recording.
+    fn poll_live_view(&mut self, ctx: &egui::Context) {
+        let Some(lv) = self.live_view.as_mut() else {
+            return;
+        };
+        lv.drain();
+        let dur = lv.duration_seconds();
+        // Scrolling window: the last LIVE_VIEW_WINDOW_SECONDS, ending at the
+        // live edge, with the playhead pinned there. `+ 0.05` keeps the range
+        // non-degenerate in the first frames before any audio has arrived.
+        let view_start = (dur - LIVE_VIEW_WINDOW_SECONDS).max(0.0);
+        let view_end = dur.max(view_start + 0.05);
+        self.timeline.duration = dur;
+        self.timeline.view_start = view_start;
+        self.timeline.view_end = view_end;
+        self.timeline.cursor = dur;
+        // Keep painting so the waveform advances without user input.
+        ctx.request_repaint();
     }
 
     /// Stops the recording, transitioning into `Stopped`. The WAV
@@ -2926,6 +3137,12 @@ impl SaddaApp {
                 dialog.status = format!("Stop failed: {e}");
             }
         }
+        // Recording ended: drop the live mirror so the main view reverts to
+        // the selected bundle (or the just-saved one, on commit).
+        self.live_view = None;
+        self.live_spectrogram = None;
+        self.live_spec_pending = false;
+        self.live_tracks = None;
     }
 
     /// Commits the stopped recording into the project as a new bundle
@@ -3002,6 +3219,10 @@ impl SaddaApp {
                     let _ = stopped.discard();
                 }
                 self.record_dialog = None;
+                self.live_view = None;
+                self.live_spectrogram = None;
+                self.live_spec_pending = false;
+                self.live_tracks = None;
             }
             RecordDialogState::Idle => {
                 self.record_dialog = None;
@@ -3023,9 +3244,41 @@ impl SaddaApp {
                 while let Ok(m) = handle.results.meters.pop() {
                     latest_peak = m.rms_db.value();
                 }
-                while handle.results.pitches.pop().is_ok() {}
-                while handle.results.intensities.pop().is_ok() {}
-                while handle.results.formants.pop().is_ok() {}
+                // Accumulate the streamed DSP frames into the live measure-track
+                // cache so the f0 / intensity / formant lanes populate as you
+                // speak. (`self.live_tracks` is a disjoint field from the
+                // `self.record_dialog` that `handle` borrows.) Draining the rings
+                // also keeps the engine's consumer thread from back-pressuring.
+                if let Some(lt) = self.live_tracks.as_mut() {
+                    while let Ok(p) = handle.results.pitches.pop() {
+                        lt.f0.push(PitchFrame {
+                            time_seconds: p.time_seconds,
+                            frequency_hz: p.frequency_hz,
+                            voicing: p.voicing,
+                        });
+                    }
+                    while let Ok(i) = handle.results.intensities.pop() {
+                        // The lanes draw db_fs; back-compute the linear rms the
+                        // dsp frame also carries so the type matches exactly.
+                        let rms = 10f32.powf(i.db_fs.value() / 20.0);
+                        lt.intensity.push(IntensityFrame {
+                            time_seconds: i.time_seconds,
+                            rms,
+                            db_fs: i.db_fs,
+                        });
+                    }
+                    while let Ok(f) = handle.results.formants.pop() {
+                        lt.formants.push(FormantFrame {
+                            time_seconds: f.time_seconds,
+                            frequencies: f.frequencies,
+                            bandwidths: f.bandwidths,
+                        });
+                    }
+                } else {
+                    while handle.results.pitches.pop().is_ok() {}
+                    while handle.results.intensities.pop().is_ok() {}
+                    while handle.results.formants.pop().is_ok() {}
+                }
                 dialog.meter_db = latest_peak;
                 dialog.elapsed_seconds = handle.started_at.elapsed().as_secs_f64();
                 ctx.request_repaint_after(std::time::Duration::from_millis(33));
@@ -5641,6 +5894,42 @@ impl SaddaApp {
         });
     }
 
+    /// While recording, dispatch a throttled background spectrogram of the
+    /// in-progress capture (≈5/s) so the spectrogram lane populates live. The
+    /// STFT runs on a worker thread (never blocks the UI); `poll_analysis`
+    /// installs the result into `live_spectrogram`. No-op when not recording.
+    fn rebuild_live_spectrogram_if_stale(&mut self, ctx: &egui::Context) {
+        let Some(lv) = &self.live_view else {
+            return;
+        };
+        // One build at a time, throttled — so we don't saturate a core
+        // re-STFT-ing the growing capture every frame.
+        if self.live_spec_pending {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if let Some(last) = self.live_spec_last {
+            if now.duration_since(last) < std::time::Duration::from_millis(200) {
+                return;
+            }
+        }
+        let env = lv.envelope();
+        // Wait for at least a window's worth of audio before the first STFT.
+        if env.mono_samples.len() < 512 {
+            return;
+        }
+        let cfg = self.persisted.spectrogram;
+        self.live_spec_last = Some(now);
+        self.live_spec_pending = true;
+        let tx = self.analysis_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let image = compute_spectrogram_image(&env, cfg);
+            let _ = tx.send(AnalysisResult::LiveSpectrogram { config: cfg, image });
+            ctx.request_repaint();
+        });
+    }
+
     /// Drains completed async-analysis jobs (P2) and installs any that are
     /// still current (the user may have switched bundles or changed config
     /// while a job ran). Called once per frame before the `rebuild_*_if_stale`
@@ -5665,6 +5954,20 @@ impl SaddaApp {
                             Ok(img) => {
                                 self.active_spectrogram =
                                     Some(spectrogram_cache_from_image(ctx, bundle_id, config, img));
+                            }
+                            Err(msg) => self.set_error(msg),
+                        }
+                    }
+                }
+                AnalysisResult::LiveSpectrogram { config, image } => {
+                    self.live_spec_pending = false;
+                    // Install only if still recording and the config the user
+                    // sees hasn't changed since this build was dispatched.
+                    if self.live_view.is_some() && self.persisted.spectrogram == config {
+                        match image {
+                            Ok(img) => {
+                                self.live_spectrogram =
+                                    Some(spectrogram_cache_from_image(ctx, -1, config, img));
                             }
                             Err(msg) => self.set_error(msg),
                         }
@@ -5869,6 +6172,13 @@ struct SpectrogramImage {
 enum AnalysisResult {
     Spectrogram {
         bundle_id: i64,
+        config: SpectrogramConfig,
+        image: Result<SpectrogramImage, String>,
+    },
+    /// A throttled live-recording spectrogram. Unlike `Spectrogram` it isn't
+    /// keyed on a bundle — the UI installs it into `live_spectrogram` while a
+    /// recording is in progress.
+    LiveSpectrogram {
         config: SpectrogramConfig,
         image: Result<SpectrogramImage, String>,
     },
@@ -7692,6 +8002,10 @@ impl eframe::App for SaddaApp {
         if self.playback.is_some() {
             ui.ctx().request_repaint();
         }
+        // Drain freshly captured audio into the live view and drive the
+        // scrolling window, so the waveform / spectrogram populate while
+        // recording. No-op when not recording.
+        self.poll_live_view(ui.ctx());
 
         // When a text field (the script editor, an inline label edit,
         // the command-palette query, or a dialog input) holds keyboard
@@ -8591,7 +8905,7 @@ impl SaddaApp {
         self.rebuild_tracks_if_stale(ui.ctx());
         self.rebuild_overlays_if_stale();
         self.rebuild_embedding_heatmap_if_stale(ui.ctx());
-        if self.active_envelope.is_some() {
+        if self.active_envelope.is_some() || self.live_view.is_some() {
             let tracks = self.persisted.tracks;
             // Registered first → bottommost lane (just above the tiers).
             if tracks.vad_visible {
@@ -8631,8 +8945,9 @@ impl SaddaApp {
             // taller default reflects that it's a 2D view (dim × time);
             // a 768-dim wav2vec2 embedding wants more vertical real
             // estate than a 1-D contour.
-            if self.persisted.embedding.selected_tier_id.is_some()
-                || self.embedding_heatmap_error.is_some()
+            if self.live_view.is_none()
+                && (self.persisted.embedding.selected_tier_id.is_some()
+                    || self.embedding_heatmap_error.is_some())
             {
                 egui::Panel::bottom("embedding_heatmap_lane")
                     .resizable(true)
@@ -8649,6 +8964,7 @@ impl SaddaApp {
         // their plot areas line up with no per-element margins to
         // reconcile — alignment lives entirely in the 120px gutter.
         self.rebuild_spectrogram_if_stale(ui.ctx());
+        self.rebuild_live_spectrogram_if_stale(ui.ctx());
         self.spectrogram_pane(ui);
     }
 
@@ -8668,13 +8984,19 @@ impl SaddaApp {
     }
 
     fn waveform_pane(&mut self, ui: &mut egui::Ui) {
-        let Some(env) = &self.active_envelope else {
+        // While recording, the live mirror takes the pane in place of the
+        // selected bundle, so the waveform populates as audio captures.
+        let live_env = self.live_view.as_ref().map(|lv| lv.envelope());
+        let is_live = live_env.is_some();
+        let Some(env) = live_env.as_ref().or(self.active_envelope.as_ref()) else {
             ui.centered_and_justified(|ui| {
                 ui.label(egui::RichText::new("Select a bundle from the sidebar").weak());
             });
             return;
         };
-        if env.mono_samples.is_empty() {
+        // Don't show "(empty waveform)" before the first samples arrive while
+        // recording — render the empty plot so it looks ready to populate.
+        if !is_live && env.mono_samples.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.label(egui::RichText::new("(empty waveform)").italics());
             });
@@ -8682,17 +9004,25 @@ impl SaddaApp {
         }
 
         ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(format!(
+            let header = if is_live {
+                format!(
+                    "● REC  ·  {} Hz  ·  {:.1}s  ·  view {:.3}–{:.3}s",
+                    env.sample_rate,
+                    env.duration_seconds,
+                    self.timeline.view_start,
+                    self.timeline.view_end,
+                )
+            } else {
+                format!(
                     "Bundle #{}  ·  {} Hz  ·  {:.3}s  ·  view {:.3}–{:.3}s",
                     env.bundle_id,
                     env.sample_rate,
                     env.duration_seconds,
                     self.timeline.view_start,
                     self.timeline.view_end,
-                ))
-                .weak(),
-            );
+                )
+            };
+            ui.label(egui::RichText::new(header).weak());
             // Boundary times of the current span selection, when one is active —
             // shown strong so it stands out against the weak bundle/view info.
             if let Some(sel) = format_selection(self.timeline.selection) {
@@ -8822,16 +9152,22 @@ impl SaddaApp {
         // Toolbar row above the plot (window / hop / colormap).
         self.spectrogram_toolbar(ui);
 
-        let Some(sc) = &self.active_spectrogram else {
+        // While recording, the live spectrogram takes the lane in place of the
+        // selected bundle's, so it populates alongside the waveform.
+        let recording = self.live_view.is_some();
+        let sc = if recording {
+            self.live_spectrogram.as_ref()
+        } else {
+            self.active_spectrogram.as_ref()
+        };
+        let Some(sc) = sc else {
             ui.centered_and_justified(|ui| {
-                ui.label(
-                    egui::RichText::new(if self.active_envelope.is_some() {
-                        "(building spectrogram…)"
-                    } else {
-                        "Select a bundle to see its spectrogram"
-                    })
-                    .weak(),
-                );
+                let msg = if recording || self.active_envelope.is_some() {
+                    "(building spectrogram…)"
+                } else {
+                    "Select a bundle to see its spectrogram"
+                };
+                ui.label(egui::RichText::new(msg).weak());
             });
             return;
         };
@@ -8995,7 +9331,15 @@ impl SaddaApp {
     /// are dropped at draw time.
     fn f0_lane_pane(&mut self, ui: &mut egui::Ui) {
         let cfg = self.persisted.tracks;
-        let Some(tc) = self.active_tracks.as_ref() else {
+        // Live accumulating tracks while recording, else the selected
+        // bundle's. Inlined (not a `&self` helper) so the borrow is on the
+        // specific field, leaving `self.timeline` free to mutate below.
+        let tracks_src = if self.live_view.is_some() {
+            self.live_tracks.as_ref()
+        } else {
+            self.active_tracks.as_ref()
+        };
+        let Some(tc) = tracks_src else {
             ui.centered_and_justified(|ui| {
                 ui.label(egui::RichText::new("(computing f0…)").weak());
             });
@@ -9040,7 +9384,15 @@ impl SaddaApp {
     /// are separable by eye.
     fn formant_lane_pane(&mut self, ui: &mut egui::Ui) {
         let cfg = self.persisted.tracks;
-        let Some(tc) = self.active_tracks.as_ref() else {
+        // Live accumulating tracks while recording, else the selected
+        // bundle's. Inlined (not a `&self` helper) so the borrow is on the
+        // specific field, leaving `self.timeline` free to mutate below.
+        let tracks_src = if self.live_view.is_some() {
+            self.live_tracks.as_ref()
+        } else {
+            self.active_tracks.as_ref()
+        };
+        let Some(tc) = tracks_src else {
             ui.centered_and_justified(|ui| {
                 ui.label(egui::RichText::new("(computing formants…)").weak());
             });
@@ -9081,7 +9433,15 @@ impl SaddaApp {
     /// (intensity is continuous, so unlike f0 it reads best as a line).
     fn intensity_lane_pane(&mut self, ui: &mut egui::Ui) {
         let cfg = self.persisted.tracks;
-        let Some(tc) = self.active_tracks.as_ref() else {
+        // Live accumulating tracks while recording, else the selected
+        // bundle's. Inlined (not a `&self` helper) so the borrow is on the
+        // specific field, leaving `self.timeline` free to mutate below.
+        let tracks_src = if self.live_view.is_some() {
+            self.live_tracks.as_ref()
+        } else {
+            self.active_tracks.as_ref()
+        };
+        let Some(tc) = tracks_src else {
             ui.centered_and_justified(|ui| {
                 ui.label(egui::RichText::new("(computing intensity…)").weak());
             });
@@ -9126,7 +9486,15 @@ impl SaddaApp {
     /// Runtime not available) the lane shows the reason instead.
     fn vad_lane_pane(&mut self, ui: &mut egui::Ui) {
         let cfg = self.persisted.tracks;
-        let Some(tc) = self.active_tracks.as_ref() else {
+        // Live accumulating tracks while recording, else the selected
+        // bundle's. Inlined (not a `&self` helper) so the borrow is on the
+        // specific field, leaving `self.timeline` free to mutate below.
+        let tracks_src = if self.live_view.is_some() {
+            self.live_tracks.as_ref()
+        } else {
+            self.active_tracks.as_ref()
+        };
+        let Some(tc) = tracks_src else {
             ui.centered_and_justified(|ui| {
                 ui.label(egui::RichText::new("(computing VAD…)").weak());
             });
