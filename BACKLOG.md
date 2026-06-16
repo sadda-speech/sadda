@@ -16,8 +16,8 @@ Status: `[ ]` open · `[~]` in progress · `[x]` done (move to DEVLOG when shipp
 
 _Raw captures land here; groomed into the sections below on request._
 
+- [ ] **Rhythm metrics** — speech rhythm/timing measures (e.g. %V, ΔC/ΔV, VarcoV/VarcoC, nPVI/rPVI) computed over interval tiers — _added 2026-06-05_
 - [ ] Fix table alignment in docs Quickstart → "Query annotations" → `print(df.head())` output — _added 2026-06-04_
-- [ ] **Hard-gate releases on CI** — make the publish workflows (`release.yml` PyPI + `app-release.yml`) `needs:` a precheck job that runs the full gate, so a broken commit can't publish even if tagged (the GitHub-Release-driven restructure). Today's guard is only "CI release-checks main + we tag green," not a hard gate. — _added 2026-06-04_
 
 - [ ] Refine / reorganize the `annotation-cycle.md` docs page — structure + flow need careful attention; revisit in the coming days (draft is uncommitted in the working tree) — _added 2026-06-01_
 - [ ] Check how we handle stereo / multi-channel WAV files — verify behaviour end to end (down-mix vs per-channel; loader, waveform, DSP, playback) — _added 2026-06-01_

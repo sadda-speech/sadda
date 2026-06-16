@@ -2147,6 +2147,48 @@ impl SaddaApp {
         }
     }
 
+    fn import_csv_for_active_bundle(&mut self, path: PathBuf) {
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return;
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        match project.import_csv(&path, bundle_id) {
+            Ok(tier_ids) => {
+                self.error = None;
+                self.set_info(format!(
+                    "Imported {} tier{} from {}",
+                    tier_ids.len(),
+                    if tier_ids.len() == 1 { "" } else { "s" },
+                    path.display(),
+                ));
+            }
+            Err(e) => self.set_error(format!("CSV import failed: {e}")),
+        }
+    }
+
+    fn import_json_for_active_bundle(&mut self, path: PathBuf) {
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return;
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        match project.import_json(&path, bundle_id) {
+            Ok(tier_ids) => {
+                self.error = None;
+                self.set_info(format!(
+                    "Imported {} tier{} from {}",
+                    tier_ids.len(),
+                    if tier_ids.len() == 1 { "" } else { "s" },
+                    path.display(),
+                ));
+            }
+            Err(e) => self.set_error(format!("JSON import failed: {e}")),
+        }
+    }
+
     fn export_textgrid_for_active_bundle(&mut self, path: PathBuf) {
         let Some(bundle_id) = self.selected_bundle_id else {
             return;
@@ -2176,6 +2218,38 @@ impl SaddaApp {
                 self.set_info(format!("Wrote EAF to {}", path.display()));
             }
             Err(e) => self.set_error(format!("EAF export failed: {e}")),
+        }
+    }
+
+    fn export_csv_for_active_bundle(&mut self, path: PathBuf) {
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return;
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        match project.export_csv(bundle_id, &path, None) {
+            Ok(()) => {
+                self.error = None;
+                self.set_info(format!("Wrote CSV to {}", path.display()));
+            }
+            Err(e) => self.set_error(format!("CSV export failed: {e}")),
+        }
+    }
+
+    fn export_json_for_active_bundle(&mut self, path: PathBuf) {
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return;
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        match project.export_json(bundle_id, &path, None) {
+            Ok(()) => {
+                self.error = None;
+                self.set_info(format!("Wrote JSON to {}", path.display()));
+            }
+            Err(e) => self.set_error(format!("JSON export failed: {e}")),
         }
     }
 
@@ -8529,6 +8603,27 @@ impl SaddaApp {
                             self.import_eaf_for_active_bundle(path);
                         }
                     }
+                    ui.separator();
+                    if ui.button("CSV (annotations)…").clicked() {
+                        ui.close();
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("CSV", &["csv"])
+                            .set_title("Import annotations from CSV into the active bundle")
+                            .pick_file()
+                        {
+                            self.import_csv_for_active_bundle(path);
+                        }
+                    }
+                    if ui.button("JSON (annotations)…").clicked() {
+                        ui.close();
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("JSON", &["json"])
+                            .set_title("Import annotations from JSON into the active bundle")
+                            .pick_file()
+                        {
+                            self.import_json_for_active_bundle(path);
+                        }
+                    }
                 });
                 if !import_enabled {
                     ui.label(
@@ -8552,6 +8647,19 @@ impl SaddaApp {
                         ui.close();
                         if let Some(path) = self.suggest_export_path("eaf") {
                             self.export_eaf_for_active_bundle(path);
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("CSV (annotations)…").clicked() {
+                        ui.close();
+                        if let Some(path) = self.suggest_export_path("csv") {
+                            self.export_csv_for_active_bundle(path);
+                        }
+                    }
+                    if ui.button("JSON (annotations)…").clicked() {
+                        ui.close();
+                        if let Some(path) = self.suggest_export_path("json") {
+                            self.export_json_for_active_bundle(path);
                         }
                     }
                 });
