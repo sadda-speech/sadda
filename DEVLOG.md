@@ -33,6 +33,91 @@ otherwise an info toast with the count. Enabled only when a project is open
 import a folder by looping `add_bundle`, so this is the GUI surface of an
 existing capability rather than a new one.
 
+## 2026-06-15 — Export + import annotations as CSV / JSON (three surfaces)
+
+The backlog's "export annotation data to CSV / JSON" — built as a round-trip
+(the user asked for import too, the natural pairing, and it mirrors how
+TextGrid / EAF already do both directions). Engine + Python + GUI in one slice.
+
+**Two shapes for two audiences** (new `engine/src/io/tabular.rs`, pure +
+unit-tested):
+
+- **CSV** = one *tidy* long table, one row per annotation across all sparse
+  tiers (the shape pandas / polars / R want). The column set is the union over
+  the three sparse kinds (interval / point / reference); cells that don't apply
+  to a row's kind are left empty (`time_seconds` on an interval, `start_seconds`
+  on a reference). RFC 4180 quoting, hand-rolled — no new crate dep (the project
+  is deliberately dep-conservative; `serde_json` covers JSON, a ~20-line escaper
+  covers CSV).
+- **JSON** = a *faithful* nested document: `{bundle, tiers:[…]}`, each tier
+  carrying only its native rows, so the per-tier structure CSV flattens away is
+  recoverable. `extra` (DB-stored JSON-as-TEXT) is embedded as parsed JSON, not
+  an escaped string.
+
+Dense tiers (`continuous_*` / `categorical_sampled`) are skipped in both,
+matching the TextGrid / EAF exporters — their samples live in Parquet sidecars
+(`Project.query`).
+
+**Import** is the inverse (`parse_csv` / `parse_json`, also pure-tested incl. a
+hand-rolled RFC-4180 *reader* that handles quoted commas / doubled quotes /
+embedded newlines). CSV columns are matched **by header name**, so reordered or
+extra columns are tolerated; rows group into tiers by `(tier_name, tier_type)`.
+**v1 limits (documented):** only interval + point tiers import (reference rows
+are skipped — their `(target_kind, target_id)` is project-local; dense isn't
+sparse-annotation data). The source-project / rubric-bound columns — `status`,
+`parent_annotation_id`, `processing_run_id` — are dropped; times, `label`,
+`note`, `extra` are honoured. Each import records a `processing_run`
+(`sadda.io.{csv,json}.import`) for provenance, like the TextGrid / EAF importers.
+
+Surfaces:
+- **Engine**: `Project::export_csv/export_json/import_csv/import_json`
+  `(bundle_id, path, tier_ids?)`, sharing a `gather_export_tiers` /
+  `create_imported_tiers` back end with the existing exporters' signature.
+- **Python**: same four methods on `Project` (pyo3); stubs regenerated.
+- **GUI**: "CSV (annotations)…" / "JSON (annotations)…" in the File ▸ Import and
+  ▸ Export submenus, reusing `suggest_export_path` + the rfd pick-file pattern.
+
+Tests: 9 pure unit tests in `tabular.rs` (CSV escaping, the RFC-4180 reader,
+column-by-name matching, export→parse round-trip, JSON extra-embedding), 3
+engine DB round-trip integration tests (`annotation_export_import.rs`, incl. a
+comma/quote/newline label torture case + the `tier_ids` filter), and 3 Python
+round-trip tests. Full gate green (the only stop was the known stubs-vs-HEAD
+pre-commit false positive — stubs are current; backlog item still open).
+
+## 2026-06-15 — Hard-gate releases on CI (reusable gate workflow)
+
+`v0.4.0-app` shipped broken — twice in one cycle (the debug-only egui API, then
+re-cut) — because the release workflows never *ran* the gate; they only trusted
+"main was green when we tagged." Tagging an unverified commit could publish to
+PyPI / cut a GitHub Release with nothing standing in the way. Closed that gap.
+
+Restructure (the backlog's "GitHub-Release-driven" item):
+
+- Extracted CI's full `test` job verbatim into a **reusable workflow**
+  (`.github/workflows/gate.yml`, `on: workflow_call`): fmt · clippy · debug build
+  · `cargo check --release -p sadda-app` · `cargo test` · download-feature
+  clippy+test · stub-drift · pytest. One definition, no copy.
+- `ci.yml` is now a thin caller (`uses: ./.github/workflows/gate.yml`).
+- **Both release workflows call the same gate and `publish` `needs:` it:**
+  `release.yml` → `publish.needs: [gate, build-wheels, build-sdist]`;
+  `app-release.yml` → `publish.needs: [gate, build]`. Gate runs in parallel with
+  the builds; if it fails, publish is skipped and **nothing is uploaded** even
+  though the tag exists.
+
+Why reusable (not copy-paste the steps into each release file): the recurring
+failure mode in this project is *drift* — the gate and its mirror disagreeing
+(cf. the `cargo fmt` omission that left CI silently red for a day). One
+`workflow_call` definition makes "CI is green" and "safe to publish" the same
+checks by construction. `just gate` remains the local mirror; the justfile header
+now points at `gate.yml`.
+
+Note: the per-OS *builds* aren't gated (only `publish` is), so a broken commit
+still burns matrix build minutes producing artifacts that never publish — the
+cheap, request-matching choice. `main` is unprotected, so no required-check-name
+rule needed updating despite the now-nested check context. Config-only; the gate
+itself is unchanged, so this couldn't regress a green tree. Validated by YAML
+parse + dependency-graph review; first real exercise is the next tag.
+
 ## 2026-06-04 — Live recording now populates the main view (waveform + spectrogram + measure tracks)
 
 Recording previously showed only an elapsed timer + a dB-FS level meter in the
