@@ -6,82 +6,8 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
-  # crates/script-engine embeds CPython via pyo3 auto-initialize, which
-  # needs a Python with a shared libpython. ubuntu-latest's /usr/bin/python3
-  # qualifies. See crates/script-engine/README.md for details.
-  PYO3_PYTHON: "/usr/bin/python3"
-  # Opt JS actions into Node.js 24 ahead of the 2026-06-02 forced switch
-  # so we silence the deprecation warning + catch any incompatibility
-  # before the runner flips by itself. Covers every JS action without
-  # chasing each maintainer's release cadence.
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
-  test:
-    name: build + test (linux)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust components
-        run: rustup component add rustfmt clippy
-
-      - name: Install ALSA dev headers
-        # cpal's alsa-sys (live recording, slice E1) needs libasound2-dev
-        # on Debian/Ubuntu hosts. Without it, every cargo build fails at
-        # the alsa-sys build script.
-        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: cargo fmt --check
-        run: cargo fmt --all -- --check
-
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: cargo build
-        run: cargo build --workspace --all-targets
-
-      # Release compile-check of the app: the debug build above misses
-      # `debug_assertions`-gated egui APIs (e.g. set_debug_on_hover) that vanish
-      # in release and break the app-release workflow's --release build.
-      - name: cargo check --release (app)
-        run: cargo check --release -p sadda-app
-
-      - name: cargo test
-        run: cargo test --workspace
-
-      # The `download` feature (E12, network model fetch) isn't enabled by
-      # any workspace member, so the default --workspace passes above don't
-      # compile it. Check + test it explicitly. Network/ORT-gated tests
-      # skip here (no SADDA_NET_TESTS, no ORT_DYLIB_PATH).
-      - name: cargo clippy + test (download feature)
-        run: |
-          cargo clippy -p sadda-engine --features download --all-targets -- -D warnings
-          cargo test -p sadda-engine --features download
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-
-      - name: Set up Python + project
-        # `uv sync` installs dev deps and uses maturin to build + install
-        # the sadda wheel into .venv/.
-        run: uv sync
-
-      - name: Regenerate type stubs
-        run: uv run cargo run --bin stub_gen
-
-      - name: Verify stubs are committed and up to date
-        run: |
-          if ! git diff --exit-code python/sadda/_native/__init__.pyi; then
-            echo "::error::python/sadda/_native/__init__.pyi is stale. Run 'cargo run --bin stub_gen' and commit the result."
-            exit 1
-          fi
-
-      - name: pytest
-        run: uv run pytest python/tests/ tools/docs/ -v
+  # The gate lives in a reusable workflow (gate.yml) so CI and both
+  # release workflows run the exact same checks — see gate.yml's header.
+  gate:
+    uses: ./.github/workflows/gate.yml

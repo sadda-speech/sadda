@@ -33,6 +33,15 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # Hard release gate: the full CI gate (gate.yml), run on this exact
+  # tagged commit. `publish` needs: it, so a broken commit can't cut a
+  # GitHub Release even if it gets tagged. This is the gate that the two
+  # v0.4.0-app build breakages would have caught had it existed — the
+  # debug-vs-release egui API drift is now a gate step. Runs in parallel
+  # with the per-OS binary builds; if it fails, publish is skipped.
+  gate:
+    uses: ./.github/workflows/gate.yml
+
   build:
     name: build sadda-app (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -156,7 +165,7 @@ jobs:
 
   publish:
     name: publish GitHub Release
-    needs: build
+    needs: [gate, build]
     runs-on: ubuntu-latest
     # Only publish on actual tag push — workflow_dispatch is dry-run.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')

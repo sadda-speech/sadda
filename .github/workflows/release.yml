@@ -25,6 +25,13 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  # Hard release gate: the full CI gate (gate.yml), run on this exact
+  # tagged commit. `publish` needs: it, so a broken commit can't reach
+  # PyPI even if it gets tagged. Runs in parallel with the wheel/sdist
+  # builds; if it fails, publish is skipped and nothing is uploaded.
+  gate:
+    uses: ./.github/workflows/gate.yml
+
   build-wheels:
     name: build wheels (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -114,7 +121,7 @@ jobs:
 
   publish:
     name: publish to PyPI
-    needs: [build-wheels, build-sdist]
+    needs: [gate, build-wheels, build-sdist]
     runs-on: ubuntu-latest
     # Only publish on tag push, not workflow_dispatch (which is dry-run).
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
