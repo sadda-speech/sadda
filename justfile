@@ -2,11 +2,13 @@
 #
 # Install once:  cargo install just   (or: brew install just / apt install just)
 # List recipes:  just            (alias for `just --list`)
-# Pre-commit:    just gate       (mirrors .github/workflows/ci.yml locally)
+# Pre-commit:    just gate       (mirrors .github/workflows/gate.yml locally)
 #
-# The recipes below reproduce CI step-for-step so a green `just gate` means a
-# green CI. Keep this file and `.github/workflows/ci.yml` in sync — if you add a
-# CI step, add it here too.
+# The recipes below reproduce the CI gate step-for-step so a green `just gate`
+# means a green CI. The gate is a reusable workflow (.github/workflows/gate.yml)
+# that CI *and* both release workflows (release.yml, app-release.yml) call — so
+# a green gate is also what hard-gates a publish. Keep this file and gate.yml in
+# sync — if you add a step there, add it here too.
 
 # crates/script-engine embeds CPython via pyo3 auto-initialize, so the Rust
 # test binaries and stub_gen dlopen libpython at runtime. On CI that's the
@@ -25,7 +27,7 @@ default:
     @just --list
 
 # ── The gate ────────────────────────────────────────────────────────────────
-# Order matches ci.yml: fmt → clippy → build → test → download-feature →
+# Order matches gate.yml: fmt → clippy → build → test → download-feature →
 # stub-drift → pytest. Fails fast on the first broken step.
 
 # Full pre-commit / pre-push check — a green run here == green CI.
