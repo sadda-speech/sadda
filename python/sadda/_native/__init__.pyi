@@ -1666,6 +1666,37 @@ class Project:
         the `Symbolic_Association` stereotype + a JSON sentinel encoding
         `(target_kind, target_id)`.
         """
+    def export_csv(self, bundle_id: builtins.int, path: builtins.str | os.PathLike | pathlib.Path, *, tier_ids: typing.Optional[typing.Sequence[builtins.int]] = None) -> None:
+        r"""
+        Writes a flat CSV of `bundle_id`'s sparse annotations to `path`: one
+        tidy row per annotation across all interval / point / reference tiers
+        (the shape pandas / polars / R expect). If `tier_ids` is given, only
+        those tiers are exported. Dense tiers (continuous_* / categorical_*)
+        are skipped — their samples live in Parquet sidecars (see `query`).
+        """
+    def export_json(self, bundle_id: builtins.int, path: builtins.str | os.PathLike | pathlib.Path, *, tier_ids: typing.Optional[typing.Sequence[builtins.int]] = None) -> None:
+        r"""
+        Writes a structured JSON document of `bundle_id`'s sparse annotations
+        to `path`: bundle metadata plus a `tiers` array, each tier carrying
+        its native rows (faithful, unlike the flattened CSV). If `tier_ids`
+        is given, only those tiers are exported. Dense tiers are skipped.
+        """
+    def import_csv(self, path: builtins.str | os.PathLike | pathlib.Path, bundle_id: builtins.int) -> builtins.list[builtins.int]:
+        r"""
+        Imports a flat CSV (as written by `export_csv`) into `bundle_id`. Rows
+        are grouped into new tiers by `(tier_name, tier_type)`; interval /
+        point rows become annotations. Returns the new tier IDs and records a
+        `processing_run`. v1 imports only interval + point tiers; `status`,
+        `parent_annotation_id`, and `processing_run_id` are dropped (times,
+        label, note, and extra are honoured).
+        """
+    def import_json(self, path: builtins.str | os.PathLike | pathlib.Path, bundle_id: builtins.int) -> builtins.list[builtins.int]:
+        r"""
+        Imports a structured JSON document (as written by `export_json`) into
+        `bundle_id`. Each `tiers[]` entry becomes a new tier; its rows become
+        annotations. Returns the new tier IDs and records a `processing_run`.
+        Same v1 limits as `import_csv`.
+        """
     def __repr__(self) -> builtins.str: ...
 
 @typing.final

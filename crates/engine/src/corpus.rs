@@ -5294,6 +5294,184 @@ impl Project {
         Ok(())
     }
 
+    /// Imports a flat **CSV** (as written by [`Self::export_csv`]) into
+    /// `bundle_id`. Rows are grouped into new tiers by `(tier_name,
+    /// tier_type)`; each interval / point row becomes an annotation. Returns
+    /// the new tier ids. Records a `processing_run` for audit provenance.
+    ///
+    /// v1 limits (see [`crate::io::tabular`]): only interval + point tiers are
+    /// imported (reference + dense rows are skipped); `status`,
+    /// `parent_annotation_id`, and `processing_run_id` are dropped (they're
+    /// rubric- / source-project-bound). Times, `label`, `note`, and `extra`
+    /// are honoured.
+    pub fn import_csv(&self, path: impl AsRef<Path>, bundle_id: i64) -> Result<Vec<i64>> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| EngineError::Corpus(format!("CSV import read failed: {e}")))?;
+        let tiers = crate::io::tabular::parse_csv(&text).map_err(EngineError::Corpus)?;
+        self.create_imported_tiers(bundle_id, tiers, path, "sadda.io.csv.import")
+    }
+
+    /// Imports a structured **JSON** document (as written by
+    /// [`Self::export_json`]) into `bundle_id`. Each `tiers[]` entry becomes a
+    /// new tier; its rows become annotations. Returns the new tier ids and
+    /// records a `processing_run`. Same v1 limits as [`Self::import_csv`].
+    pub fn import_json(&self, path: impl AsRef<Path>, bundle_id: i64) -> Result<Vec<i64>> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| EngineError::Corpus(format!("JSON import read failed: {e}")))?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| EngineError::Corpus(format!("JSON import parse failed: {e}")))?;
+        let tiers = crate::io::tabular::parse_json(&value).map_err(EngineError::Corpus)?;
+        self.create_imported_tiers(bundle_id, tiers, path, "sadda.io.json.import")
+    }
+
+    /// Shared back end for [`Self::import_csv`] / [`Self::import_json`]:
+    /// creates a tier per [`crate::io::tabular::ImportTier`], inserts its
+    /// rows, and records one `processing_run` over the new tiers.
+    fn create_imported_tiers(
+        &self,
+        bundle_id: i64,
+        tiers: Vec<crate::io::tabular::ImportTier>,
+        path: &Path,
+        processor_id: &str,
+    ) -> Result<Vec<i64>> {
+        use crate::io::tabular::ImportRows;
+
+        let mut new_tier_ids = Vec::with_capacity(tiers.len());
+        for tier in &tiers {
+            match &tier.rows {
+                ImportRows::Intervals(rows) => {
+                    let tier_id =
+                        self.add_tier(&TierSpec::new(bundle_id, &tier.name, TierType::Interval))?;
+                    for r in rows {
+                        self.add_interval(&IntervalSpec {
+                            tier_id,
+                            start_seconds: r.start_seconds,
+                            end_seconds: r.end_seconds,
+                            label: r.label.clone(),
+                            note: r.note.clone(),
+                            extra: r.extra.clone(),
+                            ..Default::default()
+                        })?;
+                    }
+                    new_tier_ids.push(tier_id);
+                }
+                ImportRows::Points(rows) => {
+                    let tier_id =
+                        self.add_tier(&TierSpec::new(bundle_id, &tier.name, TierType::Point))?;
+                    for r in rows {
+                        self.add_point(&PointSpec {
+                            tier_id,
+                            time_seconds: r.time_seconds,
+                            label: r.label.clone(),
+                            note: r.note.clone(),
+                            extra: r.extra.clone(),
+                            ..Default::default()
+                        })?;
+                    }
+                    new_tier_ids.push(tier_id);
+                }
+            }
+        }
+
+        let display = path.display().to_string();
+        let params = format!("{{\"path\":{:?},\"n_tiers\":{}}}", display, tiers.len());
+        let mut spec =
+            ProcessingRunSpec::new(bundle_id, ProcessingRunKind::DspAlgorithm, processor_id);
+        spec.parameters = Some(params);
+        spec.output_tier_ids = new_tier_ids.clone();
+        self.record_processing_run(&spec)?;
+        Ok(new_tier_ids)
+    }
+
+    /// Gathers a bundle's **sparse** tiers (interval / point / reference) into
+    /// the [`crate::io::tabular`] export model, shared by [`Self::export_csv`]
+    /// and [`Self::export_json`]. Dense tiers (continuous_* / categorical_*)
+    /// are skipped — their data lives in Parquet sidecars. If `tier_ids` is
+    /// given, only those tiers are included (order follows `self.tiers`).
+    fn gather_export_tiers(
+        &self,
+        bundle_id: i64,
+        tier_ids: Option<&[i64]>,
+    ) -> Result<(
+        crate::io::tabular::ExportBundle,
+        Vec<crate::io::tabular::ExportTier>,
+    )> {
+        use crate::io::tabular::{ExportBundle, ExportTier, TierRows};
+
+        let bundle = self.bundle(bundle_id)?;
+        let export_bundle = ExportBundle {
+            id: bundle.id,
+            name: bundle.name.clone(),
+            sample_rate: bundle.sample_rate,
+            n_frames: bundle.n_frames as i64,
+        };
+
+        let all_tiers = self.tiers(Some(bundle_id))?;
+        let mut out = Vec::new();
+        for tier in &all_tiers {
+            if let Some(ids) = tier_ids {
+                if !ids.contains(&tier.id) {
+                    continue;
+                }
+            }
+            let rows = match tier.r#type {
+                TierType::Interval => TierRows::Intervals(self.intervals(tier.id)?),
+                TierType::Point => TierRows::Points(self.points(tier.id)?),
+                TierType::Reference => TierRows::References(self.references_for(tier.id)?),
+                // Dense tiers: skipped (their samples live in Parquet sidecars).
+                TierType::ContinuousNumeric
+                | TierType::ContinuousVector
+                | TierType::CategoricalSampled => continue,
+            };
+            out.push(ExportTier {
+                id: tier.id,
+                name: tier.name.clone(),
+                rows,
+            });
+        }
+        Ok((export_bundle, out))
+    }
+
+    /// Writes a flat **CSV** of `bundle_id`'s sparse annotations to `path`:
+    /// one tidy row per annotation across all interval / point / reference
+    /// tiers (the shape pandas / polars / R expect). If `tier_ids` is given,
+    /// only those tiers are exported. Dense tiers are skipped. See
+    /// [`crate::io::tabular::to_csv`] for the column set.
+    pub fn export_csv(
+        &self,
+        bundle_id: i64,
+        path: impl AsRef<Path>,
+        tier_ids: Option<&[i64]>,
+    ) -> Result<()> {
+        let (bundle, tiers) = self.gather_export_tiers(bundle_id, tier_ids)?;
+        let csv = crate::io::tabular::to_csv(&bundle, &tiers);
+        std::fs::write(path.as_ref(), csv)
+            .map_err(|e| EngineError::Corpus(format!("CSV export write failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Writes a structured **JSON** document of `bundle_id`'s sparse
+    /// annotations to `path`: bundle metadata plus a `tiers` array, each tier
+    /// carrying its native rows (faithful, unlike the flattened CSV). If
+    /// `tier_ids` is given, only those tiers are exported. Dense tiers are
+    /// skipped. See [`crate::io::tabular::to_json`] for the shape.
+    pub fn export_json(
+        &self,
+        bundle_id: i64,
+        path: impl AsRef<Path>,
+        tier_ids: Option<&[i64]>,
+    ) -> Result<()> {
+        let (bundle, tiers) = self.gather_export_tiers(bundle_id, tier_ids)?;
+        let value = crate::io::tabular::to_json(&bundle, &tiers);
+        let text = serde_json::to_string_pretty(&value)
+            .map_err(|e| EngineError::Corpus(format!("JSON export serialize failed: {e}")))?;
+        std::fs::write(path.as_ref(), text)
+            .map_err(|e| EngineError::Corpus(format!("JSON export write failed: {e}")))?;
+        Ok(())
+    }
+
     /// Imports an ELAN `.eaf` into `bundle_id`. Each EAF tier becomes a
     /// new [`Tier`] (interval / point / reference based on stereotype and
     /// annotation shape); each annotation becomes an `annotation_*` row

@@ -8,11 +8,26 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Export / import annotations as CSV or JSON.** A bundle's sparse annotations
+  round-trip through a flat *tidy* CSV (one row per annotation, the shape
+  pandas / polars / R expect) or a *faithful* structured JSON (`{bundle,
+  tiers}`). Available on the engine (`Project.export_csv` / `export_json` /
+  `import_csv` / `import_json`), in Python, and in the desktop app's
+  File ▸ Import / Export menus. v1 import covers interval + point tiers
+  (reference + dense tiers are skipped; `status` / parentage / provenance
+  columns are dropped — times, label, note, and `extra` are honoured).
 - **Import a whole folder of recordings.** The desktop app's **File ▸ Add
   Directory…** picks a folder and registers every `.wav` in it (case-insensitive,
   sorted alphabetically so bundle order is predictable) as a bundle, each going
   through the same large-file probe/split guard as a single Add Bundle…. Reports
   how many were added, or an error if the folder has no WAV files.
+
+### Changed
+
+- **Releases are now hard-gated on CI.** The full test gate is a reusable
+  workflow that CI *and* both release workflows share; the PyPI and desktop-app
+  publish jobs `needs:` it, so a broken commit can't publish even if it's
+  tagged. Closes the gap that let `v0.4.0-app` ship a release-only build break.
 
 ### Fixed
 

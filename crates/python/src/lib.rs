@@ -3297,6 +3297,61 @@ impl PyProject {
             .map_err(engine_err_to_py)
     }
 
+    /// Writes a flat CSV of `bundle_id`'s sparse annotations to `path`: one
+    /// tidy row per annotation across all interval / point / reference tiers
+    /// (the shape pandas / polars / R expect). If `tier_ids` is given, only
+    /// those tiers are exported. Dense tiers (continuous_* / categorical_*)
+    /// are skipped — their samples live in Parquet sidecars (see `query`).
+    #[pyo3(signature = (bundle_id, path, *, tier_ids=None))]
+    fn export_csv(
+        &self,
+        bundle_id: i64,
+        path: PathBuf,
+        tier_ids: Option<Vec<i64>>,
+    ) -> PyResult<()> {
+        self.inner
+            .export_csv(bundle_id, path, tier_ids.as_deref())
+            .map_err(engine_err_to_py)
+    }
+
+    /// Writes a structured JSON document of `bundle_id`'s sparse annotations
+    /// to `path`: bundle metadata plus a `tiers` array, each tier carrying
+    /// its native rows (faithful, unlike the flattened CSV). If `tier_ids`
+    /// is given, only those tiers are exported. Dense tiers are skipped.
+    #[pyo3(signature = (bundle_id, path, *, tier_ids=None))]
+    fn export_json(
+        &self,
+        bundle_id: i64,
+        path: PathBuf,
+        tier_ids: Option<Vec<i64>>,
+    ) -> PyResult<()> {
+        self.inner
+            .export_json(bundle_id, path, tier_ids.as_deref())
+            .map_err(engine_err_to_py)
+    }
+
+    /// Imports a flat CSV (as written by `export_csv`) into `bundle_id`. Rows
+    /// are grouped into new tiers by `(tier_name, tier_type)`; interval /
+    /// point rows become annotations. Returns the new tier IDs and records a
+    /// `processing_run`. v1 imports only interval + point tiers; `status`,
+    /// `parent_annotation_id`, and `processing_run_id` are dropped (times,
+    /// label, note, and extra are honoured).
+    fn import_csv(&self, path: PathBuf, bundle_id: i64) -> PyResult<Vec<i64>> {
+        self.inner
+            .import_csv(path, bundle_id)
+            .map_err(engine_err_to_py)
+    }
+
+    /// Imports a structured JSON document (as written by `export_json`) into
+    /// `bundle_id`. Each `tiers[]` entry becomes a new tier; its rows become
+    /// annotations. Returns the new tier IDs and records a `processing_run`.
+    /// Same v1 limits as `import_csv`.
+    fn import_json(&self, path: PathBuf, bundle_id: i64) -> PyResult<Vec<i64>> {
+        self.inner
+            .import_json(path, bundle_id)
+            .map_err(engine_err_to_py)
+    }
+
     fn __repr__(&self) -> String {
         format!("Project(root={:?})", self.root())
     }
