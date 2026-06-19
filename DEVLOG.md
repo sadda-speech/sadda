@@ -6,6 +6,33 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-19 — Fresh-start crash fix + folder import (cross-machine debugging)
+
+Two app changes out of a debugging session on a second machine.
+
+**The fix (`f789b92`).** The app panicked on first launch on a clean machine —
+no `~/.config` state yet. Cause: `PersistedState` derived `Default`, so every
+field fell to its type default, and `ui_scale: f32` became `0.0`. We only ever
+set `ui_scale` from `default_ui_scale()` (`1.0`) via serde's `#[serde(default =
+…)]` *when deserializing existing state*; a from-scratch `Default::default()`
+bypassed that and handed egui a zero scale, which it panics on. Replaced the
+derive with a hand-written `Default` that calls `default_ui_scale()` for that one
+field (and spells out the rest explicitly so the next field added to the struct
+can't silently inherit a bad zero). Lesson logged for the [[reference_wslg_gui_debugging]]
+pile: a `Default` derived over a struct that serde otherwise back-fills is a
+latent first-run footgun — the defaults you see at runtime aren't the ones a
+cold start uses.
+
+**The feature (`42ce2b9`).** Added **File ▸ Add Directory…** — pick a folder,
+register every `.wav` in it as a bundle. Extension match is case-insensitive;
+files are sorted alphabetically before import so the bundle list is in a
+predictable order; each file still goes through `add_bundle_guarded` (so the
+large-file probe/split guard applies per file). Empty folder → an error toast;
+otherwise an info toast with the count. Enabled only when a project is open
+(disabled-hover explains why), mirroring Add Bundle…. Engine/Python already
+import a folder by looping `add_bundle`, so this is the GUI surface of an
+existing capability rather than a new one.
+
 ## 2026-06-04 — Live recording now populates the main view (waveform + spectrogram + measure tracks)
 
 Recording previously showed only an elapsed timer + a dB-FS level meter in the
