@@ -1955,6 +1955,38 @@ impl SaddaApp {
         }
     }
 
+    /// Adds all WAV files from a directory as bundles. Files are sorted
+    /// alphabetically before import so the bundle list order is predictable.
+    fn add_bundles_from_directory(&mut self, dir: PathBuf) {
+        if !matches!(self.app_state, AppState::ProjectLoaded { .. }) {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            self.set_error(format!("Failed to read directory: {}", dir.display()));
+            return;
+        };
+        let mut wav_files: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.eq_ignore_ascii_case("wav"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        if wav_files.is_empty() {
+            self.set_error(format!("No WAV files found in {}", dir.display()));
+            return;
+        }
+        wav_files.sort();
+        let count = wav_files.len();
+        for path in wav_files {
+            self.add_bundle_guarded(path);
+        }
+        self.info = Some(format!("Added {count} bundle(s) from {}", dir.display()));
+    }
+
     /// Commits the pending large-file split: streams the source into chunks of
     /// `chunk_minutes`, lands each as a bundle, and selects the first.
     fn commit_large_bundle_split(&mut self) {
@@ -8457,6 +8489,20 @@ impl SaddaApp {
                     .pick_file()
                 {
                     self.add_bundle_guarded(path);
+                }
+            }
+            if ui
+                .add_enabled(project_open, egui::Button::new("Add Directory…"))
+                .on_disabled_hover_text("Open or create a project first")
+                .on_hover_text("Import all WAV files from a folder as bundles")
+                .clicked()
+            {
+                ui.close();
+                if let Some(dir) = rfd::FileDialog::new()
+                    .set_title("Pick a folder containing WAV files")
+                    .pick_folder()
+                {
+                    self.add_bundles_from_directory(dir);
                 }
             }
             // ---- H1 Import submenu --------------------------------
