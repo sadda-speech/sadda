@@ -100,13 +100,48 @@ impl Playback {
         end_seconds: Option<f64>,
         loop_mode: LoopMode,
     ) -> Result<Self, String> {
+        // Retry logic: PipeWire's ALSA emulation can return stale device
+        // info on the first attempt. Re-enumerate and retry once on failure.
+        const MAX_ATTEMPTS: usize = 2;
+        let mut last_err = String::new();
+
+        for attempt in 0..MAX_ATTEMPTS {
+            if attempt > 0 {
+                // Brief pause before retry to let PipeWire settle
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+
+            match Self::try_start_span(
+                bundle_mono,
+                bundle_sample_rate,
+                start_seconds,
+                end_seconds,
+                loop_mode,
+            ) {
+                Ok(playback) => return Ok(playback),
+                Err(e) => {
+                    last_err = e;
+                    // Continue to retry
+                }
+            }
+        }
+
+        Err(last_err)
+    }
+
+    /// Internal: single attempt to start playback. Separated for retry logic.
+    fn try_start_span(
+        bundle_mono: &[f32],
+        bundle_sample_rate: u32,
+        start_seconds: f64,
+        end_seconds: Option<f64>,
+        loop_mode: LoopMode,
+    ) -> Result<Self, String> {
         let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| "No default audio output device available".to_string())?;
-        let supported = device
-            .default_output_config()
-            .map_err(|e| format!("default_output_config failed: {e}"))?;
+
+        // Try the default device first, then fall back to any working device.
+        // PipeWire's ALSA emulation can report stale devices that fail on use.
+        let (device, supported) = find_working_output_device(&host)?;
 
         // cpal 0.17 made `SampleRate` a plain `u32` type alias (no
         // `.0` accessor, no tuple-struct constructor).
@@ -207,6 +242,49 @@ impl Playback {
     pub fn is_paused(&self) -> bool {
         self.state.paused.load(Ordering::Relaxed)
     }
+}
+
+/// Finds a working output device by trying the default first, then all others.
+/// Returns the device and its supported output config. Works around PipeWire's
+/// ALSA emulation sometimes returning stale device handles.
+fn find_working_output_device(
+    host: &cpal::Host,
+) -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
+    // Try default device first
+    if let Some(device) = host.default_output_device() {
+        if let Ok(config) = device.default_output_config() {
+            return Ok((device, config));
+        }
+    }
+
+    // Fall back: collect all working devices, prefer non-HDMI ones
+    let devices = host
+        .output_devices()
+        .map_err(|e| format!("Failed to enumerate output devices: {e}"))?;
+
+    let mut working: Vec<(cpal::Device, cpal::SupportedStreamConfig, bool)> = Vec::new();
+    for device in devices {
+        if let Ok(config) = device.default_output_config() {
+            // Check if device is HDMI via interface_type or name fallback
+            let is_hdmi = device
+                .description()
+                .map(|desc| {
+                    desc.interface_type() == cpal::InterfaceType::Hdmi
+                        || desc.name().to_lowercase().contains("hdmi")
+                })
+                .unwrap_or(false);
+            working.push((device, config, is_hdmi));
+        }
+    }
+
+    // Sort: non-HDMI devices first (prefer speakers over HDMI)
+    working.sort_by_key(|(_, _, is_hdmi)| *is_hdmi);
+
+    if let Some((device, config, _)) = working.into_iter().next() {
+        return Ok((device, config));
+    }
+
+    Err("No working audio output device found".to_string())
 }
 
 fn build_stream(
