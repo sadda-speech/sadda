@@ -6,6 +6,33 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-19 — PipeWire audio playback fix (retry + device fallback)
+
+Audio playback failed on first attempt with "device is no longer available" on
+systems using PipeWire's ALSA emulation. Root cause: PipeWire can return stale
+device handles that fail when queried for their config — the device *exists* in
+the enumeration, but its state is out of sync with the actual audio graph.
+
+**The fix (`d6d73c2`).** Two-part workaround in `playback.rs`:
+
+1. **Retry logic**: if starting a stream fails, pause 50 ms and retry once.
+   PipeWire often settles between attempts. The retry is internal to
+   `start_span`; callers see either success or the final error.
+
+2. **Device fallback with HDMI deprioritization**: if the default device fails,
+   enumerate all output devices and try the first one whose
+   `default_output_config()` succeeds. Devices are sorted so non-HDMI ones come
+   first (checked via `DeviceDescription::interface_type() == Hdmi` or a
+   name-contains-"hdmi" fallback), since HDMI outputs are rarely the intended
+   playback target when a system also has speakers/headphones.
+
+The actual fix on the user's machine was a missing ALSA→PipeWire routing symlink
+(`/etc/alsa/conf.d/99-pipewire-default.conf`), but the retry+fallback makes the
+app more resilient to transient PipeWire state mismatches generally. Also fixed
+a cpal 0.17 deprecation warning: `device.name()` → `device.description().name()`.
+
+---
+
 ## 2026-06-19 — Fresh-start crash fix + folder import (cross-machine debugging)
 
 Two app changes out of a debugging session on a second machine.
