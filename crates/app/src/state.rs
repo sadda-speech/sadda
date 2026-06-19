@@ -25,7 +25,7 @@ pub enum ThemePref {
 /// State that survives across launches. Eframe's `Storage` hook
 /// serializes this via serde; window size + position are persisted
 /// separately by eframe itself.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PersistedState {
     /// Most-recently-opened projects, newest first. Capped at
     /// [`MAX_RECENT_PROJECTS`].
@@ -94,6 +94,29 @@ pub struct PersistedState {
 /// `default` needs a path, and `f32::default()` would give `0.0`.
 fn default_ui_scale() -> f32 {
     1.0
+}
+
+impl Default for PersistedState {
+    fn default() -> Self {
+        Self {
+            recent_projects: Vec::new(),
+            theme: ThemePref::default(),
+            spectrogram: SpectrogramConfig::default(),
+            tracks: MeasureTrackConfig::default(),
+            f0_overlay: None,
+            intensity_overlay: None,
+            reference_panel_open: false,
+            reference_dist: None,
+            reference_phone: None,
+            reference_param: None,
+            script_panel_open: false,
+            annotation_panel_open: false,
+            script_buffer: String::new(),
+            palette: PlotPalette::default(),
+            ui_scale: default_ui_scale(), // 1.0, not 0.0
+            embedding: EmbeddingHeatmapConfig::default(),
+        }
+    }
 }
 
 impl PersistedState {
