@@ -4,6 +4,23 @@ All notable changes to sadda are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
 follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Import a whole folder of recordings.** The desktop app's **File ▸ Add
+  Directory…** picks a folder and registers every `.wav` in it (case-insensitive,
+  sorted alphabetically so bundle order is predictable) as a bundle, each going
+  through the same large-file probe/split guard as a single Add Bundle…. Reports
+  how many were added, or an error if the folder has no WAV files.
+
+### Fixed
+
+- **Fresh-start crash on a clean machine.** `PersistedState`'s derived `Default`
+  left `ui_scale` at `0.0`, which made egui panic the first time the app ran with
+  no saved state. Replaced with an explicit `Default` that seeds `ui_scale` to
+  `1.0`.
+
 ## [0.4.0] — 2026-06-03
 
 Adds the **annotation campaign suite** — a full labeling-campaign platform

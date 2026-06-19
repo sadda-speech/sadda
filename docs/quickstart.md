@@ -88,7 +88,9 @@ ids = proj.add_bundle_split(
 In the desktop app this is automatic: **File → Add Bundle…** probes the
 file first, and if it's large enough to be risky it offers to split it
 (or add it as-is) before loading. (`probe_wav` is provisional and warns
-once on first use.)
+once on first use.) To bring in a whole corpus at once, **File → Add
+Directory…** registers every `.wav` in a folder (sorted by name), each
+through the same large-file guard.
 
 ## Run pitch and formants
 
