@@ -61,6 +61,7 @@ __all__ = [
     "Target",
     "Tier",
     "TierImpact",
+    "Timeline",
     "VocabEntry",
     "clinical",
     "criteria",
@@ -157,6 +158,10 @@ Citation = stable(_native.Citation)
 # A3 surface (Phase 3) — instrument calibration + calibrated SPL.
 Instrument = stable(_native.Instrument)
 Calibration = stable(_native.Calibration)
+
+# Timeline navigation (cursor / view / selection) with a move-to / move-by API,
+# shared with the desktop app's keyboard navigation. New surface, so provisional.
+Timeline = provisional(_native.Timeline)
 
 
 # [docs:sadda.Project.query]  — monkey-patched onto _native.Project below,
