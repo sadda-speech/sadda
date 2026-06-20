@@ -1,6 +1,6 @@
 # DEVLOG
 
-A running log of research, decisions, and development for the SpeechAnalysisTool project — a planned next-generation phonetics / speech-science tool, conceived as a successor to Praat.
+A running log of research, decisions, and development for the SpeechAnalysisTool project — a planned next-generation phonetics / speech-science tool.
 
 Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a short topic. This file holds the **current month**; earlier months are rotated into [`devlog/`](devlog/) (index at the bottom).
 

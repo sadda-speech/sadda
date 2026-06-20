@@ -1,8 +1,7 @@
 # sadda
 
 *Sadda* (Pali सद्द — *"sound, voice"*) is an open-source toolkit for
-phonetics and speech-science research. It targets the same audience as
-[Praat](https://www.fon.hum.uva.nl/praat/) but with a modern Python API,
+phonetics and speech-science research, with a modern Python API,
 NumPy- and Polars-native data types, and a corpus-first project model.
 
 ![The sadda desktop app showing a speech recording as a waveform, a spectrogram, and stacked f0, formant, and intensity measure tracks, alongside a bundle-list sidebar and a reference-distribution panel.](assets/sadda_screenshot.png){ width="820" }
