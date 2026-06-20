@@ -4255,6 +4255,160 @@ fn avqi(
     sadda_engine::avqi(cpps, hnr, shimmer_local_pct, shimmer_local_db, slope, tilt)
 }
 
+/// Timeline navigation state: a cursor (playhead), a visible view window, and an
+/// optional `(start, end)` selection over a recording of `duration` seconds.
+///
+/// Every action comes as a **move-to** (absolute) / **move-by** (relative) pair
+/// — e.g. `set_cursor(t)` vs `move_cursor_by(dt)` — so scripts can drive the
+/// same navigation the desktop app's keyboard does. Times are in seconds; the
+/// cursor and selection clamp to `[0, duration]`, and the view always stays
+/// within the recording.
+///
+/// Construct with `Timeline(duration_seconds)`.
+#[gen_stub_pyclass]
+// `skip_from_py_object`: this is a mutable value type that's never passed by
+// value into other binding methods, so it doesn't need the FromPyObject derive
+// (pyo3 0.28 makes that opt-in for Clone pyclasses).
+#[pyclass(module = "sadda._native", name = "Timeline", skip_from_py_object)]
+#[derive(Clone)]
+struct PyTimeline {
+    inner: sadda_engine::Timeline,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyTimeline {
+    /// Builds a timeline for a recording of `duration_seconds`, with the view
+    /// spanning the whole recording and the cursor at the start.
+    #[new]
+    fn new(duration_seconds: f64) -> Self {
+        Self {
+            inner: sadda_engine::Timeline::new(duration_seconds),
+        }
+    }
+
+    /// Cursor (playhead) position, in seconds.
+    #[getter]
+    fn cursor(&self) -> f64 {
+        self.inner.cursor
+    }
+    /// Left edge of the visible view window, in seconds.
+    #[getter]
+    fn view_start(&self) -> f64 {
+        self.inner.view_start
+    }
+    /// Right edge of the visible view window, in seconds (exclusive).
+    #[getter]
+    fn view_end(&self) -> f64 {
+        self.inner.view_end
+    }
+    /// Recording duration, in seconds.
+    #[getter]
+    fn duration(&self) -> f64 {
+        self.inner.duration
+    }
+    /// Width of the visible window (`view_end - view_start`), in seconds.
+    #[getter]
+    fn view_range(&self) -> f64 {
+        self.inner.view_range()
+    }
+    /// The current selection as `(start, end)` seconds, or `None`.
+    #[getter]
+    fn selection(&self) -> Option<(f64, f64)> {
+        self.inner.selection
+    }
+
+    /// Re-initialises for a freshly-loaded recording: view spans the whole
+    /// recording, cursor at 0, no selection.
+    fn reset_for_bundle(&mut self, duration_seconds: f64) {
+        self.inner.reset_for_bundle(duration_seconds);
+    }
+
+    // ----- cursor -----
+
+    /// Moves the cursor **to** `t` seconds (clamped to the recording).
+    fn set_cursor(&mut self, t: f64) {
+        self.inner.set_cursor(t);
+    }
+    /// Moves the cursor **by** `delta_seconds` (negative = left).
+    fn move_cursor_by(&mut self, delta_seconds: f64) {
+        self.inner.move_cursor_by(delta_seconds);
+    }
+
+    // ----- selection -----
+
+    /// Sets the selection's **start** edge **to** `t`, seeding a selection at
+    /// the cursor when none exists and clamping so `start <= end`.
+    fn set_selection_start(&mut self, t: f64) {
+        self.inner.set_selection_start(t);
+    }
+    /// Moves the selection's **start** edge **by** `delta_seconds`.
+    fn move_selection_start_by(&mut self, delta_seconds: f64) {
+        self.inner.move_selection_start_by(delta_seconds);
+    }
+    /// Sets the selection's **end** edge **to** `t`, seeding a selection at the
+    /// cursor when none exists and clamping so `end >= start`.
+    fn set_selection_end(&mut self, t: f64) {
+        self.inner.set_selection_end(t);
+    }
+    /// Moves the selection's **end** edge **by** `delta_seconds`.
+    fn move_selection_end_by(&mut self, delta_seconds: f64) {
+        self.inner.move_selection_end_by(delta_seconds);
+    }
+    /// Places a zero-width selection point at `t`.
+    fn set_point_selection(&mut self, t: f64) {
+        self.inner.set_point_selection(t);
+    }
+    /// Clears any selection.
+    fn clear_selection(&mut self) {
+        self.inner.clear_selection();
+    }
+
+    // ----- view: scroll & zoom -----
+
+    /// Pans the view so it starts **at** `t` seconds, preserving the range.
+    fn set_view_start(&mut self, t: f64) {
+        self.inner.set_view_start(t);
+    }
+    /// Pans the view **by** `delta_seconds`, preserving the range.
+    fn scroll_by(&mut self, delta_seconds: f64) {
+        self.inner.scroll_by(delta_seconds);
+    }
+    /// Frames the view to exactly `[start, end]` seconds (clamped). Use for
+    /// "fit whole recording" (`0, duration`) or "zoom to selection".
+    fn set_view_range(&mut self, start: f64, end: f64) {
+        self.inner.set_view_range(start, end);
+    }
+    /// Zooms around `time_seconds` by `factor` (< 1 zooms in, > 1 zooms out).
+    fn zoom_at(&mut self, time_seconds: f64, factor: f64) {
+        self.inner.zoom_at(time_seconds, factor);
+    }
+    /// Pans the minimum amount to bring `t` into the visible window.
+    fn scroll_into_view(&mut self, t: f64) {
+        self.inner.scroll_into_view(t);
+    }
+    /// Shifts the view (if needed) so the cursor sits a quarter of the way in
+    /// from the left edge — the playback-follow convention.
+    fn ensure_cursor_visible(&mut self) {
+        self.inner.ensure_cursor_visible();
+    }
+    /// Maps a pixel-x within `[0, plot_width_px)` to seconds in the view range.
+    fn pixel_to_time(&self, pixel_x: f64, plot_width_px: f64) -> f64 {
+        self.inner.pixel_to_time(pixel_x, plot_width_px)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Timeline(cursor={:.3}, view=[{:.3}, {:.3}], duration={:.3}, selection={:?})",
+            self.inner.cursor,
+            self.inner.view_start,
+            self.inner.view_end,
+            self.inner.duration,
+            self.inner.selection,
+        )
+    }
+}
+
 /// sadda._native — Rust extension submodule. End users should `import sadda`
 /// and use the decorated re-exports in `sadda.__init__` rather than reaching
 /// in here directly.
@@ -4325,6 +4479,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyProcessingRun>()?;
     m.add_class::<PyCitation>()?;
     m.add_class::<PyCalibration>()?;
+    m.add_class::<PyTimeline>()?;
     m.add_class::<PyInstrument>()?;
     m.add_class::<PyProject>()?;
 
