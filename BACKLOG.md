@@ -16,9 +16,9 @@ Status: `[ ]` open · `[~]` in progress · `[x]` done (move to DEVLOG when shipp
 
 _Raw captures land here; groomed into the sections below on request._
 
-- [ ] **UI miscellany (next round)** — aggregator for small UI tweaks to batch together — _added 2026-06-20_
-  - [ ] **Keyboard focus-shifting between panes** (deferred from home-row keymap PR) — `Shift+↑/↓` cycle a 3-layer stack: Signal window → Annotation tiers → Python console. Needs a custom `active_pane` + focus ring (egui focus is per-widget; only the console has a real text widget). Open Qs: leaving the console (reserve `Shift+↑/↓` globally vs Esc) and scope (light = ring + console focus vs full = route shortcuts per pane).
-  - [ ] **Default cursor at window center on bundle open** — `Timeline::reset_for_bundle` currently sets the cursor to 0; place it at the view centre instead.
+- [ ] **UI miscellany (next round)** — aggregator for small UI tweaks to batch together; add sub-bullets as they come up — _added 2026-06-20_
+  <!-- pane focus-shifting + annotation navigation promoted to active work (feat/pane-focus-nav); cursor-at-window-center dropped (start time is fine) -->
+
 - [ ] **Rhythm metrics** — speech rhythm/timing measures (e.g. %V, ΔC/ΔV, VarcoV/VarcoC, nPVI/rPVI) computed over interval tiers — _added 2026-06-05_
 - [ ] Fix table alignment in docs Quickstart → "Query annotations" → `print(df.head())` output — _added 2026-06-04_
 
