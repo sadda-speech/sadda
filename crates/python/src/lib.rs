@@ -4355,6 +4355,11 @@ impl PyTimeline {
     fn move_selection_end_by(&mut self, delta_seconds: f64) {
         self.inner.move_selection_end_by(delta_seconds);
     }
+    /// Sets the selection to exactly `[start, end]` seconds in one call (sorted
+    /// and clamped). The selection analogue of `set_view_range`.
+    fn set_selection_range(&mut self, start: f64, end: f64) {
+        self.inner.set_selection_range(start, end);
+    }
     /// Places a zero-width selection point at `t`.
     fn set_point_selection(&mut self, t: f64) {
         self.inner.set_point_selection(t);
