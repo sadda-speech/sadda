@@ -45,7 +45,7 @@ def test_record_and_query_processing_runs() -> None:
         assert runs[0].kind == "dsp_algorithm"
         assert runs[0].processor_id == "sadda.dsp.pitch.autocorrelation"
         assert runs[0].status == "ok"
-        assert runs[0].processor_version == sadda.version()
+        assert runs[0].processor_version == sadda.__version__
         assert runs[0].finished_at is not None
 
 

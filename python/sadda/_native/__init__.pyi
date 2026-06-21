@@ -266,9 +266,13 @@ class Audio:
         Interleaved samples as a 1-D float32 NumPy array.
         For stereo the layout is `[L0, R0, L1, R1, ...]`.
         """
-    def mono(self) -> numpy.typing.NDArray[numpy.float32]:
+    def mono(self) -> Audio:
         r"""
-        Mono mixdown of the audio as a 1-D float32 NumPy array.
+        Mono downmix as a new single-channel `Audio` (multi-channel frames are
+        averaged). Returns an `Audio` — not a raw array — so it can be passed
+        straight back into `dsp.*` functions; reach the samples via
+        `audio.mono().samples`. Note most `dsp.*` and `clinical.*` functions
+        already mono-mix internally, so you rarely need to call this first.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -772,6 +776,13 @@ class Ltas:
     A long-term average spectrum: mean power per `bin_hz`-wide band, in
     dB. Returned by `sadda.dsp.ltas`. Level *differences* (slope, tilt,
     alpha ratio) are the meaningful quantities.
+    
+    Convention: the stored spectrum data are **attributes** (`levels_db`,
+    `bin_hz`, `sample_rate` — accessed without parentheses), while the derived
+    scalar measures are **methods** (`slope(...)`, `tilt(...)`, `alpha_ratio()`
+    — called with parentheses). The measures are methods because they compute
+    over frequency bands; `slope`/`tilt` take the band edges as arguments and
+    `alpha_ratio` uses a fixed 1 kHz split.
     """
     @property
     def bin_hz(self) -> builtins.float:

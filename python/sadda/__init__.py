@@ -74,24 +74,30 @@ __all__ = [
     "open_project",
     "provisional",
     "refdist",
-    "schema_version",
     "stable",
     "stable_clinical",
-    "version",
+    "SCHEMA_VERSION",
+    "__version__",
 ]
 
 # Phase-0 surface.
 Audio = stable(_native.Audio)
-version = stable(_native.version)
 load_wav = stable(_native.load_wav)
 f0 = stable(_native.f0)
+
+# Version + schema are values, not operations, so they're exposed as plain
+# module constants rather than callables (`sadda.__version__`, not
+# `sadda.version()`). Computed once at import from the native engine. Constants
+# carry no stability tier — the @stable/@provisional machinery decorates
+# callables and classes; plain values are not part of that warn-on-use contract.
+__version__ = _native.version()
+SCHEMA_VERSION = _native.schema_version()
 
 # Header-only probe + chunked split (large-file ingest guard).
 AudioProbe = provisional(_native.AudioProbe)
 probe_wav = provisional(_native.probe_wav)
 
 # B1 surface — corpus entry points.
-schema_version = stable(_native.schema_version)
 new_project = stable(_native.new_project)
 open_project = stable(_native.open_project)
 Project = stable(_native.Project)

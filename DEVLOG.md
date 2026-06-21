@@ -6,6 +6,43 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-21 — Python API ergonomics: three papercuts from a live-API probe
+
+A test run of the live Python API surfaced three discoverability footguns,
+all fixed cleanly (breaking, on the heels of 0.4.0) on `fix/python-api-ergonomics`.
+
+1. **`Audio.mono()` returned a raw ndarray.** It read like "give me a mono
+   `Audio`" but handed back samples, so the result couldn't flow back into the
+   `dsp.*` functions that take an `Audio`. Now returns a single-channel `Audio`
+   (new `Audio::to_mono()` in the engine; PyO3 `mono()` wraps it); reach the
+   samples via `audio.mono().samples`. Worth noting the original footgun was
+   half-illusory — every `&Audio`-taking `dsp.*`/`clinical.*` function already
+   mono-mixes internally (`audio.mono_samples()`), so you rarely need `.mono()`
+   before them at all. The docstring now says so.
+
+2. **`Ltas` mixed methods and attributes with no stated rule.** `levels_db` /
+   `bin_hz` / `sample_rate` are attributes; `slope(...)` / `tilt(...)` /
+   `alpha_ratio()` are methods. The rule is principled (stored data = attribute,
+   band-derived scalar = method) but undocumented, and parameterless
+   `alpha_ratio()` made it look arbitrary. Documented the convention on the
+   class docstring; kept `alpha_ratio` a method (it computes over a fixed 1 kHz
+   split, consistent with the other measures).
+
+3. **`schema_version` was callable, despite reading like a value.** Replaced the
+   `sadda.version()` / `sadda.schema_version()` functions with Pythonic module
+   constants `sadda.__version__` (str) and `sadda.SCHEMA_VERSION` (int),
+   computed once at import from the native engine. The native `_native.version`
+   / `_native.schema_version` functions stay as the internal value source.
+   Constants carry no stability tier — the `@stable`/`@provisional` machinery
+   decorates callables/classes, not plain values.
+
+Call sites updated: `test_corpus`, `test_provenance`, `test_stability` (incl.
+the PyO3-registry probe, repointed at `_native.load_wav`), and the release
+workflow's `CIBW_TEST_COMMAND` smoke test. Stubs regenerated; full `just gate`
+green (228 passed, 6 skipped).
+
+---
+
 ## 2026-06-19 — PipeWire audio playback fix (retry + device fallback)
 
 Audio playback failed on first attempt with "device is no longer available" on

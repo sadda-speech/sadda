@@ -106,10 +106,15 @@ impl PyAudio {
         self.inner.samples.clone().into_pyarray(py)
     }
 
-    /// Mono mixdown of the audio as a 1-D float32 NumPy array.
-    fn mono<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<f32>> {
-        let mono: Vec<f32> = self.inner.mono_samples().collect();
-        mono.into_pyarray(py)
+    /// Mono downmix as a new single-channel `Audio` (multi-channel frames are
+    /// averaged). Returns an `Audio` — not a raw array — so it can be passed
+    /// straight back into `dsp.*` functions; reach the samples via
+    /// `audio.mono().samples`. Note most `dsp.*` and `clinical.*` functions
+    /// already mono-mix internally, so you rarely need to call this first.
+    fn mono(&self) -> PyAudio {
+        PyAudio {
+            inner: self.inner.to_mono(),
+        }
     }
 
     fn __repr__(&self) -> String {
@@ -3933,6 +3938,13 @@ fn log_mel_whisper<'py>(
 /// A long-term average spectrum: mean power per `bin_hz`-wide band, in
 /// dB. Returned by `sadda.dsp.ltas`. Level *differences* (slope, tilt,
 /// alpha ratio) are the meaningful quantities.
+///
+/// Convention: the stored spectrum data are **attributes** (`levels_db`,
+/// `bin_hz`, `sample_rate` — accessed without parentheses), while the derived
+/// scalar measures are **methods** (`slope(...)`, `tilt(...)`, `alpha_ratio()`
+/// — called with parentheses). The measures are methods because they compute
+/// over frequency bands; `slope`/`tilt` take the band edges as arguments and
+/// `alpha_ratio` uses a fixed 1 kHz split.
 #[gen_stub_pyclass]
 #[pyclass(module = "sadda._native", name = "Ltas", frozen)]
 struct PyLtas {

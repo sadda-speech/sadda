@@ -126,6 +126,26 @@ def test_intensity_of_unit_sine_is_one_over_sqrt_two() -> None:
         assert abs(float(db[mid]) - (-3.0103)) < 0.2
 
 
+def test_mono_returns_an_audio_that_flows_back_into_dsp() -> None:
+    sr = 16_000
+    with tempfile.TemporaryDirectory() as td:
+        wav = Path(td) / "sine.wav"
+        _write_sine_wav(wav, 440.0, sr, 0.5)
+        audio = sadda.load_wav(str(wav))
+
+        mono = audio.mono()
+        # mono() returns an Audio (not a raw array), so it composes with dsp.*.
+        assert isinstance(mono, sadda.Audio)
+        assert mono.channels == 1
+        assert mono.sample_rate == sr
+        assert mono.n_frames == audio.n_frames
+        # Raw samples are still one hop away.
+        assert isinstance(mono.samples, np.ndarray)
+        # The whole point: the result can be passed straight back into dsp.*.
+        ltas = sadda.dsp.ltas(mono)
+        assert ltas.levels_db.size > 0
+
+
 def test_stft_window_length_mismatch_raises_value_error() -> None:
     samples = np.zeros(2048, dtype=np.float32)
     wrong_window = np.ones(512, dtype=np.float32)
