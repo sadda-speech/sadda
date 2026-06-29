@@ -17,17 +17,25 @@ from sadda._stability import provisional, stable
 
 __all__ = [
     "FormantFrame",
+    "FormantPreset",
+    "FormantsParams",
     "Ltas",
     "MfccParams",
     "MfccPreset",
     "PitchParams",
     "PitchPreset",
     "blackman",
+    "builtin_formant_presets",
     "builtin_mfcc_presets",
     "builtin_pitch_presets",
+    "delete_formant_preset",
     "delete_mfcc_preset",
     "delete_pitch_preset",
     "f0",
+    "formant_preset",
+    "formant_preset_store",
+    "formant_presets",
+    "formant_user_presets",
     "formants",
     "gaussian",
     "hamming",
@@ -45,6 +53,7 @@ __all__ = [
     "pitch_preset_store",
     "pitch_presets",
     "pitch_user_presets",
+    "save_formant_preset",
     "save_mfcc_preset",
     "save_pitch_preset",
     "spectrogram",
@@ -63,7 +72,92 @@ intensity = stable(_native.intensity)
 f0 = stable(_native.f0)
 
 # C2 surface.
-formants = stable(_native.formants)
+
+
+@stable
+def formants(
+    audio,
+    *,
+    params: "Optional[FormantsParams]" = None,
+    frame_size_seconds: float = 0.025,
+    hop_seconds: float = 0.010,
+    n_formants: int = 5,
+    pre_emphasis: float = 0.97,
+    lpc_order: Optional[int] = None,
+    method: str = "burg",
+    max_bandwidth_hz: float = 1000.0,
+    min_frequency_hz: float = 50.0,
+):
+    """Per-frame formants via LPC + root-finding; returns a list of
+    ``FormantFrame``.
+
+    Either pass ``method`` (``burg`` (default) or ``autocorrelation``) with the
+    analysis keywords, or pass ``params=`` a :class:`FormantsParams` (from a
+    preset, optionally edited with ``.replace(...)``). When ``params`` is given
+    it fully determines the computation and the other keywords are ignored."""
+    if params is not None:
+        return _native.formant_preset.compute(audio, params)
+    return _native.formants(
+        audio,
+        frame_size_seconds=frame_size_seconds,
+        hop_seconds=hop_seconds,
+        n_formants=n_formants,
+        pre_emphasis=pre_emphasis,
+        lpc_order=lpc_order,
+        method=method,
+        max_bandwidth_hz=max_bandwidth_hz,
+        min_frequency_hz=min_frequency_hz,
+    )
+
+
+# Formant parameter/preset registry (roadmap item 6). PROVISIONAL.
+FormantsParams = _native.formant_preset.FormantsParams
+FormantPreset = _native.formant_preset.FormantPreset
+
+
+@provisional
+def formant_presets(*, root: Optional[str] = None) -> "list[FormantPreset]":
+    """All formant presets: the built-in reference methods (praat-burg /
+    autocorrelation) followed by the user's on-disk presets."""
+    return _native.formant_preset.list_all(root=root)
+
+
+@provisional
+def formant_user_presets(*, root: Optional[str] = None) -> "list[FormantPreset]":
+    """The user's on-disk formant presets only (no built-ins)."""
+    return _native.formant_preset.list_user(root=root)
+
+
+@provisional
+def builtin_formant_presets() -> "list[FormantPreset]":
+    """The built-in authoritative formant presets (praat-burg / autocorrelation)."""
+    return _native.formant_preset.builtin()
+
+
+@provisional
+def formant_preset(id: str, *, root: Optional[str] = None) -> "Optional[FormantPreset]":  # noqa: A002
+    """The formant preset with this ``id`` (built-in or on-disk), or ``None``."""
+    return _native.formant_preset.get(id, root=root)
+
+
+@provisional
+def save_formant_preset(preset: "FormantPreset", *, root: Optional[str] = None) -> str:
+    """Save a user formant preset to the store; returns its file path."""
+    return _native.formant_preset.save(preset, root=root)
+
+
+@provisional
+def delete_formant_preset(id: str, *, root: Optional[str] = None) -> bool:  # noqa: A002
+    """Delete the user formant preset with this ``id``. Returns ``True`` if a
+    file was removed."""
+    return _native.formant_preset.delete(id, root=root)
+
+
+@provisional
+def formant_preset_store(*, root: Optional[str] = None) -> str:
+    """Filesystem path of the active formant preset store (default:
+    ``~/.local/share/sadda/presets/formant/`` or the platform equivalent)."""
+    return _native.formant_preset.store_root(root=root)
 
 
 @stable

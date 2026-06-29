@@ -16,6 +16,7 @@ use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
+mod formant_preset;
 mod live;
 mod mfcc_preset;
 mod ml;
@@ -3680,8 +3681,8 @@ fn intensity<'py>(
 /// NaN-padded.
 #[gen_stub_pyclass]
 #[pyclass(module = "sadda._native", name = "FormantFrame", frozen)]
-struct PyFormantFrame {
-    inner: sadda_engine::dsp::FormantFrame,
+pub(crate) struct PyFormantFrame {
+    pub(crate) inner: sadda_engine::dsp::FormantFrame,
 }
 
 #[gen_stub_pymethods]
@@ -4485,6 +4486,40 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     pitch_preset_mod.add_class::<pitch_preset::PyPitchPreset>()?;
     m.add("pitch_preset", &pitch_preset_mod)?;
     sys_modules.set_item("sadda._native.pitch_preset", &pitch_preset_mod)?;
+
+    // Formant preset registry: sadda.dsp preset surface (roadmap item 6).
+    let formant_preset_mod = PyModule::new(m.py(), "sadda._native.formant_preset")?;
+    formant_preset_mod.add_function(wrap_pyfunction!(
+        formant_preset::store_root,
+        &formant_preset_mod
+    )?)?;
+    formant_preset_mod.add_function(wrap_pyfunction!(
+        formant_preset::builtin,
+        &formant_preset_mod
+    )?)?;
+    formant_preset_mod.add_function(wrap_pyfunction!(
+        formant_preset::list_all,
+        &formant_preset_mod
+    )?)?;
+    formant_preset_mod.add_function(wrap_pyfunction!(
+        formant_preset::list_user,
+        &formant_preset_mod
+    )?)?;
+    formant_preset_mod.add_function(wrap_pyfunction!(formant_preset::get, &formant_preset_mod)?)?;
+    formant_preset_mod
+        .add_function(wrap_pyfunction!(formant_preset::save, &formant_preset_mod)?)?;
+    formant_preset_mod.add_function(wrap_pyfunction!(
+        formant_preset::delete,
+        &formant_preset_mod
+    )?)?;
+    formant_preset_mod.add_function(wrap_pyfunction!(
+        formant_preset::compute,
+        &formant_preset_mod
+    )?)?;
+    formant_preset_mod.add_class::<formant_preset::PyFormantsParams>()?;
+    formant_preset_mod.add_class::<formant_preset::PyFormantPreset>()?;
+    m.add("formant_preset", &formant_preset_mod)?;
+    sys_modules.set_item("sadda._native.formant_preset", &formant_preset_mod)?;
     Ok(())
 }
 

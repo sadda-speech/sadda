@@ -6,6 +6,7 @@
 //!
 //! Design: see the 2026-05-21 DEVLOG entry "Foundational DSP (C1)".
 
+pub mod formant_preset;
 pub mod formants;
 pub mod intensity;
 pub mod lpc;
@@ -17,6 +18,7 @@ pub mod spectrogram;
 pub mod stft;
 pub mod windowing;
 
+pub use formant_preset::{FormantPreset, FormantPresetStore, formant_builtin_presets};
 pub use formants::{FormantFrame, FormantsConfig, formants};
 pub use intensity::{IntensityFrame, intensity};
 pub use lpc::{LpcMethod, LpcResult, autocorr_lpc, burg_lpc, lpc};
