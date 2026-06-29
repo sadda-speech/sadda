@@ -166,6 +166,36 @@ mod tests {
     }
 
     #[test]
+    fn dsp_method_defaults_match_engine_defaults() {
+        // The GUI defaults must mirror the engine's chosen defaults so an
+        // untouched install behaves identically to the API's `*::default()`.
+        let cfg = MeasureTrackConfig::default();
+        assert_eq!(cfg.pitch_method, PitchMethodChoice::Boersma);
+        assert_eq!(cfg.formant_lpc_method, LpcMethodChoice::Burg);
+        assert_eq!(PitchMethodChoice::default(), PitchMethodChoice::Boersma);
+        assert_eq!(LpcMethodChoice::default(), LpcMethodChoice::Burg);
+    }
+
+    #[test]
+    fn dsp_method_choices_enumerate_with_labels() {
+        assert_eq!(PitchMethodChoice::all().len(), 6);
+        assert_eq!(LpcMethodChoice::all().len(), 2);
+        for m in PitchMethodChoice::all() {
+            assert!(!m.label().is_empty());
+        }
+        for m in LpcMethodChoice::all() {
+            assert!(!m.label().is_empty());
+        }
+        // Changing a method must change config equality (cache staleness).
+        let a = MeasureTrackConfig::default();
+        let b = MeasureTrackConfig {
+            pitch_method: PitchMethodChoice::Yin,
+            ..MeasureTrackConfig::default()
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
     fn measure_track_any_visible_true_when_one_on() {
         let cfg = MeasureTrackConfig {
             f0_visible: false,
@@ -441,6 +471,80 @@ impl Default for SpectrogramConfig {
 
 /// D10: configuration for the stacked measure-track lanes (f0,
 /// formants, intensity) drawn below the spectrogram. Lives in
+/// Which f0 tracker the GUI's pitch lane uses. A local serde mirror of
+/// the engine's `PitchMethod` (kept here so `state.rs` stays engine-type-
+/// free and the choice persists across launches); `main.rs` maps it to the
+/// engine enum. Default = Boersma, the octave-robust engine default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PitchMethodChoice {
+    /// Boersma 1993 / Praat `To Pitch (ac)` — octave-robust, the default.
+    #[default]
+    Boersma,
+    /// Naive time-domain autocorrelation (fast, subharmonic-prone).
+    Autocorrelation,
+    /// Window-corrected autocorrelation (no octave cost; subharmonic-prone).
+    WindowedAutocorrelation,
+    /// YIN (de Cheveigné & Kawahara 2002).
+    Yin,
+    /// Probabilistic YIN (Mauch & Dixon 2014).
+    PYin,
+    /// SWIPE′ (Camacho & Harris 2008).
+    Swipe,
+}
+
+impl PitchMethodChoice {
+    /// Short menu label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Boersma => "Boersma (Praat, default)",
+            Self::Autocorrelation => "Autocorrelation",
+            Self::WindowedAutocorrelation => "Windowed autocorrelation",
+            Self::Yin => "YIN",
+            Self::PYin => "pYIN",
+            Self::Swipe => "SWIPE′",
+        }
+    }
+
+    /// All variants, in menu order.
+    pub fn all() -> [Self; 6] {
+        [
+            Self::Boersma,
+            Self::Autocorrelation,
+            Self::WindowedAutocorrelation,
+            Self::Yin,
+            Self::PYin,
+            Self::Swipe,
+        ]
+    }
+}
+
+/// Which LPC method the GUI's formant lane uses. Local serde mirror of the
+/// engine's `LpcMethod`; `main.rs` maps it. Default = Burg (the engine
+/// default for formant tracking).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LpcMethodChoice {
+    /// Burg lattice (Praat's formant method); the default.
+    #[default]
+    Burg,
+    /// Autocorrelation + Levinson–Durbin.
+    Autocorrelation,
+}
+
+impl LpcMethodChoice {
+    /// Short menu label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Burg => "Burg (Praat, default)",
+            Self::Autocorrelation => "Autocorrelation",
+        }
+    }
+
+    /// All variants, in menu order.
+    pub fn all() -> [Self; 2] {
+        [Self::Burg, Self::Autocorrelation]
+    }
+}
+
 /// [`PersistedState`] so the user's lane visibility + analysis
 /// parameters survive a relaunch. Changing any field invalidates the
 /// app's track cache (see `MeasureTrackCache`), so this derives
@@ -476,6 +580,13 @@ pub struct MeasureTrackConfig {
     /// VAD speech-probability threshold, drawn as a line on the VAD lane.
     #[serde(default = "default_vad_threshold")]
     pub vad_threshold: f32,
+    /// f0 tracker used for the pitch lane. Persists across launches;
+    /// changing it invalidates the track cache like any other field.
+    #[serde(default)]
+    pub pitch_method: PitchMethodChoice,
+    /// LPC method used for the formant lane.
+    #[serde(default)]
+    pub formant_lpc_method: LpcMethodChoice,
 }
 
 fn default_vad_threshold() -> f32 {
@@ -539,6 +650,8 @@ impl Default for MeasureTrackConfig {
             formant_max_hz: 5500.0,
             intensity_floor_db: -80.0,
             vad_threshold: 0.5,
+            pitch_method: PitchMethodChoice::Boersma,
+            formant_lpc_method: LpcMethodChoice::Burg,
         }
     }
 }

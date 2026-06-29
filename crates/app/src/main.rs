@@ -22,7 +22,9 @@ use pyo3::prelude::*;
 use sadda_engine::{LiveConfig, LiveResults, LiveSession, Project, StoppedSession, TierType};
 // D10 measure tracks: the engine already emits these per-frame
 // time series; the GUI computes + caches + renders them as lanes.
-use sadda_engine::dsp::{FormantFrame, FormantsConfig, IntensityFrame, formants, intensity};
+use sadda_engine::dsp::{
+    FormantFrame, FormantsConfig, IntensityFrame, LpcMethod, formants, intensity,
+};
 use sadda_engine::pitch::{PitchConfig, PitchFrame, PitchMethod, pitch};
 // D10 refdist overlays: resolve a distribution from the store and turn
 // it into a band the lane draws behind its contour.
@@ -36,10 +38,10 @@ use crate::sadda_app::{
     with_snapshot_active,
 };
 use crate::state::{
-    ColormapKind, EmbeddingHeatmapConfig, EnvelopeCache, MeasureTrackConfig, PersistedState,
-    PlotPalette, RefdistOverlay, SpectrogramConfig, ThemePref, TimelineState,
-    build_envelope_for_range, colormap_bake, format_reference_lane_caption, nearest_frame_index,
-    normalize_embedding, power_to_db_normalized, truncate_label,
+    ColormapKind, EmbeddingHeatmapConfig, EnvelopeCache, LpcMethodChoice, MeasureTrackConfig,
+    PersistedState, PitchMethodChoice, PlotPalette, RefdistOverlay, SpectrogramConfig, ThemePref,
+    TimelineState, build_envelope_for_range, colormap_bake, format_reference_lane_caption,
+    nearest_frame_index, normalize_embedding, power_to_db_normalized, truncate_label,
 };
 
 /// Maximum characters drawn inside an interval rectangle or above a
@@ -6488,11 +6490,19 @@ fn compute_measure_tracks(env: &EnvelopeCache, cfg: MeasureTrackConfig) -> Measu
                 ..PitchConfig::default()
             };
             let t = std::time::Instant::now();
-            // Boersma (the canonical default) is octave-robust; the simpler
-            // windowed-autocorrelation tracker latched onto subharmonics of
-            // clean tones (150→75, 250→83.3). ~1.6× slower but still ~40 ms for
-            // 30 s of 44.1 kHz audio, and this lane is computed async (P2).
-            f0 = pitch(audio, &pcfg, PitchMethod::default());
+            // Tracker is user-selectable (View ▸ DSP methods); default is
+            // Boersma — octave-robust, unlike the simpler windowed-
+            // autocorrelation tracker, which latched onto subharmonics of
+            // clean tones (150→75, 250→83.3). This lane is computed async (P2).
+            let method = match cfg.pitch_method {
+                PitchMethodChoice::Boersma => PitchMethod::Boersma,
+                PitchMethodChoice::Autocorrelation => PitchMethod::Autocorrelation,
+                PitchMethodChoice::WindowedAutocorrelation => PitchMethod::WindowedAutocorrelation,
+                PitchMethodChoice::Yin => PitchMethod::Yin,
+                PitchMethodChoice::PYin => PitchMethod::PYin,
+                PitchMethodChoice::Swipe => PitchMethod::Swipe,
+            };
+            f0 = pitch(audio, &pcfg, method);
             perf_log("  · f0", t.elapsed());
         }
         if cfg.vad_visible {
@@ -6510,6 +6520,11 @@ fn compute_measure_tracks(env: &EnvelopeCache, cfg: MeasureTrackConfig) -> Measu
     let formants = if cfg.formants_visible {
         let fcfg = FormantsConfig {
             n_formants: cfg.formant_count,
+            // LPC method is user-selectable (View ▸ DSP methods); default Burg.
+            lpc_method: match cfg.formant_lpc_method {
+                LpcMethodChoice::Burg => LpcMethod::Burg,
+                LpcMethodChoice::Autocorrelation => LpcMethod::Autocorrelation,
+            },
             ..FormantsConfig::default()
         };
         let t = std::time::Instant::now();
@@ -8767,6 +8782,39 @@ impl SaddaApp {
             ui.checkbox(&mut self.persisted.tracks.formants_visible, "Formants");
             ui.checkbox(&mut self.persisted.tracks.intensity_visible, "Intensity");
             ui.checkbox(&mut self.persisted.tracks.vad_visible, "VAD (speech)");
+            // Per-lane DSP method selection. Each choice persists and
+            // invalidates the track cache, so the lane recomputes with the
+            // new method on the next frame. (MFCC has no lane yet, so it's
+            // not here; its method is selectable via the Python API.)
+            ui.menu_button("DSP methods", |ui| {
+                ui.menu_button(
+                    format!("f0 tracker: {}", self.persisted.tracks.pitch_method.label()),
+                    |ui| {
+                        for m in PitchMethodChoice::all() {
+                            ui.selectable_value(
+                                &mut self.persisted.tracks.pitch_method,
+                                m,
+                                m.label(),
+                            );
+                        }
+                    },
+                );
+                ui.menu_button(
+                    format!(
+                        "Formant LPC: {}",
+                        self.persisted.tracks.formant_lpc_method.label()
+                    ),
+                    |ui| {
+                        for m in LpcMethodChoice::all() {
+                            ui.selectable_value(
+                                &mut self.persisted.tracks.formant_lpc_method,
+                                m,
+                                m.label(),
+                            );
+                        }
+                    },
+                );
+            });
             // E12: embedding-heatmap submenu — tier picker (lists the
             // continuous_vector tiers of the active bundle) + colormap +
             // normalization. Hidden when no project / bundle is loaded.
