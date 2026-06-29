@@ -124,10 +124,12 @@ extends to pitch/formants.
    sub-1e-15 realfft-vs-NUMrealft differences. Bit-exact would need Praat's FFT.
    Bisected via parselmouth (`mel(100)`→27 filters, Gaussian-2 confirmed,
    triangle-in-Hz). Test un-ignored (c1+ < 15, c0 < 25).
-2. ✅ **`MfccParams` + `mfcc_with_params`** general pipeline + `librosa/kaldi/
-   praat` presets — built, golden-validated, agrees with the enum. *Remaining:*
-   collapse the enum dispatch to `mfcc_with_params` + delete the 3 now-redundant
-   dedicated fns (mechanical, agreement-test-guarded); add an `htk()` preset.
+2. ✅ **`MfccParams` + `mfcc_with_params`** general pipeline + presets — built,
+   golden-validated, agrees with the enum. Dispatch **collapsed** for Librosa +
+   Kaldi (now route through `mfcc_with_params`; dedicated fns deleted). *Still
+   pending (backlogged):* migrate the pipeline to **f64** so the Praat *preset*
+   matches the dedicated f64 `mfcc(Praat)` path, then route Praat through it too;
+   and an `htk()` preset (blocked on a power/magnitude knob + an HTK golden).
 3. **On-disk preset registry** (builtin authoritative + user-defined) + schema,
    alongside `model-registry`/`refdist-registry`. Needs serde on the `Mfcc*`
    enums + `MfccParams`.
