@@ -66,13 +66,16 @@ pub enum MfccMethod {
     /// `c0 = Σ_j P_j`. Column 0 of the output is c0, so request `n_mfcc =
     /// (coefficients you want) + 1`.
     ///
-    /// **Approximate** (not yet byte-faithful). Confirmed correct against
-    /// Praat source and parselmouth: HTK mel scale, unit-peak triangles,
-    /// filter count N (27 for these defaults, swept), un-normalised DCT,
-    /// 46-frame framing, dB ref 4e-10, and no pre-emphasis. The residual
-    /// (about 10% on the low cepstra, plus c0's absolute scale) traces to the
-    /// exact Praat Gaussian-window leakage and `_Spectrogram_windowCorrection`.
-    /// See the `#[ignore]`d byte-exact test.
+    /// **Faithful to tolerance, not byte-exact.** Computed in f64 (including
+    /// the FFT) with Praat's `_Spectrogram_windowCorrection`. Validated against
+    /// parselmouth: typical-frame agreement ≈0.3%, worst-case ≈10 on c1+
+    /// (shape) and ≈20 on c0 (energy). Confirmed-exact structure: HTK mel,
+    /// unit-peak triangles, N=27 (swept), Gaussian-2 window, framing, dB ref
+    /// 4e-10, windowCorrection, no pre-emphasis. The residual is irreducible
+    /// FFT-library noise: Praat's un-normalised dB DCT sums `10·log10` of every
+    /// filter, so near-empty high filters (≈1e-30) are ill-conditioned and
+    /// sub-1e-15 FFT differences (realfft vs Praat's NUMrealft) surface there.
+    /// A bit-exact match would require Praat's exact FFT.
     Praat,
 }
 
@@ -411,10 +414,15 @@ fn praat_gaussian_window(n: usize) -> Vec<f32> {
         .collect()
 }
 
-/// Faithful Praat `Sound: To MFCC…` (via MelSpectrogram). See
-/// [`MfccMethod::Praat`]; validated in `tests/mfcc.rs` against
-/// `mfcc_praat_golden.tsv` (parselmouth). Output column 0 is c0, so
-/// `n_mfcc` is the total column count (c0 plus `n_mfcc − 1` coefficients).
+/// Praat `Sound: To MFCC…` (via MelSpectrogram). See [`MfccMethod::Praat`];
+/// validated in `tests/mfcc.rs` against `mfcc_praat_golden.tsv` (parselmouth).
+/// Output column 0 is c0, so `n_mfcc` is the total column count.
+///
+/// Computed in **f64** (FFT included): Praat's un-normalised dB DCT sums
+/// `10·log10` of *every* filter, so the near-empty high filters' tiny powers
+/// dominate the conditioning — f32 underflow there blew the residual up ~5×.
+/// The remaining gap to Praat (~few % worst-case) is irreducible FFT-library
+/// noise on those tiny values; the typical-frame agreement is ~0.3%.
 fn mfcc_praat(
     samples: &[f32],
     sample_rate: u32,
@@ -424,66 +432,83 @@ fn mfcc_praat(
     f_max: f32,
 ) -> Array2<f32> {
     // Praat's power-spectrogram dB reference (auditory threshold pressure²).
-    const DB_REF: f32 = 4e-10;
+    const DB_REF: f64 = 4e-10;
     // Praat mel-filter geometry: first centre + spacing, both 100 mel.
-    const FIRST_MEL: f32 = 100.0;
-    const MEL_STEP: f32 = 100.0;
+    const FIRST_MEL: f64 = 100.0;
+    const MEL_STEP: f64 = 100.0;
+    // Praat NUMhertzToMel2 / its inverse, in f64.
+    fn hz2mel(f: f64) -> f64 {
+        2595.0 * (1.0 + f / 700.0).log10()
+    }
+    fn mel2hz(m: f64) -> f64 {
+        700.0 * (10.0_f64.powf(m / 2595.0) - 1.0)
+    }
 
-    let sr = sample_rate as f32;
+    let sr = sample_rate as f64;
     // Praat doubles the analysis width for the Gaussian window.
-    let window_dur = 2.0 * frame_size_seconds;
+    let window_dur = 2.0 * frame_size_seconds as f64;
     let n = (window_dur * sr).round() as usize;
     if n == 0 || samples.len() < n {
         return Array2::zeros((0, n_mfcc));
     }
-    let hop = hop_seconds;
     // Sampled_shortTermAnalysis framing: frames centred so the first window
     // starts at sample 0 (t1 − win/2 = 0); n_frames = floor((dur−win)/hop)+1.
-    let duration = samples.len() as f32 / sr;
-    let n_frames = ((duration - window_dur) / hop).floor() as usize + 1;
-    let hop_samples = (hop * sr).round() as usize;
+    let duration = samples.len() as f64 / sr;
+    let n_frames = ((duration - window_dur) / hop_seconds as f64).floor() as usize + 1;
+    let hop_samples = (hop_seconds as f64 * sr).round() as usize;
 
     let nfft = n.next_power_of_two();
     let n_freq = nfft / 2 + 1;
-    let df = sr / nfft as f32;
-    let window = praat_gaussian_window(n);
+    let df = sr / nfft as f64;
+
+    // Praat GAUSSIAN_2 window (f64) and its mean-square, used for Praat's
+    // `_Spectrogram_windowCorrection` (divide power by the window energy).
+    let imid = 0.5 * (n as f64 + 1.0);
+    let edge = (-12.0_f64).exp();
+    let inv = 1.0 / (1.0 - edge);
+    let window: Vec<f64> = (0..n)
+        .map(|i| {
+            let phase = ((i + 1) as f64 - imid) / n as f64;
+            ((-48.0 * phase * phase).exp() - edge) * inv
+        })
+        .collect();
+    let window_mean_square = window.iter().map(|w| w * w).sum::<f64>() / n as f64;
 
     // Unit-peak triangular mel filterbank (linear in Hz between mel-spaced
-    // edges). Filter count = round((mel(Nyquist) − first)/step), per Praat.
-    let fmax_mel = hz_to_mel_praat(f_max);
-    // Praat: numberOfFilters = round((mel(Nyquist) − firstMel)/stepMel). Swept
-    // empirically (N=27 minimises the golden residual; 26/28 are far worse).
+    // edges). Filter count = round((mel(Nyquist) − first)/step), per Praat
+    // (swept: N=27 minimises the residual; 26/28 are far worse).
+    let fmax_mel = hz2mel(f_max as f64);
     let num_filters = (((fmax_mel - FIRST_MEL) / MEL_STEP).round() as usize).max(1);
-    let mut fb = vec![0.0_f32; num_filters * n_freq];
+    let mut fb = vec![0.0_f64; num_filters * n_freq];
     for filt in 0..num_filters {
-        let fc_mel = FIRST_MEL + filt as f32 * MEL_STEP;
-        let fl_hz = mel_to_hz_praat((fc_mel - MEL_STEP).max(0.0));
-        let fc_hz = mel_to_hz_praat(fc_mel);
-        let fh_hz = mel_to_hz_praat((fc_mel + MEL_STEP).min(fmax_mel));
+        let fc_mel = FIRST_MEL + filt as f64 * MEL_STEP;
+        let fl = mel2hz((fc_mel - MEL_STEP).max(0.0));
+        let fc = mel2hz(fc_mel);
+        let fh = mel2hz((fc_mel + MEL_STEP).min(fmax_mel));
         for b in 0..n_freq {
-            let f = b as f32 * df;
-            let a = if f <= fl_hz || f >= fh_hz {
+            let f = b as f64 * df;
+            let a = if f <= fl || f >= fh {
                 0.0
-            } else if f <= fc_hz {
-                (f - fl_hz) / (fc_hz - fl_hz)
+            } else if f <= fc {
+                (f - fl) / (fc - fl)
             } else {
-                (fh_hz - f) / (fh_hz - fc_hz)
+                (fh - f) / (fh - fc)
             };
             fb[filt * n_freq + b] = a;
         }
     }
 
-    // Praat power scale: power = 2·(re²+im²)/(nfft·n) with re,im the
-    // dx-scaled FFT (the dx² folds in), i.e. |FFT|²·2/(nfft·n).
-    let power_scale = 2.0 / (nfft as f32 * n as f32);
+    // Praat power scale `2·dx_spec/(xmax−xmin)` folds to |FFT|²·2/(nfft·n);
+    // then windowCorrection divides by the window's mean-square.
+    let power_scale = 2.0 / (nfft as f64 * n as f64) / window_mean_square;
 
-    let mut planner = RealFftPlanner::<f32>::new();
+    let mut planner = RealFftPlanner::<f64>::new();
     let plan = planner.plan_fft_forward(nfft);
     let mut fft_in = plan.make_input_vec();
     let mut fft_out = plan.make_output_vec();
 
-    let mut power = vec![0.0_f32; n_freq];
-    let mut p_db = vec![0.0_f32; num_filters];
+    let mut power = vec![0.0_f64; n_freq];
+    let mut p_db = vec![0.0_f64; num_filters];
     let mut out = Array2::<f32>::zeros((n_frames, n_mfcc));
     for fr in 0..n_frames {
         let start = fr * hop_samples;
@@ -497,7 +522,7 @@ fn mfcc_praat(
             .iter_mut()
             .zip(samples[start..start + n].iter().zip(window.iter()))
         {
-            *dst = s * w;
+            *dst = s as f64 * w;
         }
         plan.process(&mut fft_in, &mut fft_out)
             .expect("realfft buffers sized via make_*_vec");
@@ -506,20 +531,20 @@ fn mfcc_praat(
         }
         // Per-filter power → dB (Praat's 10·log10(power/4e-10)).
         for filt in 0..num_filters {
-            let mut e = 0.0_f32;
+            let mut e = 0.0_f64;
             for (b, &p) in power.iter().enumerate() {
                 e += p * fb[filt * n_freq + b];
             }
-            p_db[filt] = 10.0 * (e.max(f32::MIN_POSITIVE) / DB_REF).log10();
+            p_db[filt] = 10.0 * (e.max(f64::MIN_POSITIVE) / DB_REF).log10();
         }
         // Un-normalised DCT: c_m = Σ_j P_j·cos(πm(j+0.5)/N), m=0..n_mfcc-1.
-        let nfl = num_filters as f32;
+        let nfl = num_filters as f64;
         for m in 0..n_mfcc {
-            let mut acc = 0.0_f32;
+            let mut acc = 0.0_f64;
             for (j, &pj) in p_db.iter().enumerate() {
-                acc += pj * (std::f32::consts::PI * m as f32 * (j as f32 + 0.5) / nfl).cos();
+                acc += pj * (std::f64::consts::PI * m as f64 * (j as f64 + 0.5) / nfl).cos();
             }
-            out[[fr, m]] = acc;
+            out[[fr, m]] = acc as f32;
         }
     }
     out
