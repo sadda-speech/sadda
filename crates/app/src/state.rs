@@ -97,10 +97,18 @@ pub struct PersistedState {
     /// show the active preset and flag edits as "(modified)".
     #[serde(default = "default_pitch_preset_id")]
     pub pitch_preset_id: String,
+    /// Id of the formant preset selected in View ▸ DSP methods (display only —
+    /// the actual params live in `tracks.formant_params`).
+    #[serde(default = "default_formant_preset_id")]
+    pub formant_preset_id: String,
 }
 
 fn default_pitch_preset_id() -> String {
     "praat-ac".to_string()
+}
+
+fn default_formant_preset_id() -> String {
+    "praat-burg".to_string()
 }
 
 /// Default UI zoom factor (native size). A free fn because `serde`'s
@@ -130,6 +138,7 @@ impl Default for PersistedState {
             embedding: EmbeddingHeatmapConfig::default(),
             mfcc: MfccLaneConfig::default(),
             pitch_preset_id: default_pitch_preset_id(),
+            formant_preset_id: default_formant_preset_id(),
         }
     }
 }
@@ -193,21 +202,27 @@ mod tests {
             cfg.pitch_params.method,
             sadda_engine::pitch::PitchMethod::Boersma
         );
-        assert_eq!(cfg.formant_lpc_method, LpcMethodChoice::Burg);
-        assert_eq!(LpcMethodChoice::default(), LpcMethodChoice::Burg);
+        assert_eq!(
+            cfg.formant_params,
+            sadda_engine::dsp::FormantsConfig::default()
+        );
+        assert_eq!(
+            cfg.formant_params.lpc_method,
+            sadda_engine::dsp::lpc::LpcMethod::Burg
+        );
     }
 
     #[test]
-    fn dsp_method_choices_enumerate_with_labels() {
-        assert_eq!(LpcMethodChoice::all().len(), 2);
-        for m in LpcMethodChoice::all() {
-            assert!(!m.label().is_empty());
-        }
-        // Changing the f0 method must change config equality (cache staleness).
+    fn dsp_method_changes_invalidate_cache() {
+        // Changing the f0 or formant method must change config equality
+        // (that's how the track cache detects staleness).
         let a = MeasureTrackConfig::default();
         let mut b = MeasureTrackConfig::default();
         b.pitch_params.method = sadda_engine::pitch::PitchMethod::Yin;
         assert_ne!(a, b);
+        let mut c = MeasureTrackConfig::default();
+        c.formant_params.lpc_method = sadda_engine::dsp::lpc::LpcMethod::Autocorrelation;
+        assert_ne!(a, c);
     }
 
     #[test]
@@ -484,33 +499,6 @@ impl Default for SpectrogramConfig {
     }
 }
 
-/// Which LPC method the GUI's formant lane uses. Local serde mirror of the
-/// engine's `LpcMethod`; `main.rs` maps it. Default = Burg (the engine
-/// default for formant tracking).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum LpcMethodChoice {
-    /// Burg lattice (Praat's formant method); the default.
-    #[default]
-    Burg,
-    /// Autocorrelation + Levinson–Durbin.
-    Autocorrelation,
-}
-
-impl LpcMethodChoice {
-    /// Short menu label.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Burg => "Burg (Praat, default)",
-            Self::Autocorrelation => "Autocorrelation",
-        }
-    }
-
-    /// All variants, in menu order.
-    pub fn all() -> [Self; 2] {
-        [Self::Burg, Self::Autocorrelation]
-    }
-}
-
 /// [`PersistedState`] so the user's lane visibility + analysis
 /// parameters survive a relaunch. Changing any field invalidates the
 /// app's track cache (see `MeasureTrackCache`), so this derives
@@ -528,11 +516,10 @@ pub struct MeasureTrackConfig {
     /// Runtime at runtime; the lane shows a hint if it isn't available.
     #[serde(default)]
     pub vad_visible: bool,
-    /// Number of formants to track (and plot, ascending: F1..Fn).
-    pub formant_count: usize,
     /// Formant lane y-axis maximum (Hz). Formants above this aren't
     /// plotted; the lane scales to a fixed range so vowels are
-    /// comparable across bundles.
+    /// comparable across bundles. (Display only — not part of the analysis
+    /// config, hence kept separate from `formant_params`.)
     pub formant_max_hz: f32,
     /// Intensity lane y-axis floor (dB-FS). The ceiling is fixed at 0.
     pub intensity_floor_db: f32,
@@ -545,9 +532,10 @@ pub struct MeasureTrackConfig {
     /// across launches; changing any field invalidates the track cache.
     #[serde(default)]
     pub pitch_params: sadda_engine::pitch::PitchParams,
-    /// LPC method used for the formant lane.
+    /// Full formant spec for the formant lane (LPC method + count + analysis
+    /// knobs). Changing any field invalidates the track cache.
     #[serde(default)]
-    pub formant_lpc_method: LpcMethodChoice,
+    pub formant_params: sadda_engine::dsp::FormantsConfig,
 }
 
 fn default_vad_threshold() -> f32 {
@@ -604,14 +592,14 @@ impl Default for MeasureTrackConfig {
             formants_visible: false,
             intensity_visible: false,
             vad_visible: false,
-            formant_count: 5,
             formant_max_hz: 5500.0,
             intensity_floor_db: -80.0,
             vad_threshold: 0.5,
             // Default: Boersma + Praat-default config (75–500 Hz, voicing 0.45)
             // — same numbers the old f0_min/max/voicing fields carried.
             pitch_params: sadda_engine::pitch::PitchParams::default(),
-            formant_lpc_method: LpcMethodChoice::Burg,
+            // Burg + 5 formants — same as the old formant_count/lpc_method.
+            formant_params: sadda_engine::dsp::FormantsConfig::default(),
         }
     }
 }

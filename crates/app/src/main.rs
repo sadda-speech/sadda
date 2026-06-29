@@ -38,10 +38,10 @@ use crate::sadda_app::{
     with_snapshot_active,
 };
 use crate::state::{
-    ColormapKind, EmbeddingHeatmapConfig, EnvelopeCache, LpcMethodChoice, MeasureTrackConfig,
-    MfccLaneConfig, PersistedState, PlotPalette, RefdistOverlay, SpectrogramConfig, ThemePref,
-    TimelineState, build_envelope_for_range, colormap_bake, format_reference_lane_caption,
-    nearest_frame_index, normalize_embedding, power_to_db_normalized, truncate_label,
+    ColormapKind, EmbeddingHeatmapConfig, EnvelopeCache, MeasureTrackConfig, MfccLaneConfig,
+    PersistedState, PlotPalette, RefdistOverlay, SpectrogramConfig, ThemePref, TimelineState,
+    build_envelope_for_range, colormap_bake, format_reference_lane_caption, nearest_frame_index,
+    normalize_embedding, power_to_db_normalized, truncate_label,
 };
 
 /// Maximum characters drawn inside an interval rectangle or above a
@@ -314,6 +314,9 @@ struct SaddaApp {
     /// Open f0 per-parameter editor (a working copy of `tracks.pitch_params`).
     /// `None` when the editor modal is closed.
     pitch_editor: Option<sadda_engine::pitch::PitchParams>,
+    /// Open formant per-parameter editor (a working copy of
+    /// `tracks.formant_params`). `None` when closed.
+    formant_editor: Option<FormantsConfig>,
     /// Shared timeline state — cursor, view window, duration —
     /// plumbed into every C5+ pane. Reset on bundle change.
     timeline: TimelineState,
@@ -1879,6 +1882,7 @@ impl SaddaApp {
             mfcc_error: None,
             mfcc_editor: None,
             pitch_editor: None,
+            formant_editor: None,
             timeline: TimelineState::default(),
             playback: None,
             playback_origin: None,
@@ -6549,6 +6553,13 @@ fn build_embedding_heatmap_texture(
     })
 }
 
+fn lpc_method_label(m: LpcMethod) -> &'static str {
+    match m {
+        LpcMethod::Burg => "Burg (Praat, default)",
+        LpcMethod::Autocorrelation => "Autocorrelation (Levinson–Durbin)",
+    }
+}
+
 fn pitch_method_label(m: PitchMethod) -> &'static str {
     match m {
         PitchMethod::Boersma => "Boersma (Praat, default)",
@@ -6754,17 +6765,10 @@ fn compute_measure_tracks(env: &EnvelopeCache, cfg: MeasureTrackConfig) -> Measu
     }
 
     let formants = if cfg.formants_visible {
-        let fcfg = FormantsConfig {
-            n_formants: cfg.formant_count,
-            // LPC method is user-selectable (View ▸ DSP methods); default Burg.
-            lpc_method: match cfg.formant_lpc_method {
-                LpcMethodChoice::Burg => LpcMethod::Burg,
-                LpcMethodChoice::Autocorrelation => LpcMethod::Autocorrelation,
-            },
-            ..FormantsConfig::default()
-        };
         let t = std::time::Instant::now();
-        let r = formants(&env.mono_samples, sr, &fcfg);
+        // Full formant spec (LPC method + count + knobs) is user-selectable via
+        // View ▸ DSP methods (preset picker + parameter editor).
+        let r = formants(&env.mono_samples, sr, &cfg.formant_params);
         perf_log("  · formants", t.elapsed());
         r
     } else {
@@ -8546,6 +8550,7 @@ impl eframe::App for SaddaApp {
         self.criteria_editor_window(ui.ctx());
         self.mfcc_param_editor_window(ui.ctx());
         self.f0_param_editor_window(ui.ctx());
+        self.formant_param_editor_window(ui.ctx());
         self.targets_panel_window(ui.ctx());
         self.dashboard_window(ui.ctx());
         self.notebook_window(ui.ctx());
@@ -9037,21 +9042,18 @@ impl SaddaApp {
                     if f0_modified { " (modified)" } else { "" }
                 );
                 ui.menu_button(f0_label, |ui| self.f0_preset_submenu(ui));
-                ui.menu_button(
-                    format!(
-                        "Formant LPC: {}",
-                        self.persisted.tracks.formant_lpc_method.label()
-                    ),
-                    |ui| {
-                        for m in LpcMethodChoice::all() {
-                            ui.selectable_value(
-                                &mut self.persisted.tracks.formant_lpc_method,
-                                m,
-                                m.label(),
-                            );
-                        }
-                    },
+
+                let fmt_modified = sadda_engine::dsp::formant_builtin_presets()
+                    .into_iter()
+                    .find(|p| p.id == self.persisted.formant_preset_id)
+                    .map(|p| p.params != self.persisted.tracks.formant_params)
+                    .unwrap_or(false);
+                let fmt_label = format!(
+                    "Formants: {}{}",
+                    self.persisted.formant_preset_id,
+                    if fmt_modified { " (modified)" } else { "" }
                 );
+                ui.menu_button(fmt_label, |ui| self.formant_preset_submenu(ui));
             });
             // E12: embedding-heatmap submenu — tier picker (lists the
             // continuous_vector tiers of the active bundle) + colormap +
@@ -9656,6 +9658,130 @@ impl SaddaApp {
             }
         } else if close || !keep_open {
             self.pitch_editor = None;
+        }
+    }
+
+    /// View ▸ DSP methods ▸ Formants submenu: a preset picker (built-in + user)
+    /// and an Edit-parameters button. Selecting a preset sets the whole
+    /// `tracks.formant_params`, driving the formant lane.
+    fn formant_preset_submenu(&mut self, ui: &mut egui::Ui) {
+        let presets = sadda_engine::dsp::formant_preset::FormantPresetStore::user_default()
+            .map(|s| s.list())
+            .unwrap_or_else(|_| sadda_engine::dsp::formant_builtin_presets());
+        for preset in &presets {
+            let selected = self.persisted.formant_preset_id == preset.id;
+            let label = if preset.title.is_empty() {
+                preset.id.clone()
+            } else {
+                preset.title.clone()
+            };
+            if ui.radio(selected, label).clicked() {
+                self.persisted.formant_preset_id = preset.id.clone();
+                self.persisted.tracks.formant_params = preset.params;
+            }
+        }
+        ui.separator();
+        if ui.button("Edit parameters…").clicked() {
+            self.formant_editor = Some(self.persisted.tracks.formant_params);
+            ui.close();
+        }
+    }
+
+    /// Modal per-parameter editor for the formant lane's `FormantsConfig`.
+    /// Apply writes it back to `tracks.formant_params` (the lane recomputes).
+    fn formant_param_editor_window(&mut self, ctx: &egui::Context) {
+        if self.formant_editor.is_none() {
+            return;
+        }
+        let mut apply = false;
+        let mut close = false;
+        let mut keep_open = true;
+        egui::Window::new("Formant parameters")
+            .open(&mut keep_open)
+            .resizable(true)
+            .default_width(380.0)
+            .show(ctx, |ui| {
+                let c = self.formant_editor.as_mut().expect("checked above");
+                ui.label(
+                    egui::RichText::new(
+                        "Editing these makes it a custom parameter set (the menu flags it \
+                         as modified).",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.separator();
+                egui::Grid::new("formant_param_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("LPC method");
+                        egui::ComboBox::from_id_salt("formant_method")
+                            .selected_text(lpc_method_label(c.lpc_method))
+                            .show_ui(ui, |ui| {
+                                for m in [LpcMethod::Burg, LpcMethod::Autocorrelation] {
+                                    ui.selectable_value(&mut c.lpc_method, m, lpc_method_label(m));
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Formants (n)");
+                        ui.add(egui::DragValue::new(&mut c.n_formants).range(1..=8));
+                        ui.end_row();
+                        ui.label("Pre-emphasis");
+                        ui.add(
+                            egui::DragValue::new(&mut c.pre_emphasis)
+                                .speed(0.01)
+                                .range(0.0..=1.0),
+                        );
+                        ui.end_row();
+                        ui.label("Max bandwidth (Hz)");
+                        ui.add(
+                            egui::DragValue::new(&mut c.max_bandwidth_hz)
+                                .speed(10.0)
+                                .range(50.0..=5000.0),
+                        );
+                        ui.end_row();
+                        ui.label("Min frequency (Hz)");
+                        ui.add(
+                            egui::DragValue::new(&mut c.min_frequency_hz)
+                                .speed(1.0)
+                                .range(0.0..=1000.0),
+                        );
+                        ui.end_row();
+                        ui.label("Frame size (s)");
+                        ui.add(
+                            egui::DragValue::new(&mut c.frame_size_seconds)
+                                .speed(0.001)
+                                .range(0.005..=0.2),
+                        );
+                        ui.end_row();
+                        ui.label("Hop (s)");
+                        ui.add(
+                            egui::DragValue::new(&mut c.hop_seconds)
+                                .speed(0.001)
+                                .range(0.001..=0.1),
+                        );
+                        ui.end_row();
+                    });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if apply {
+            if let Some(params) = self.formant_editor.take() {
+                self.persisted.tracks.formant_params = params;
+            }
+        } else if close || !keep_open {
+            self.formant_editor = None;
         }
     }
 
@@ -10325,7 +10451,7 @@ impl SaddaApp {
             return;
         };
         let frames = &tc.formants;
-        let n = cfg.formant_count;
+        let n = cfg.formant_params.n_formants;
         let palette = self.persisted.palette;
         measure_lane(
             ui,
