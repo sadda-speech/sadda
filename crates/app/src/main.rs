@@ -6596,8 +6596,9 @@ fn mfcc_pnorm_label(n: sadda_engine::dsp::MfccPowerNorm) -> &'static str {
 }
 
 /// Computes the MFCCs for the bundle under `cfg.params`, transposes to a
-/// coefficient-major matrix (optionally dropping c0), normalizes per
-/// coefficient, colormaps it, and uploads it as an egui texture. Mirrors
+/// coefficient-major matrix, applies the c0 display mode (separate scale + gap
+/// / inline / hidden), normalizes per coefficient, colormaps it, and uploads
+/// it as an egui texture. Mirrors
 /// [`build_embedding_heatmap_texture`] — an MFCC result is the same
 /// `(rows × frames)` shape as an embedding tier. Returns the cache or an
 /// actionable message (selection too short → shown inside the lane).
@@ -6613,29 +6614,22 @@ fn build_mfcc_heatmap_texture(
             "selection is too short to compute an MFCC frame at these settings".to_string(),
         );
     }
-    // Drop c0 (overall log-energy, orders larger than c1+) from the display
-    // when asked, so the per-coefficient normalization isn't anchored by the
-    // energy row. Needs at least two coefficients to have anything left.
-    let drop_c0 = cfg.drop_c0 && n_mfcc > 1;
-    let row0 = if drop_c0 { 1 } else { 0 };
-    let n_rows = n_mfcc - row0;
-
-    // Coefficient-major / frame-minor `[n_rows * n_frames]` f32 buffer for
-    // `colormap_bake` (rows = coefficients, columns = frames).
-    let mut row_major: Vec<f32> = vec![0.0; n_rows * n_frames];
+    // Full coefficient-major / frame-minor `[n_mfcc * n_frames]` f32 buffer
+    // (rows = coefficients c0..c{n−1}, columns = frames).
+    let mut row_major: Vec<f32> = vec![0.0; n_mfcc * n_frames];
     for f in 0..n_frames {
-        for c in 0..n_rows {
-            row_major[c * n_frames + f] = mfcc[(f, c + row0)];
+        for c in 0..n_mfcc {
+            row_major[c * n_frames + f] = mfcc[(f, c)];
         }
     }
 
     // Bucket the time axis if longer than the texture cap (as the spectrogram
     // and embedding heatmap do).
-    let (display_width, display) = if n_frames > MAX_SPECTROGRAM_WIDTH {
+    let (display_width, full) = if n_frames > MAX_SPECTROGRAM_WIDTH {
         let stride = n_frames.div_ceil(MAX_SPECTROGRAM_WIDTH);
         let new_width = n_frames.div_ceil(stride);
-        let mut out = vec![0.0f32; n_rows * new_width];
-        for c in 0..n_rows {
+        let mut out = vec![0.0f32; n_mfcc * new_width];
+        for c in 0..n_mfcc {
             for x in 0..new_width {
                 let start = x * stride;
                 let end = (start + stride).min(n_frames);
@@ -6650,10 +6644,45 @@ fn build_mfcc_heatmap_texture(
     } else {
         (n_frames, row_major)
     };
+    let w = display_width;
+    let row_bytes = w * 4;
 
-    let normalized = normalize_embedding(&display, n_rows, display_width, cfg.normalization);
-    let rgba = colormap_bake(&normalized, display_width, n_rows, cfg.colormap);
-    let image = egui::ColorImage::from_rgba_unmultiplied([display_width, n_rows], &rgba);
+    // c0 (overall log-energy) is orders larger than the spectral-shape
+    // coefficients c1+. Three display modes (the `Separate` default keeps it
+    // visible but on its own scale + a gap, so it can't be misread as just
+    // another shape coefficient, and can't anchor a shared-scale normalization):
+    let bake = |rows_buf: &[f32], rows: usize, mode| {
+        let norm = normalize_embedding(rows_buf, rows, w, mode);
+        colormap_bake(&norm, w, rows, cfg.colormap)
+    };
+    let (n_rows, rgba) = match cfg.c0 {
+        crate::state::MfccC0Display::Hidden if n_mfcc > 1 => {
+            let rows = n_mfcc - 1;
+            (rows, bake(&full[w..], rows, cfg.normalization)) // skip the c0 row
+        }
+        crate::state::MfccC0Display::Separate if n_mfcc > 1 => {
+            // c1+ on the chosen scale; c0 always on its own (per-coeff z-score),
+            // stacked below a small transparent gap.
+            let rows_rest = n_mfcc - 1;
+            let rgba_rest = bake(&full[w..], rows_rest, cfg.normalization);
+            let rgba_c0 = bake(
+                &full[..w],
+                1,
+                crate::state::EmbeddingNormalization::PerDimZScore,
+            );
+            let gap = 1usize; // transparent separator row
+            let total = rows_rest + gap + 1;
+            let mut rgba = vec![0u8; total * row_bytes]; // gap rows stay alpha=0
+            rgba[..rgba_rest.len()].copy_from_slice(&rgba_rest);
+            let c0_off = (rows_rest + gap) * row_bytes;
+            rgba[c0_off..c0_off + rgba_c0.len()].copy_from_slice(&rgba_c0);
+            (total, rgba)
+        }
+        // Inline (or the single-coefficient fallback): one shared scale.
+        _ => (n_mfcc, bake(&full, n_mfcc, cfg.normalization)),
+    };
+
+    let image = egui::ColorImage::from_rgba_unmultiplied([w, n_rows], &rgba);
     let texture = ctx.load_texture("mfcc_heatmap", image, egui::TextureOptions::LINEAR);
 
     Ok(MfccCache {
@@ -9195,7 +9224,10 @@ impl SaddaApp {
         }
 
         ui.separator();
-        ui.checkbox(&mut self.persisted.mfcc.drop_c0, "Hide c0 (energy)");
+        ui.label("c0 (energy)");
+        for mode in crate::state::MfccC0Display::all() {
+            ui.radio_value(&mut self.persisted.mfcc.c0, mode, mode.label());
+        }
 
         ui.separator();
         ui.label("Colormap");
@@ -10435,10 +10467,10 @@ impl SaddaApp {
             .find(|p| p.id == preset_id)
             .map(|p| p.params != self.persisted.mfcc.params)
             .unwrap_or(false);
-        let c0_note = if self.persisted.mfcc.drop_c0 {
-            " · c0 hidden"
-        } else {
-            ""
+        let c0_note = match self.persisted.mfcc.c0 {
+            crate::state::MfccC0Display::Hidden => " · c0 hidden",
+            crate::state::MfccC0Display::Separate => " · c0 separate",
+            crate::state::MfccC0Display::Inline => "",
         };
         ui.horizontal(|ui| {
             ui.add_space(SIGNAL_LEFT_GUTTER + 4.0);

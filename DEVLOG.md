@@ -68,13 +68,14 @@ is the deeper "*communicating parameter effects*" design, not a basic display.
 - `MfccLaneConfig` in `state.rs` persists the active preset id + the engine
   `MfccParams` **directly** (now that it's serde+PartialEq+Clone — a 21-field
   mirror would be pure drift-prone duplication; documented the departure from
-  the `*MethodChoice`-mirror convention) + colormap/normalization/`drop_c0`.
+  the `*MethodChoice`-mirror convention) + colormap/normalization/c0-display.
 - `build_mfcc_heatmap_texture` + `rebuild_mfcc_if_stale` + `mfcc_lane_pane`
-  mirror the embedding-heatmap trio (synchronous; MFCC is cheap). **c0
-  (energy) is dropped by default** and normalization is per-coefficient
-  z-score — the two things that make an MFCC heatmap legible (c0 is orders
-  larger than c1+). Lane caption flags "(modified)" when params ≠ the named
-  preset, and "c0 hidden".
+  mirror the embedding-heatmap trio (synchronous; MFCC is cheap). c0 (energy)
+  is orders larger than c1+, so it gets a 3-way display (`MfccC0Display`):
+  **Separate** (default — on its own per-coeff scale, set apart by a small
+  transparent gap), **Inline** (shared scale), **Hidden**; combined with
+  per-coefficient z-score normalization this keeps the heatmap legible. Lane
+  caption flags "(modified)" when params ≠ the named preset, and the c0 mode.
 - **View ▸ MFCC** submenu: show toggle, preset picker (built-in + on-disk),
   colormap/normalization/c0 knobs, and **Edit parameters…** → a modal
   (`rubric_editor_window` pattern) editing all scalar/bool/enum knobs with

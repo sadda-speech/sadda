@@ -848,10 +848,10 @@ pub struct MfccLaneConfig {
     /// from washing out the rest of the heatmap.
     #[serde(default)]
     pub normalization: EmbeddingNormalization,
-    /// Omit c0 (the energy coefficient) from the display — on by default, so
-    /// the visible rows are the spectral-shape coefficients (c1+).
-    #[serde(default = "default_true")]
-    pub drop_c0: bool,
+    /// How c0 (the overall log-energy coefficient) is shown. Defaults to
+    /// `Separate` — visible but on its own scale, set apart by a small gap.
+    #[serde(default)]
+    pub c0: MfccC0Display,
 }
 
 fn default_mfcc_preset_id() -> String {
@@ -866,10 +866,6 @@ fn default_mfcc_colormap() -> ColormapKind {
     ColormapKind::Cividis
 }
 
-fn default_true() -> bool {
-    true
-}
-
 impl Default for MfccLaneConfig {
     fn default() -> Self {
         Self {
@@ -878,8 +874,42 @@ impl Default for MfccLaneConfig {
             params: default_mfcc_params(),
             colormap: default_mfcc_colormap(),
             normalization: EmbeddingNormalization::default(),
-            drop_c0: true,
+            c0: MfccC0Display::default(),
         }
+    }
+}
+
+/// How the MFCC lane displays c0 (overall log-energy). c0 is orders larger
+/// than the spectral-shape coefficients c1+, so mixing it in is misleading
+/// (and, under a shared-scale normalization, washes the rest out).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MfccC0Display {
+    /// Show c0 on its own normalization scale, separated from c1+ by a small
+    /// gap. The default — keeps the energy visible without it dominating or
+    /// being mistaken for a shape coefficient.
+    #[default]
+    Separate,
+    /// Show c0 in the matrix on the same scale as the other coefficients.
+    Inline,
+    /// Omit c0 entirely; show only c1+.
+    Hidden,
+}
+
+impl MfccC0Display {
+    pub fn label(self) -> &'static str {
+        match self {
+            MfccC0Display::Separate => "Separate scale + gap",
+            MfccC0Display::Inline => "Inline (shared scale)",
+            MfccC0Display::Hidden => "Hidden",
+        }
+    }
+
+    pub fn all() -> [MfccC0Display; 3] {
+        [
+            MfccC0Display::Separate,
+            MfccC0Display::Inline,
+            MfccC0Display::Hidden,
+        ]
     }
 }
 
