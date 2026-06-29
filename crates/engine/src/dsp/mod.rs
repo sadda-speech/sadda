@@ -11,6 +11,7 @@ pub mod intensity;
 pub mod lpc;
 pub mod ltas;
 pub mod mfcc;
+pub mod preset;
 pub mod roots;
 pub mod spectrogram;
 pub mod stft;
@@ -24,6 +25,7 @@ pub use mfcc::{
     MelScaleKind, MfccDct, MfccFft, MfccFilterNorm, MfccFilters, MfccFraming, MfccLog, MfccMethod,
     MfccParams, MfccPowerNorm, MfccWindow, log_mel, log_mel_whisper, mfcc, mfcc_with_params,
 };
+pub use preset::{MfccPreset, MfccPresetStore, PresetLineage, builtin_presets, is_valid_id};
 pub use roots::polynomial_roots;
 pub use spectrogram::power_spectrogram;
 pub use stft::{Shape, stft};

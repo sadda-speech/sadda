@@ -85,6 +85,7 @@ pub enum MfccMethod {
 
 use ndarray::Array2;
 use realfft::RealFftPlanner;
+use serde::{Deserialize, Serialize};
 
 use crate::dsp::windowing::{hann, hann_periodic};
 
@@ -633,7 +634,8 @@ fn dct_ii_matrix(n_mels: usize, n_mfcc: usize) -> Vec<f32> {
 // ============================================================================
 
 /// Mel-scale convention.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MelScaleKind {
     /// librosa default — piecewise linear-then-log (Slaney 1998).
     Slaney,
@@ -642,7 +644,8 @@ pub enum MelScaleKind {
 }
 
 /// Analysis window function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MfccWindow {
     /// Periodic Hann (librosa).
     PeriodicHann,
@@ -655,7 +658,8 @@ pub enum MfccWindow {
 }
 
 /// Frame placement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MfccFraming {
     /// librosa `center=True`: zero-pad win/2 each side, `n = 1 + len/hop`.
     Centered,
@@ -664,7 +668,8 @@ pub enum MfccFraming {
 }
 
 /// FFT length rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MfccFft {
     /// FFT size equals the window length (librosa).
     WindowLength,
@@ -673,10 +678,14 @@ pub enum MfccFft {
 }
 
 /// Triangular filterbank layout.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MfccFilters {
     /// `n` filters spread over `[f_min, f_max]` (librosa, Kaldi).
-    NMels(usize),
+    NMels {
+        /// Number of triangular filters.
+        n_mels: usize,
+    },
     /// Centres every `step_mel` from `first_mel`, count derived up to the
     /// Nyquist mel (Praat — `n_mels` does not apply).
     MelSpacing {
@@ -688,7 +697,8 @@ pub enum MfccFilters {
 }
 
 /// Triangle height normalization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MfccFilterNorm {
     /// Slaney area norm: height `2/(f_high − f_low)` (librosa).
     AreaSlaney,
@@ -697,7 +707,8 @@ pub enum MfccFilterNorm {
 }
 
 /// Log compression of mel energies.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MfccLog {
     /// `10·log10(max(e, amin)/reference)`, with an optional *global* `top_db`
     /// dynamic-range floor (librosa: ref 1, amin 1e-10, top_db 80; Praat:
@@ -708,6 +719,7 @@ pub enum MfccLog {
         /// Energy floor applied before the log (librosa 1e-10).
         amin: f32,
         /// Optional global dynamic-range floor in dB (librosa 80).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         top_db: Option<f32>,
     },
     /// `ln(max(e, floor))` (Kaldi).
@@ -718,7 +730,8 @@ pub enum MfccLog {
 }
 
 /// DCT normalization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MfccDct {
     /// Orthonormal DCT-II (librosa, Kaldi).
     Ortho,
@@ -727,7 +740,8 @@ pub enum MfccDct {
 }
 
 /// Power-spectrum scaling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MfccPowerNorm {
     /// Raw `|FFT|²` (librosa, Kaldi).
     Raw,
@@ -739,7 +753,7 @@ pub enum MfccPowerNorm {
 /// ([`MfccParams::librosa`] / [`kaldi`](MfccParams::kaldi) /
 /// [`praat`](MfccParams::praat)) and then override individual fields, or
 /// construct from scratch. Run via [`mfcc_with_params`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MfccParams {
     /// Base analysis-window duration in seconds (before `window_duration_factor`).
     pub frame_size_seconds: f32,
@@ -807,7 +821,7 @@ impl MfccParams {
             remove_dc: false,
             pre_emphasis: 0.0,
             mel_scale: MelScaleKind::Slaney,
-            filters: MfccFilters::NMels(n_mels),
+            filters: MfccFilters::NMels { n_mels },
             filter_norm: MfccFilterNorm::AreaSlaney,
             triangle_in_mel: false,
             exclude_nyquist_bin: false,
@@ -844,7 +858,7 @@ impl MfccParams {
             remove_dc: true,
             pre_emphasis: 0.97,
             mel_scale: MelScaleKind::Htk,
-            filters: MfccFilters::NMels(n_mels),
+            filters: MfccFilters::NMels { n_mels },
             filter_norm: MfccFilterNorm::UnitPeak,
             triangle_in_mel: true,
             exclude_nyquist_bin: true,
@@ -915,7 +929,7 @@ fn mel_filterbank_general(
     // norm). Triangle slopes are then evaluated in mel (Kaldi) or Hz (others).
     let mut mel_edges: Vec<(f32, f32, f32)> = Vec::new();
     match p.filters {
-        MfccFilters::NMels(n) => {
+        MfccFilters::NMels { n_mels: n } => {
             let mlo = to_mel(p.f_min);
             let mhi = to_mel(p.f_max);
             let e: Vec<f32> = (0..n + 2)
