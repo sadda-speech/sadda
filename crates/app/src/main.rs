@@ -25,7 +25,7 @@ use sadda_engine::{LiveConfig, LiveResults, LiveSession, Project, StoppedSession
 use sadda_engine::dsp::{
     FormantFrame, FormantsConfig, IntensityFrame, LpcMethod, formants, intensity,
 };
-use sadda_engine::pitch::{PitchConfig, PitchFrame, PitchMethod, pitch};
+use sadda_engine::pitch::{PitchFrame, PitchMethod, pitch_with_params};
 // D10 refdist overlays: resolve a distribution from the store and turn
 // it into a band the lane draws behind its contour.
 use sadda_engine::{Histogram, MeasureKind, RefDist, RefdistStore, Summary};
@@ -39,10 +39,9 @@ use crate::sadda_app::{
 };
 use crate::state::{
     ColormapKind, EmbeddingHeatmapConfig, EnvelopeCache, LpcMethodChoice, MeasureTrackConfig,
-    MfccLaneConfig, PersistedState, PitchMethodChoice, PlotPalette, RefdistOverlay,
-    SpectrogramConfig, ThemePref, TimelineState, build_envelope_for_range, colormap_bake,
-    format_reference_lane_caption, nearest_frame_index, normalize_embedding,
-    power_to_db_normalized, truncate_label,
+    MfccLaneConfig, PersistedState, PlotPalette, RefdistOverlay, SpectrogramConfig, ThemePref,
+    TimelineState, build_envelope_for_range, colormap_bake, format_reference_lane_caption,
+    nearest_frame_index, normalize_embedding, power_to_db_normalized, truncate_label,
 };
 
 /// Maximum characters drawn inside an interval rectangle or above a
@@ -312,6 +311,9 @@ struct SaddaApp {
     /// Open MFCC per-parameter editor (a working copy of the lane's params).
     /// `None` when the editor modal is closed.
     mfcc_editor: Option<MfccParamsEditor>,
+    /// Open f0 per-parameter editor (a working copy of `tracks.pitch_params`).
+    /// `None` when the editor modal is closed.
+    pitch_editor: Option<sadda_engine::pitch::PitchParams>,
     /// Shared timeline state — cursor, view window, duration —
     /// plumbed into every C5+ pane. Reset on bundle change.
     timeline: TimelineState,
@@ -1876,6 +1878,7 @@ impl SaddaApp {
             active_mfcc: None,
             mfcc_error: None,
             mfcc_editor: None,
+            pitch_editor: None,
             timeline: TimelineState::default(),
             playback: None,
             playback_origin: None,
@@ -6358,6 +6361,9 @@ struct SpectrogramImage {
 
 /// A completed async analysis job (P2). It carries the bundle + config it was
 /// computed for, so the UI installs it only if that's still what's selected.
+// Variants differ in size (the Tracks config embeds the full PitchParams);
+// this is a one-shot channel message sent rarely, so the size gap is moot.
+#[allow(clippy::large_enum_variant)]
 enum AnalysisResult {
     Spectrogram {
         bundle_id: i64,
@@ -6543,6 +6549,17 @@ fn build_embedding_heatmap_texture(
     })
 }
 
+fn pitch_method_label(m: PitchMethod) -> &'static str {
+    match m {
+        PitchMethod::Boersma => "Boersma (Praat, default)",
+        PitchMethod::Yin => "YIN",
+        PitchMethod::PYin => "pYIN (librosa)",
+        PitchMethod::Swipe => "SWIPE′",
+        PitchMethod::Autocorrelation => "Autocorrelation (naive)",
+        PitchMethod::WindowedAutocorrelation => "Windowed autocorrelation",
+    }
+}
+
 fn mfcc_window_label(w: sadda_engine::dsp::MfccWindow) -> &'static str {
     use sadda_engine::dsp::MfccWindow::*;
     match w {
@@ -6715,26 +6732,13 @@ fn compute_measure_tracks(env: &EnvelopeCache, cfg: MeasureTrackConfig) -> Measu
     let mut vad_error = None;
     if let Some(audio) = &audio {
         if cfg.f0_visible {
-            let pcfg = PitchConfig {
-                min_freq_hz: cfg.f0_min_hz,
-                max_freq_hz: cfg.f0_max_hz,
-                voicing_threshold: cfg.f0_voicing_threshold,
-                ..PitchConfig::default()
-            };
             let t = std::time::Instant::now();
-            // Tracker is user-selectable (View ▸ DSP methods); default is
-            // Boersma — octave-robust, unlike the simpler windowed-
-            // autocorrelation tracker, which latched onto subharmonics of
-            // clean tones (150→75, 250→83.3). This lane is computed async (P2).
-            let method = match cfg.pitch_method {
-                PitchMethodChoice::Boersma => PitchMethod::Boersma,
-                PitchMethodChoice::Autocorrelation => PitchMethod::Autocorrelation,
-                PitchMethodChoice::WindowedAutocorrelation => PitchMethod::WindowedAutocorrelation,
-                PitchMethodChoice::Yin => PitchMethod::Yin,
-                PitchMethodChoice::PYin => PitchMethod::PYin,
-                PitchMethodChoice::Swipe => PitchMethod::Swipe,
-            };
-            f0 = pitch(audio, &pcfg, method);
+            // The full f0 spec (method + config) is user-selectable via
+            // View ▸ DSP methods (preset picker + parameter editor). Default
+            // is Boersma at Praat's defaults — octave-robust, unlike the
+            // simpler windowed-autocorrelation tracker, which latched onto
+            // subharmonics of clean tones (150→75, 250→83.3). Computed async (P2).
+            f0 = pitch_with_params(audio, &cfg.pitch_params);
             perf_log("  · f0", t.elapsed());
         }
         if cfg.vad_visible {
@@ -8541,6 +8545,7 @@ impl eframe::App for SaddaApp {
         self.rubric_editor_window(ui.ctx());
         self.criteria_editor_window(ui.ctx());
         self.mfcc_param_editor_window(ui.ctx());
+        self.f0_param_editor_window(ui.ctx());
         self.targets_panel_window(ui.ctx());
         self.dashboard_window(ui.ctx());
         self.notebook_window(ui.ctx());
@@ -9016,22 +9021,22 @@ impl SaddaApp {
             ui.checkbox(&mut self.persisted.tracks.intensity_visible, "Intensity");
             ui.checkbox(&mut self.persisted.tracks.vad_visible, "VAD (speech)");
             // Per-lane DSP method selection. Each choice persists and
-            // invalidates the track cache, so the lane recomputes with the
-            // new method on the next frame. (MFCC has no lane yet, so it's
-            // not here; its method is selectable via the Python API.)
+            // invalidates the track cache, so the lane recomputes on the next
+            // frame. (MFCC has its own lane + preset picker under View ▸ MFCC.)
             ui.menu_button("DSP methods", |ui| {
-                ui.menu_button(
-                    format!("f0 tracker: {}", self.persisted.tracks.pitch_method.label()),
-                    |ui| {
-                        for m in PitchMethodChoice::all() {
-                            ui.selectable_value(
-                                &mut self.persisted.tracks.pitch_method,
-                                m,
-                                m.label(),
-                            );
-                        }
-                    },
+                // Flag when the live params drift from the named preset (built-ins
+                // checked in-memory; no per-frame disk I/O).
+                let f0_modified = sadda_engine::pitch_preset::pitch_builtin_presets()
+                    .into_iter()
+                    .find(|p| p.id == self.persisted.pitch_preset_id)
+                    .map(|p| p.params != self.persisted.tracks.pitch_params)
+                    .unwrap_or(false);
+                let f0_label = format!(
+                    "f0: {}{}",
+                    self.persisted.pitch_preset_id,
+                    if f0_modified { " (modified)" } else { "" }
                 );
+                ui.menu_button(f0_label, |ui| self.f0_preset_submenu(ui));
                 ui.menu_button(
                     format!(
                         "Formant LPC: {}",
@@ -9491,6 +9496,166 @@ impl SaddaApp {
             }
         } else if close || !keep_open {
             self.mfcc_editor = None;
+        }
+    }
+
+    /// View ▸ DSP methods ▸ f0 submenu: preset picker (built-in + user pitch
+    /// presets) + Edit-parameters. Selecting a preset sets the whole
+    /// `tracks.pitch_params` (method + config), driving the f0 lane.
+    fn f0_preset_submenu(&mut self, ui: &mut egui::Ui) {
+        let presets = sadda_engine::pitch_preset::PitchPresetStore::user_default()
+            .map(|s| s.list())
+            .unwrap_or_else(|_| sadda_engine::pitch_preset::pitch_builtin_presets());
+        for preset in &presets {
+            let selected = self.persisted.pitch_preset_id == preset.id;
+            let label = if preset.title.is_empty() {
+                preset.id.clone()
+            } else {
+                preset.title.clone()
+            };
+            if ui.radio(selected, label).clicked() {
+                self.persisted.pitch_preset_id = preset.id.clone();
+                self.persisted.tracks.pitch_params = preset.params;
+            }
+        }
+        ui.separator();
+        if ui.button("Edit parameters…").clicked() {
+            self.pitch_editor = Some(self.persisted.tracks.pitch_params);
+            ui.close();
+        }
+    }
+
+    /// Modal per-parameter editor for the f0 lane's `PitchParams`. Edits a
+    /// working copy; Apply writes it back to `tracks.pitch_params` (the f0
+    /// lane recomputes), Cancel discards.
+    fn f0_param_editor_window(&mut self, ctx: &egui::Context) {
+        if self.pitch_editor.is_none() {
+            return;
+        }
+        let mut apply = false;
+        let mut close = false;
+        let mut keep_open = true;
+        egui::Window::new("f0 parameters")
+            .open(&mut keep_open)
+            .resizable(true)
+            .default_width(380.0)
+            .show(ctx, |ui| {
+                let p = self.pitch_editor.as_mut().expect("checked above");
+                ui.label(
+                    egui::RichText::new(
+                        "Editing these makes it a custom parameter set (the menu flags it \
+                         as modified).",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.separator();
+                egui::Grid::new("f0_param_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Method");
+                        egui::ComboBox::from_id_salt("f0_method")
+                            .selected_text(pitch_method_label(p.method))
+                            .show_ui(ui, |ui| {
+                                for m in [
+                                    PitchMethod::Boersma,
+                                    PitchMethod::Yin,
+                                    PitchMethod::PYin,
+                                    PitchMethod::Swipe,
+                                    PitchMethod::Autocorrelation,
+                                    PitchMethod::WindowedAutocorrelation,
+                                ] {
+                                    ui.selectable_value(&mut p.method, m, pitch_method_label(m));
+                                }
+                            });
+                        ui.end_row();
+
+                        let c = &mut p.config;
+                        ui.label("Min f0 (Hz)");
+                        ui.add(
+                            egui::DragValue::new(&mut c.min_freq_hz)
+                                .speed(1.0)
+                                .range(20.0..=1000.0),
+                        );
+                        ui.end_row();
+                        ui.label("Max f0 (Hz)");
+                        ui.add(
+                            egui::DragValue::new(&mut c.max_freq_hz)
+                                .speed(1.0)
+                                .range(50.0..=4000.0),
+                        );
+                        ui.end_row();
+                        ui.label("Voicing threshold");
+                        ui.add(
+                            egui::DragValue::new(&mut c.voicing_threshold)
+                                .speed(0.01)
+                                .range(0.0..=1.0),
+                        );
+                        ui.end_row();
+                        ui.label("Frame size (s)");
+                        ui.add(
+                            egui::DragValue::new(&mut c.frame_size_seconds)
+                                .speed(0.001)
+                                .range(0.005..=0.2),
+                        );
+                        ui.end_row();
+                        ui.label("Hop (s)");
+                        ui.add(
+                            egui::DragValue::new(&mut c.hop_size_seconds)
+                                .speed(0.001)
+                                .range(0.001..=0.1),
+                        );
+                        ui.end_row();
+                    });
+
+                // Method-specific advanced knobs, shown only for the active method.
+                let c = &mut p.config;
+                match p.method {
+                    PitchMethod::Boersma => {
+                        ui.separator();
+                        ui.label(egui::RichText::new("Boersma path-finding").weak());
+                        ui.add(
+                            egui::Slider::new(&mut c.boersma_octave_cost, 0.0..=0.2)
+                                .text("octave cost"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut c.boersma_octave_jump_cost, 0.0..=2.0)
+                                .text("octave-jump cost"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut c.boersma_voiced_unvoiced_cost, 0.0..=1.0)
+                                .text("voiced↔unvoiced cost"),
+                        );
+                    }
+                    PitchMethod::Yin | PitchMethod::PYin => {
+                        ui.separator();
+                        ui.label(egui::RichText::new("YIN / pYIN").weak());
+                        ui.add(
+                            egui::Slider::new(&mut c.yin_threshold, 0.01..=0.5)
+                                .text("YIN threshold"),
+                        );
+                    }
+                    _ => {}
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if apply {
+            if let Some(params) = self.pitch_editor.take() {
+                self.persisted.tracks.pitch_params = params;
+            }
+        } else if close || !keep_open {
+            self.pitch_editor = None;
         }
     }
 
@@ -10104,17 +10269,20 @@ impl SaddaApp {
             return;
         };
         let frames = &tc.f0;
-        let threshold = cfg.f0_voicing_threshold;
+        let threshold = cfg.pitch_params.config.voicing_threshold;
         let band = self.overlays.f0.as_ref().and_then(|(_, b)| b.as_ref());
         let palette = self.persisted.palette;
         let x0 = self.timeline.view_start;
         let x1 = self.timeline.view_end;
-        let y_top = cfg.f0_max_hz as f64;
+        let y_top = cfg.pitch_params.config.max_freq_hz as f64;
         measure_lane(
             ui,
             "f0_lane_plot",
             &mut self.timeline,
-            (cfg.f0_min_hz as f64, cfg.f0_max_hz as f64),
+            (
+                cfg.pitch_params.config.min_freq_hz as f64,
+                cfg.pitch_params.config.max_freq_hz as f64,
+            ),
             "f0 (Hz)",
             |plot_ui| {
                 // Band first, behind the contour.
@@ -11172,7 +11340,7 @@ impl SaddaApp {
         let active_param = self.reference.active_param.clone();
         let kind = self.reference.kind;
         let cursor = self.timeline.cursor;
-        let threshold = self.persisted.tracks.f0_voicing_threshold;
+        let threshold = self.persisted.tracks.pitch_params.config.voicing_threshold;
         let measured_vowel = self
             .active_tracks
             .as_ref()

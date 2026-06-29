@@ -92,6 +92,15 @@ pub struct PersistedState {
     /// Default leaves the lane hidden.
     #[serde(default)]
     pub mfcc: MfccLaneConfig,
+    /// Id of the f0 preset currently selected in View ▸ DSP methods (display
+    /// only — the actual params live in `tracks.pitch_params`). Lets the menu
+    /// show the active preset and flag edits as "(modified)".
+    #[serde(default = "default_pitch_preset_id")]
+    pub pitch_preset_id: String,
+}
+
+fn default_pitch_preset_id() -> String {
+    "praat-ac".to_string()
 }
 
 /// Default UI zoom factor (native size). A free fn because `serde`'s
@@ -120,6 +129,7 @@ impl Default for PersistedState {
             ui_scale: default_ui_scale(), // 1.0, not 0.0
             embedding: EmbeddingHeatmapConfig::default(),
             mfcc: MfccLaneConfig::default(),
+            pitch_preset_id: default_pitch_preset_id(),
         }
     }
 }
@@ -175,28 +185,28 @@ mod tests {
         // The GUI defaults must mirror the engine's chosen defaults so an
         // untouched install behaves identically to the API's `*::default()`.
         let cfg = MeasureTrackConfig::default();
-        assert_eq!(cfg.pitch_method, PitchMethodChoice::Boersma);
+        assert_eq!(
+            cfg.pitch_params,
+            sadda_engine::pitch::PitchParams::default()
+        );
+        assert_eq!(
+            cfg.pitch_params.method,
+            sadda_engine::pitch::PitchMethod::Boersma
+        );
         assert_eq!(cfg.formant_lpc_method, LpcMethodChoice::Burg);
-        assert_eq!(PitchMethodChoice::default(), PitchMethodChoice::Boersma);
         assert_eq!(LpcMethodChoice::default(), LpcMethodChoice::Burg);
     }
 
     #[test]
     fn dsp_method_choices_enumerate_with_labels() {
-        assert_eq!(PitchMethodChoice::all().len(), 6);
         assert_eq!(LpcMethodChoice::all().len(), 2);
-        for m in PitchMethodChoice::all() {
-            assert!(!m.label().is_empty());
-        }
         for m in LpcMethodChoice::all() {
             assert!(!m.label().is_empty());
         }
-        // Changing a method must change config equality (cache staleness).
+        // Changing the f0 method must change config equality (cache staleness).
         let a = MeasureTrackConfig::default();
-        let b = MeasureTrackConfig {
-            pitch_method: PitchMethodChoice::Yin,
-            ..MeasureTrackConfig::default()
-        };
+        let mut b = MeasureTrackConfig::default();
+        b.pitch_params.method = sadda_engine::pitch::PitchMethod::Yin;
         assert_ne!(a, b);
     }
 
@@ -474,55 +484,6 @@ impl Default for SpectrogramConfig {
     }
 }
 
-/// D10: configuration for the stacked measure-track lanes (f0,
-/// formants, intensity) drawn below the spectrogram. Lives in
-/// Which f0 tracker the GUI's pitch lane uses. A local serde mirror of
-/// the engine's `PitchMethod` (kept here so `state.rs` stays engine-type-
-/// free and the choice persists across launches); `main.rs` maps it to the
-/// engine enum. Default = Boersma, the octave-robust engine default.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum PitchMethodChoice {
-    /// Boersma 1993 / Praat `To Pitch (ac)` — octave-robust, the default.
-    #[default]
-    Boersma,
-    /// Naive time-domain autocorrelation (fast, subharmonic-prone).
-    Autocorrelation,
-    /// Window-corrected autocorrelation (no octave cost; subharmonic-prone).
-    WindowedAutocorrelation,
-    /// YIN (de Cheveigné & Kawahara 2002).
-    Yin,
-    /// Probabilistic YIN (Mauch & Dixon 2014).
-    PYin,
-    /// SWIPE′ (Camacho & Harris 2008).
-    Swipe,
-}
-
-impl PitchMethodChoice {
-    /// Short menu label.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Boersma => "Boersma (Praat, default)",
-            Self::Autocorrelation => "Autocorrelation",
-            Self::WindowedAutocorrelation => "Windowed autocorrelation",
-            Self::Yin => "YIN",
-            Self::PYin => "pYIN",
-            Self::Swipe => "SWIPE′",
-        }
-    }
-
-    /// All variants, in menu order.
-    pub fn all() -> [Self; 6] {
-        [
-            Self::Boersma,
-            Self::Autocorrelation,
-            Self::WindowedAutocorrelation,
-            Self::Yin,
-            Self::PYin,
-            Self::Swipe,
-        ]
-    }
-}
-
 /// Which LPC method the GUI's formant lane uses. Local serde mirror of the
 /// engine's `LpcMethod`; `main.rs` maps it. Default = Burg (the engine
 /// default for formant tracking).
@@ -567,13 +528,6 @@ pub struct MeasureTrackConfig {
     /// Runtime at runtime; the lane shows a hint if it isn't available.
     #[serde(default)]
     pub vad_visible: bool,
-    /// f0 search floor (Hz). Doubles as the f0 lane's y-axis minimum.
-    pub f0_min_hz: f32,
-    /// f0 search ceiling (Hz). Doubles as the f0 lane's y-axis maximum.
-    pub f0_max_hz: f32,
-    /// Drop f0 estimates whose voicing strength is below this; unvoiced
-    /// frames leave a gap rather than a spurious pitch point.
-    pub f0_voicing_threshold: f32,
     /// Number of formants to track (and plot, ascending: F1..Fn).
     pub formant_count: usize,
     /// Formant lane y-axis maximum (Hz). Formants above this aren't
@@ -585,10 +539,12 @@ pub struct MeasureTrackConfig {
     /// VAD speech-probability threshold, drawn as a line on the VAD lane.
     #[serde(default = "default_vad_threshold")]
     pub vad_threshold: f32,
-    /// f0 tracker used for the pitch lane. Persists across launches;
-    /// changing it invalidates the track cache like any other field.
+    /// Full f0-tracking spec for the pitch lane (method + config: search
+    /// floor/ceiling, voicing threshold, and method-specific knobs). Doubles
+    /// as the f0 lane's y-axis bounds (`min_freq_hz`..`max_freq_hz`). Persists
+    /// across launches; changing any field invalidates the track cache.
     #[serde(default)]
-    pub pitch_method: PitchMethodChoice,
+    pub pitch_params: sadda_engine::pitch::PitchParams,
     /// LPC method used for the formant lane.
     #[serde(default)]
     pub formant_lpc_method: LpcMethodChoice,
@@ -648,14 +604,13 @@ impl Default for MeasureTrackConfig {
             formants_visible: false,
             intensity_visible: false,
             vad_visible: false,
-            f0_min_hz: 75.0,
-            f0_max_hz: 500.0,
-            f0_voicing_threshold: 0.45,
             formant_count: 5,
             formant_max_hz: 5500.0,
             intensity_floor_db: -80.0,
             vad_threshold: 0.5,
-            pitch_method: PitchMethodChoice::Boersma,
+            // Default: Boersma + Praat-default config (75–500 Hz, voicing 0.45)
+            // — same numbers the old f0_min/max/voicing fields carried.
+            pitch_params: sadda_engine::pitch::PitchParams::default(),
             formant_lpc_method: LpcMethodChoice::Burg,
         }
     }
