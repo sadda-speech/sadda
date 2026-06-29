@@ -6,6 +6,117 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-29 — DSP method diversity: named MFCC methods + GUI method pickers; unification design (in progress)
+
+Branch `feat/dsp-method-diversity` (3 commits, gate green). Started from the
+2026-06-27 DSP review, which found the MFCC code claimed to "match librosa
+exactly" while actually using natural-log (not librosa's `10·log10`) and
+symmetric-Hann/leading-edge framing — a chimera matching **no** published
+definition. Fixing that honestly turned into a method-diversity build, then a
+parameterized-pipeline + presets design.
+
+### Shipped (committed, `just gate` green: 229 passed / 6 skipped)
+
+**Named MFCC methods** (`engine/src/dsp/mfcc.rs`, `MfccMethod` enum). "MFCC"
+is a family, not one algorithm; each variant is faithful to one reference,
+validated against that reference's *own* output. Goldens + generator committed
+under `crates/engine/tests/dsp/mfcc/` (CI needs no librosa/torch/parselmouth).
+
+- **Librosa** (default) — `librosa.feature.mfcc` 0.11: Slaney mel + area norm,
+  power, `10·log10` + 80 dB global floor, periodic Hann, `center=True` framing,
+  ortho DCT-II. Validated max ≈5e-4.
+- **Kaldi** — `compute-mfcc-feats`: DC removal, pre-emph 0.97, Povey window,
+  pow2 FFT, HTK mel, unit-peak filters, natural-log, ortho DCT-II, cepstral
+  lifter 22, snip-edges. Validated vs **torchaudio kaldi-compliance** (PyTorch's
+  faithful Kaldi reproduction — *not* Kaldi-proper; real `compute-mfcc-feats`
+  golden backlogged). Max ≈3e-3.
+- **Praat** — `Sound: To MFCC…`: Gaussian window (`2×` analysis width), HTK mel,
+  unit-peak filters, **un-normalised** DCT, c0 in column 0. **Approximate** —
+  see below.
+
+Three surfaces: engine + Python (`sadda.dsp.mfcc(method=…)`, default librosa) +
+tests. The dropped chimera was a `stable`-tier behaviour change; rode the
+in-flight `0.4.0`-follow-up breaking window.
+
+**GUI DSP method selection** (`crates/app`): View ▸ DSP methods submenu —
+f0 tracker (Boersma/AC/windowed-AC/YIN/pYIN/SWIPE′) and formant LPC
+(Burg/AC); both were hardcoded before. Persisted, cache-invalidating,
+default-preserving. New `PitchMethodChoice`/`LpcMethodChoice` in `state.rs`.
+
+### Praat: confirmed-correct vs. residual (key reference for resuming)
+
+Reverse-engineered from Praat source (`NUMhertzToMel2`, `Sound_to_MelSpectrogram`,
+`MelSpectrogram_to_MFCC`, `NUMtriangularfilter_amplitude`):
+- **Confirmed**: `NUMhertzToMel2 = 2595·log10(1+f/700)` = the HTK / O'Shaughnessy–
+  Makhoul constant (same curve Kaldi uses, `1127·ln`). Unit-peak triangles
+  (area-norm is commented out in Praat). Filter count `N = round((mel(Nyq)−100)/100)
+  = 27` (swept: 26/28 far worse). Un-normalised DCT `c_m = Σ_j P_j·cos(πm(j+0.5)/N)`,
+  `c0 = Σ_j P_j`. Framing `floor((dur−2·win)/hop)+1 = 46` frames. dB ref `4e-10`.
+  **No pre-emphasis**.
+- **Residual** (~10% on low cepstra + c0's absolute scale): traces to the exact
+  Praat Gaussian-window leakage and `_Spectrogram_windowCorrection`. The c1/c2
+  shape error means the relative per-filter energies differ slightly — i.e. the
+  Gaussian window shape (`Sound_createGaussian`, still not located in source) or
+  a frame-alignment/half-sample detail. Marked `#[ignore]` (byte-exact test) +
+  `MfccMethod::Praat` documented as approximate. To finish: get
+  `Sound_createGaussian`'s exact formula + apply `windowCorrection`.
+
+### Design: one parameterized pipeline + presets (feasibility CONFIRMED, not yet built)
+
+User goal: *set the parameters that can vary, offer presets by authoritative
+reference (Praat/librosa/Kaldi/HTK) or user-defined, and "select a preset then
+modify individual parameters."* Distinguish "the algorithm" from "the reference's
+default options."
+
+**Feasibility analysis (the key result): yes, it unifies cleanly.** All
+references share one skeleton — `frame → window → (pre-emph/DC) → FFT → power →
+mel filterbank → log → DCT → lifter` — and differ only by a per-stage scalar or
+enum, never an incompatible structure:
+
+| stage | librosa | Kaldi | Praat | HTK | knob |
+|---|---|---|---|---|---|
+| window length | 25 ms | 25 ms | 2× | 25 ms | scalar |
+| window fn | periodic Hann | Povey | Gaussian | Hamming | enum |
+| DC / pre-emph | no/0 | yes/0.97 | no/0 | no/0.97 | bool+scalar |
+| framing | center zero-pad | snip-edges | snip-edges(2×win) | snip-edges | enum |
+| FFT size | =win | next pow2 | next pow2 | next pow2 | enum |
+| mel scale | Slaney | HTK | HTK | HTK | enum |
+| filter spec | n_mels/[fmin,fmax] | n_mels | first/step mel→derived N | n_mels | enum (2 modes) |
+| filter norm | area (Slaney) | unit-peak | unit-peak | unit-peak | enum |
+| log | 10log10+80dB floor | natural ln | 10log10 / 4e-10 | natural ln | enum+scalars |
+| DCT norm | ortho | ortho | none | sqrt(2/N) | enum |
+| lifter | 0 | 22 | 0 | 22 | scalar |
+| power scale | raw | raw | 2/(nfft·n) | raw | enum |
+| exclude Nyquist bin | no | yes | no | — | bool |
+
+(Note: librosa "framing=center" is the only non-snip-edges; Kaldi vs Praat
+differ by window fn + 2× length, not framing.) The faithful reproductions
+already built *become* the validated authoritative presets + regression tests.
+Caveats: a few knobs are enums not sliders; filter-spec has two modes; any combo
+*computes* but only reference-matching ones are golden-validated — editing a
+reference preset honestly makes it "custom (based on X)", voiding faithfulness.
+
+**Decisions locked**: user-defined presets → **on-disk registry** (TOML + schema,
+alongside `model-registry`/`refdist-registry`). Preset-then-edit is the core
+interaction (requires `MfccParams`, not the opaque enum). Same pattern then
+extends to pitch/formants.
+
+### Roadmap (resume here)
+1. **Finish Praat** byte-exactness (`Sound_createGaussian` + `windowCorrection`).
+2. **`MfccParams` + `mfcc_with_params`** general pipeline; `librosa()/kaldi()/
+   praat()/htk()` preset constructors; prove it reproduces all goldens, then
+   `mfcc(…method)` delegates to it. (Additive first — keep the enum path until
+   the general pipeline is golden-green.)
+3. **On-disk preset registry** (builtin authoritative + user-defined) + schema.
+4. **Python**: `params=`/`preset=` + per-param override; stubs; tests.
+5. **GUI**: preset picker + per-parameter editing (also a backlogged design
+   session on *communicating* parameter effects via visualization).
+6. **Extend** the params+presets pattern to pitch (`PitchConfig`/`PitchMethod`)
+   and formants (`FormantsConfig`/`LpcMethod`).
+
+Backlog updated with: real-Kaldi golden, MFCC-in-GUI, DSP-parameter-communication
+design, GUI in-line help, plus the 2026-06-27 review items.
+
 ## 2026-06-21 — Python API ergonomics: three papercuts from a live-API probe
 
 A test run of the live Python API surfaced three discoverability footguns,
