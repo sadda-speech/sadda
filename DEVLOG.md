@@ -53,13 +53,14 @@ Reverse-engineered from Praat source (`NUMhertzToMel2`, `Sound_to_MelSpectrogram
   = 27` (swept: 26/28 far worse). Un-normalised DCT `c_m = Σ_j P_j·cos(πm(j+0.5)/N)`,
   `c0 = Σ_j P_j`. Framing `floor((dur−2·win)/hop)+1 = 46` frames. dB ref `4e-10`.
   **No pre-emphasis**.
-- **Residual** (~10% on low cepstra + c0's absolute scale): traces to the exact
-  Praat Gaussian-window leakage and `_Spectrogram_windowCorrection`. The c1/c2
-  shape error means the relative per-filter energies differ slightly — i.e. the
-  Gaussian window shape (`Sound_createGaussian`, still not located in source) or
-  a frame-alignment/half-sample detail. Marked `#[ignore]` (byte-exact test) +
-  `MfccMethod::Praat` documented as approximate. To finish: get
-  `Sound_createGaussian`'s exact formula + apply `windowCorrection`.
+- **Residual — RESOLVED to tolerance (see roadmap 1).** The c1/c2 error was
+  *not* the window (Gaussian-2 confirmed via parselmouth bisection; window-count
+  swept) — it was (a) missing `_Spectrogram_windowCorrection` (÷ window
+  mean-square → c0) and (b) f32 underflow on near-empty high filters in Praat's
+  un-normalised dB DCT. Fixed by adding windowCorrection and computing in f64.
+  Remaining ~10/~20 is irreducible FFT-library noise (realfft vs NUMrealft on
+  ~1e-30 filter powers), now documented; `MfccMethod::Praat` = faithful-to-
+  tolerance, test runs.
 
 ### Design: one parameterized pipeline + presets (feasibility CONFIRMED; engine BUILT additively)
 
@@ -114,7 +115,15 @@ interaction (requires `MfccParams`, not the opaque enum). Same pattern then
 extends to pitch/formants.
 
 ### Roadmap (resume here)
-1. **Finish Praat** byte-exactness (`Sound_createGaussian` + `windowCorrection`).
+1. ✅ **Praat** — now validated to tolerance (was approximate). Added Praat's
+   `_Spectrogram_windowCorrection` (÷ window mean-square, fixes c0) and moved
+   the whole path to **f64** (FFT included), cutting the residual from
+   (c0 165, c1+ 54) to (c0 ~20, c1+ ~10, ~0.3% typical). The remaining gap is
+   *irreducible* FFT-library noise — Praat's un-normalised dB DCT sums
+   `10·log10` of every filter, so near-empty high filters (~1e-30) amplify
+   sub-1e-15 realfft-vs-NUMrealft differences. Bit-exact would need Praat's FFT.
+   Bisected via parselmouth (`mel(100)`→27 filters, Gaussian-2 confirmed,
+   triangle-in-Hz). Test un-ignored (c1+ < 15, c0 < 25).
 2. ✅ **`MfccParams` + `mfcc_with_params`** general pipeline + `librosa/kaldi/
    praat` presets — built, golden-validated, agrees with the enum. *Remaining:*
    collapse the enum dispatch to `mfcc_with_params` + delete the 3 now-redundant
