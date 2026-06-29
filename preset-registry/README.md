@@ -10,10 +10,11 @@ and built-in set, all sharing the same `<id>.toml` format and the generic
 |---|---|---|---|---|
 | MFCC | `presets/mfcc/` | `MfccParams` | librosa / kaldi / praat | `sadda.dsp.mfcc(audio, params=…)` |
 | Pitch | `presets/pitch/` | `PitchParams` (method + config) | praat-ac / yin / pyin / swipe | `sadda.dsp.voiced_pitch(audio, params=…)` |
+| Formants | `presets/formant/` | `FormantsConfig` (LPC method + config) | praat-burg / autocorrelation | `sadda.dsp.formants(audio, params=…)` |
 
-(Formants is the next domain to land.) The MFCC examples below illustrate the
-format; pitch presets follow the same shape with a `[params]` table holding a
-`method` plus a `[params.config]` sub-table.
+The MFCC examples below illustrate the format. Pitch presets nest a `method`
+plus a `[params.config]` sub-table; formant presets put the `lpc_method` and
+its knobs directly in `[params]` (the config already bundles the method).
 
 Unlike the [reference-distribution](../refdist-registry/) and
 [model](../model-registry/) registries — which pair a metadata manifest with a

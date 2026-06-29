@@ -6,6 +6,39 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-29 — Formant presets (three surfaces) — item 6 complete
+
+Closed out roadmap item 6 by adding **formant** presets, the lightest domain:
+`FormantsConfig` already bundles the LPC method, so it *is* the preset payload
+(no `PitchParams`-style wrapper needed). The generic `crate::preset` core +
+the pitch template made this fast.
+
+- **Engine:** serde + `PartialEq` + `Copy` on `FormantsConfig` / `LpcMethod`;
+  `dsp/formant_preset.rs` with `impl PresetDomain for FormantsConfig` (subdir
+  `formant`) + two built-ins at reference defaults (`praat-burg` /
+  `autocorrelation`), both faithful. 4 tests.
+- **Python:** `sadda._native.formant_preset` submodule — `FormantsParams`
+  pyclass (`for_method` + getters + `.replace` + `to_toml`; `lpc_order`'s
+  nested-`Option` left out of `replace` as a rare advanced knob), `FormantPreset`,
+  store fns, `compute` (returns the same `FormantFrame` list as `formants`).
+  `sadda.dsp.formants(audio, params=…)` dispatches; PROVISIONAL. (Made
+  `PyFormantFrame` `pub(crate)` so the submodule can construct it.) 8 tests.
+- **GUI:** unified the formant lane onto `tracks.formant_params: FormantsConfig`
+  (`Copy`, so `MeasureTrackConfig` stays `Copy`), replacing the
+  `formant_lpc_method` mirror + the `formant_count` field (values identical to
+  `FormantsConfig::default()`; `formant_max_hz` stays separate as the
+  display-only y-axis bound). Removed the `LpcMethodChoice` mirror. View ▸ DSP
+  methods ▸ Formants is now a preset picker + Edit-parameters modal +
+  "(modified)" flag — mirroring the f0 work.
+
+**Item 6 done across pitch + formants + the generic core.** Validation: engine
+230 lib tests, app 115 tests, Python 50 dsp-preset tests green; no stub drift;
+`fmt`/`clippy` clean workspace-wide; app boots cleanly (old persisted state
+migrates via `#[serde(default)]`). The whole MFCC→pitch→formants arc now shares
+one `Preset<P>` / `PresetStore<P>` / `PresetDomain` core.
+
+---
+
 ## 2026-06-29 — Generic preset core + pitch presets (three surfaces); item 6 pitch done
 
 Extended the preset pattern from MFCC to **pitch** (roadmap item 6), first
@@ -286,14 +319,14 @@ extends to pitch/formants.
 5. ✅ **GUI** — togglable MFCC heatmap lane (reuses the embedding-heatmap path)
    + View ▸ MFCC preset picker + modal per-parameter editor. The backlogged
    piece remains the deeper *communicating parameter effects* visualization.
-6. **Extend** the params+presets pattern to pitch + formants.
+6. ✅ **Extend** the params+presets pattern to pitch + formants — DONE.
    - ✅ **Generic core** (`crate::preset`: `Preset<P>` / `PresetStore<P>` /
      `PresetDomain`) — MFCC refactored onto it; `based_on` now free-text.
    - ✅ **Pitch** — `PitchParams` (method+config) + `pitch_preset.rs` builtins +
      Python + GUI (f0 lane unified onto `pitch_params`; preset picker + editor).
-   - **Formants** — `impl PresetDomain for FormantsConfig` (already a unified
-     config; needs serde + `Copy` + builtins) + Python + GUI (the formant LPC
-     picker → preset picker, mirroring the f0 work). The fast follow.
+   - ✅ **Formants** — `impl PresetDomain for FormantsConfig` + `formant_preset.rs`
+     builtins + Python + GUI (formant lane unified onto `formant_params`; preset
+     picker + editor). All three DSP families now share the generic core.
 
 Backlog updated with: real-Kaldi golden, MFCC-in-GUI, DSP-parameter-communication
 design, GUI in-line help, plus the 2026-06-27 review items.
