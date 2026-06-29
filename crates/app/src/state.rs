@@ -88,6 +88,10 @@ pub struct PersistedState {
     /// lane hidden (no selected tier).
     #[serde(default)]
     pub embedding: EmbeddingHeatmapConfig,
+    /// MFCC lane state: active preset + parameters + colormap/normalization.
+    /// Default leaves the lane hidden.
+    #[serde(default)]
+    pub mfcc: MfccLaneConfig,
 }
 
 /// Default UI zoom factor (native size). A free fn because `serde`'s
@@ -115,6 +119,7 @@ impl Default for PersistedState {
             palette: PlotPalette::default(),
             ui_scale: default_ui_scale(), // 1.0, not 0.0
             embedding: EmbeddingHeatmapConfig::default(),
+            mfcc: MfccLaneConfig::default(),
         }
     }
 }
@@ -808,6 +813,72 @@ pub fn normalize_embedding(
                 return vec![0.5; matrix.len()];
             }
             matrix.iter().map(|&x| (x - lo) / span).collect()
+        }
+    }
+}
+
+/// MFCC heatmap-lane state: which preset is active, the full parameter set it
+/// resolves to (possibly edited away from the preset), and the display knobs
+/// (colormap / normalization / whether to drop c0). Default leaves the lane
+/// hidden with the librosa preset loaded.
+///
+/// Unlike the sibling `*MethodChoice` mirrors, this stores the engine
+/// [`sadda_engine::dsp::MfccParams`] directly: that type is now
+/// `Serialize`/`Deserialize`/`Clone`/`PartialEq`, so a hand-written mirror of
+/// its ~21 fields (plus the data enums) would be pure, drift-prone
+/// duplication. `PartialEq` is load-bearing — the lane cache invalidates by
+/// `==` on this whole struct (see `rebuild_mfcc_if_stale`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MfccLaneConfig {
+    /// Whether the MFCC lane is shown.
+    #[serde(default)]
+    pub show: bool,
+    /// Id of the active preset (the menu's current selection). When `params`
+    /// has been edited away from this preset, the lane caption flags it.
+    #[serde(default = "default_mfcc_preset_id")]
+    pub preset_id: String,
+    /// The resolved parameter set actually used to compute the lane.
+    #[serde(default = "default_mfcc_params")]
+    pub params: sadda_engine::dsp::MfccParams,
+    /// Colormap applied to the normalized coefficients.
+    #[serde(default = "default_mfcc_colormap")]
+    pub colormap: ColormapKind,
+    /// Normalization applied before the colormap. Per-coefficient z-score by
+    /// default, which keeps c0 (overall log-energy, orders larger than c1+)
+    /// from washing out the rest of the heatmap.
+    #[serde(default)]
+    pub normalization: EmbeddingNormalization,
+    /// Omit c0 (the energy coefficient) from the display — on by default, so
+    /// the visible rows are the spectral-shape coefficients (c1+).
+    #[serde(default = "default_true")]
+    pub drop_c0: bool,
+}
+
+fn default_mfcc_preset_id() -> String {
+    "librosa-default".to_string()
+}
+
+fn default_mfcc_params() -> sadda_engine::dsp::MfccParams {
+    sadda_engine::dsp::MfccParams::librosa(0.025, 0.010, 40, 13, 0.0, 8000.0)
+}
+
+fn default_mfcc_colormap() -> ColormapKind {
+    ColormapKind::Cividis
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for MfccLaneConfig {
+    fn default() -> Self {
+        Self {
+            show: false,
+            preset_id: default_mfcc_preset_id(),
+            params: default_mfcc_params(),
+            colormap: default_mfcc_colormap(),
+            normalization: EmbeddingNormalization::default(),
+            drop_c0: true,
         }
     }
 }

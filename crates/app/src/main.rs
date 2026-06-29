@@ -39,9 +39,10 @@ use crate::sadda_app::{
 };
 use crate::state::{
     ColormapKind, EmbeddingHeatmapConfig, EnvelopeCache, LpcMethodChoice, MeasureTrackConfig,
-    PersistedState, PitchMethodChoice, PlotPalette, RefdistOverlay, SpectrogramConfig, ThemePref,
-    TimelineState, build_envelope_for_range, colormap_bake, format_reference_lane_caption,
-    nearest_frame_index, normalize_embedding, power_to_db_normalized, truncate_label,
+    MfccLaneConfig, PersistedState, PitchMethodChoice, PlotPalette, RefdistOverlay,
+    SpectrogramConfig, ThemePref, TimelineState, build_envelope_for_range, colormap_bake,
+    format_reference_lane_caption, nearest_frame_index, normalize_embedding,
+    power_to_db_normalized, truncate_label,
 };
 
 /// Maximum characters drawn inside an interval rectangle or above a
@@ -301,6 +302,16 @@ struct SaddaApp {
     /// the Parquet sidecar can't be read. Surfaced as a hint inside the
     /// lane so the lane keeps drawing instead of blanking out silently.
     embedding_heatmap_error: Option<String>,
+    /// Cached MFCC heatmap render. `None` when the lane is hidden or no
+    /// bundle is loaded. Rebuilt when the bundle or the MFCC lane config
+    /// (preset / params / colormap / normalization) changes.
+    active_mfcc: Option<MfccCache>,
+    /// Sticky error from the last MFCC-lane build (e.g. the selection is too
+    /// short for one frame). Surfaced inside the lane.
+    mfcc_error: Option<String>,
+    /// Open MFCC per-parameter editor (a working copy of the lane's params).
+    /// `None` when the editor modal is closed.
+    mfcc_editor: Option<MfccParamsEditor>,
     /// Shared timeline state — cursor, view window, duration —
     /// plumbed into every C5+ pane. Reset on bundle change.
     timeline: TimelineState,
@@ -1493,6 +1504,32 @@ struct EmbeddingHeatmapCache {
     tier_name: String,
 }
 
+/// Cached MFCC heatmap render. Mirrors [`EmbeddingHeatmapCache`]: an MFCC
+/// result is a `(n_frames × n_coeffs)` matrix, rendered exactly like the
+/// embedding heatmap (transpose → per-coefficient normalize → colormap →
+/// texture). Invalidates by `==` on the whole [`MfccLaneConfig`].
+struct MfccCache {
+    bundle_id: i64,
+    config: MfccLaneConfig,
+    /// GPU texture handle for the colormapped coefficient matrix.
+    texture: egui::TextureHandle,
+    /// Bundle duration in seconds (x-axis upper bound).
+    duration_seconds: f64,
+    /// Number of coefficient rows displayed (y-axis upper bound) — `n_mfcc`,
+    /// or `n_mfcc − 1` when c0 is dropped.
+    n_rows: usize,
+}
+
+/// Working copy for the MFCC per-parameter editor modal. Holds an editable
+/// [`MfccParams`](sadda_engine::dsp::MfccParams); on Apply it is written back
+/// to the lane config (invalidating the cache), on Cancel it's discarded.
+struct MfccParamsEditor {
+    /// The params being edited (seeded from the lane's current params).
+    params: sadda_engine::dsp::MfccParams,
+    /// The preset id this editor was opened from (for the "based on …" label).
+    preset_id: String,
+}
+
 /// D10: cached measure-track analysis for the selected bundle under
 /// the current [`MeasureTrackConfig`]. Mirrors [`SpectrogramCache`]:
 /// recomputed only when the bundle or the config changes (see
@@ -1836,6 +1873,9 @@ impl SaddaApp {
             selected_annotation: None,
             active_embedding_heatmap: None,
             embedding_heatmap_error: None,
+            active_mfcc: None,
+            mfcc_error: None,
+            mfcc_editor: None,
             timeline: TimelineState::default(),
             playback: None,
             playback_origin: None,
@@ -2320,6 +2360,8 @@ impl SaddaApp {
                     self.active_spectrogram = None;
                     self.active_embedding_heatmap = None;
                     self.embedding_heatmap_error = None;
+                    self.active_mfcc = None;
+                    self.mfcc_error = None;
                     self.selected_annotation = None;
                     self.timeline = TimelineState::default();
                     self.playback = None;
@@ -3573,6 +3615,8 @@ impl SaddaApp {
         self.selected_bundle_id = Some(bundle_id);
         self.active_embedding_heatmap = None;
         self.embedding_heatmap_error = None;
+        self.active_mfcc = None;
+        self.mfcc_error = None;
         self.selected_annotation = None;
         self.playback = None;
         self.draft_edit = DraftEdit::None;
@@ -3595,6 +3639,8 @@ impl SaddaApp {
         self.active_spectrogram = None;
         self.active_embedding_heatmap = None;
         self.embedding_heatmap_error = None;
+        self.active_mfcc = None;
+        self.mfcc_error = None;
         self.selected_annotation = None;
         self.playback = None;
         self.draft_edit = DraftEdit::None;
@@ -6139,6 +6185,41 @@ impl SaddaApp {
         }
     }
 
+    /// Rebuild the MFCC heatmap texture if the bundle or the MFCC lane config
+    /// changed. Synchronous (like the spectrogram / embedding heatmap) — the
+    /// MFCC pipeline is cheap relative to the GPU upload. Skips entirely when
+    /// the lane is hidden.
+    fn rebuild_mfcc_if_stale(&mut self, ctx: &egui::Context) {
+        let Some(env) = &self.active_envelope else {
+            self.active_mfcc = None;
+            self.mfcc_error = None;
+            return;
+        };
+        let cfg = self.persisted.mfcc.clone();
+        if !cfg.show {
+            self.active_mfcc = None;
+            self.mfcc_error = None;
+            return;
+        }
+        let bundle_id = env.bundle_id;
+        if let Some(c) = &self.active_mfcc {
+            if c.bundle_id == bundle_id && c.config == cfg {
+                return;
+            }
+        }
+        let env = env.clone();
+        match build_mfcc_heatmap_texture(ctx, &env, cfg) {
+            Ok(c) => {
+                self.active_mfcc = Some(c);
+                self.mfcc_error = None;
+            }
+            Err(e) => {
+                self.active_mfcc = None;
+                self.mfcc_error = Some(e);
+            }
+        }
+    }
+
     /// D10 / P2: dispatch a background measure-track build (f0 / formants /
     /// intensity) if the cache is stale. Runs the FFT/LPC work on a worker
     /// thread; [`poll_analysis`](Self::poll_analysis) installs the result.
@@ -6459,6 +6540,128 @@ fn build_embedding_heatmap_texture(
         duration_seconds: env.duration_seconds,
         n_dims,
         tier_name: tier.name,
+    })
+}
+
+fn mfcc_window_label(w: sadda_engine::dsp::MfccWindow) -> &'static str {
+    use sadda_engine::dsp::MfccWindow::*;
+    match w {
+        PeriodicHann => "Periodic Hann (librosa)",
+        Povey => "Povey (Kaldi)",
+        PraatGaussian => "Gaussian-2 (Praat)",
+        Hamming => "Hamming (HTK)",
+    }
+}
+fn mfcc_framing_label(f: sadda_engine::dsp::MfccFraming) -> &'static str {
+    use sadda_engine::dsp::MfccFraming::*;
+    match f {
+        Centered => "Centered (librosa)",
+        SnipEdges => "Snip edges",
+    }
+}
+fn mfcc_fft_label(f: sadda_engine::dsp::MfccFft) -> &'static str {
+    use sadda_engine::dsp::MfccFft::*;
+    match f {
+        WindowLength => "Window length",
+        NextPow2 => "Next power of two",
+    }
+}
+fn mfcc_mel_label(m: sadda_engine::dsp::MelScaleKind) -> &'static str {
+    use sadda_engine::dsp::MelScaleKind::*;
+    match m {
+        Slaney => "Slaney (librosa)",
+        Htk => "HTK (Kaldi/Praat)",
+    }
+}
+fn mfcc_fnorm_label(n: sadda_engine::dsp::MfccFilterNorm) -> &'static str {
+    use sadda_engine::dsp::MfccFilterNorm::*;
+    match n {
+        AreaSlaney => "Slaney area",
+        UnitPeak => "Unit peak",
+    }
+}
+fn mfcc_dct_label(d: sadda_engine::dsp::MfccDct) -> &'static str {
+    use sadda_engine::dsp::MfccDct::*;
+    match d {
+        Ortho => "Orthonormal",
+        Unnormalized => "Un-normalised (Praat)",
+    }
+}
+fn mfcc_pnorm_label(n: sadda_engine::dsp::MfccPowerNorm) -> &'static str {
+    use sadda_engine::dsp::MfccPowerNorm::*;
+    match n {
+        Raw => "Raw |FFT|²",
+        PraatDuration => "Praat duration-scaled",
+    }
+}
+
+/// Computes the MFCCs for the bundle under `cfg.params`, transposes to a
+/// coefficient-major matrix (optionally dropping c0), normalizes per
+/// coefficient, colormaps it, and uploads it as an egui texture. Mirrors
+/// [`build_embedding_heatmap_texture`] — an MFCC result is the same
+/// `(rows × frames)` shape as an embedding tier. Returns the cache or an
+/// actionable message (selection too short → shown inside the lane).
+fn build_mfcc_heatmap_texture(
+    ctx: &egui::Context,
+    env: &EnvelopeCache,
+    cfg: MfccLaneConfig,
+) -> Result<MfccCache, String> {
+    let mfcc = sadda_engine::dsp::mfcc_with_params(&env.mono_samples, env.sample_rate, &cfg.params);
+    let (n_frames, n_mfcc) = mfcc.dim();
+    if n_frames == 0 || n_mfcc == 0 {
+        return Err(
+            "selection is too short to compute an MFCC frame at these settings".to_string(),
+        );
+    }
+    // Drop c0 (overall log-energy, orders larger than c1+) from the display
+    // when asked, so the per-coefficient normalization isn't anchored by the
+    // energy row. Needs at least two coefficients to have anything left.
+    let drop_c0 = cfg.drop_c0 && n_mfcc > 1;
+    let row0 = if drop_c0 { 1 } else { 0 };
+    let n_rows = n_mfcc - row0;
+
+    // Coefficient-major / frame-minor `[n_rows * n_frames]` f32 buffer for
+    // `colormap_bake` (rows = coefficients, columns = frames).
+    let mut row_major: Vec<f32> = vec![0.0; n_rows * n_frames];
+    for f in 0..n_frames {
+        for c in 0..n_rows {
+            row_major[c * n_frames + f] = mfcc[(f, c + row0)];
+        }
+    }
+
+    // Bucket the time axis if longer than the texture cap (as the spectrogram
+    // and embedding heatmap do).
+    let (display_width, display) = if n_frames > MAX_SPECTROGRAM_WIDTH {
+        let stride = n_frames.div_ceil(MAX_SPECTROGRAM_WIDTH);
+        let new_width = n_frames.div_ceil(stride);
+        let mut out = vec![0.0f32; n_rows * new_width];
+        for c in 0..n_rows {
+            for x in 0..new_width {
+                let start = x * stride;
+                let end = (start + stride).min(n_frames);
+                let mut acc = 0.0f32;
+                for f in start..end {
+                    acc += row_major[c * n_frames + f];
+                }
+                out[c * new_width + x] = acc / (end - start) as f32;
+            }
+        }
+        (new_width, out)
+    } else {
+        (n_frames, row_major)
+    };
+
+    let normalized = normalize_embedding(&display, n_rows, display_width, cfg.normalization);
+    let rgba = colormap_bake(&normalized, display_width, n_rows, cfg.colormap);
+    let image = egui::ColorImage::from_rgba_unmultiplied([display_width, n_rows], &rgba);
+    let texture = ctx.load_texture("mfcc_heatmap", image, egui::TextureOptions::LINEAR);
+
+    Ok(MfccCache {
+        bundle_id: env.bundle_id,
+        config: cfg,
+        texture,
+        duration_seconds: env.duration_seconds,
+        n_rows,
     })
 }
 
@@ -8308,6 +8511,7 @@ impl eframe::App for SaddaApp {
         self.label_edit_window(ui.ctx());
         self.rubric_editor_window(ui.ctx());
         self.criteria_editor_window(ui.ctx());
+        self.mfcc_param_editor_window(ui.ctx());
         self.targets_panel_window(ui.ctx());
         self.dashboard_window(ui.ctx());
         self.notebook_window(ui.ctx());
@@ -8821,6 +9025,11 @@ impl SaddaApp {
             ui.menu_button("Embedding heatmap", |ui| {
                 self.embedding_heatmap_submenu(ui);
             });
+            // MFCC lane — show toggle, preset picker, edit-parameters, and
+            // colormap / normalization / c0 display knobs.
+            ui.menu_button("MFCC", |ui| {
+                self.mfcc_submenu(ui);
+            });
             // D10: reference-distribution overlay pickers, one per
             // band-capable lane. Each lists installed distributions whose
             // parameter matches the lane, narrowed by subgroup.
@@ -8947,6 +9156,309 @@ impl SaddaApp {
             ),
         ] {
             ui.radio_value(&mut self.persisted.embedding.normalization, mode, label);
+        }
+    }
+
+    /// View ▸ MFCC submenu: show toggle, preset picker (built-in + user
+    /// presets from the on-disk registry), edit-parameters, and the
+    /// colormap / normalization / c0 display knobs.
+    fn mfcc_submenu(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.persisted.mfcc.show, "Show MFCC lane");
+
+        ui.separator();
+        ui.label("Preset");
+        // List presets from the user store (built-ins + on-disk); fall back to
+        // the built-ins alone if the store can't be opened.
+        let presets = sadda_engine::dsp::MfccPresetStore::user_default()
+            .map(|s| s.list())
+            .unwrap_or_else(|_| sadda_engine::dsp::builtin_presets());
+        for preset in &presets {
+            let selected = self.persisted.mfcc.preset_id == preset.id;
+            let label = if preset.title.is_empty() {
+                preset.id.clone()
+            } else {
+                preset.title.clone()
+            };
+            if ui.radio(selected, label).clicked() {
+                self.persisted.mfcc.preset_id = preset.id.clone();
+                self.persisted.mfcc.params = preset.params.clone();
+            }
+        }
+
+        ui.separator();
+        if ui.button("Edit parameters…").clicked() {
+            self.mfcc_editor = Some(MfccParamsEditor {
+                params: self.persisted.mfcc.params.clone(),
+                preset_id: self.persisted.mfcc.preset_id.clone(),
+            });
+            ui.close();
+        }
+
+        ui.separator();
+        ui.checkbox(&mut self.persisted.mfcc.drop_c0, "Hide c0 (energy)");
+
+        ui.separator();
+        ui.label("Colormap");
+        for &(cm, label) in &[
+            (ColormapKind::Cividis, "Cividis (CVD-safe)"),
+            (ColormapKind::Viridis, "Viridis"),
+            (ColormapKind::Magma, "Magma"),
+            (ColormapKind::Greyscale, "Greyscale"),
+        ] {
+            ui.radio_value(&mut self.persisted.mfcc.colormap, cm, label);
+        }
+
+        ui.separator();
+        ui.label("Normalization");
+        for &(mode, label) in &[
+            (
+                crate::state::EmbeddingNormalization::PerDimZScore,
+                "Per-coeff z-score (default)",
+            ),
+            (
+                crate::state::EmbeddingNormalization::GlobalZScore,
+                "Global z-score",
+            ),
+            (
+                crate::state::EmbeddingNormalization::GlobalMinMax,
+                "Global min–max",
+            ),
+        ] {
+            ui.radio_value(&mut self.persisted.mfcc.normalization, mode, label);
+        }
+    }
+
+    /// Modal per-parameter editor for the MFCC lane's [`MfccParams`]. Edits a
+    /// working copy; Apply writes it back to the lane config (invalidating the
+    /// cache so the lane recomputes), Cancel discards. Editing away from the
+    /// named preset is honest — the lane caption then flags "(modified)".
+    fn mfcc_param_editor_window(&mut self, ctx: &egui::Context) {
+        use sadda_engine::dsp::{
+            MelScaleKind, MfccDct, MfccFft, MfccFilterNorm, MfccFilters, MfccFraming,
+            MfccPowerNorm, MfccWindow,
+        };
+        if self.mfcc_editor.is_none() {
+            return;
+        }
+        let mut apply = false;
+        let mut close = false;
+        let mut keep_open = true;
+        egui::Window::new("MFCC parameters")
+            .open(&mut keep_open)
+            .resizable(true)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                let ed = self.mfcc_editor.as_mut().expect("checked above");
+                ui.label(
+                    egui::RichText::new(format!("Based on preset: {}", ed.preset_id))
+                        .weak()
+                        .italics(),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Editing these makes it a custom parameter set (the lane flags it as \
+                         modified). Faithfulness to the reference is only guaranteed for the \
+                         unedited preset.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.separator();
+                let p = &mut ed.params;
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("mfcc_param_grid")
+                            .num_columns(2)
+                            .spacing([12.0, 6.0])
+                            .show(ui, |ui| {
+                                ui.label("Coefficients (n_mfcc)");
+                                ui.add(egui::DragValue::new(&mut p.n_mfcc).range(1..=64));
+                                ui.end_row();
+
+                                if let MfccFilters::NMels { n_mels } = &mut p.filters {
+                                    ui.label("Mel filters (n_mels)");
+                                    ui.add(egui::DragValue::new(n_mels).range(1..=512));
+                                    ui.end_row();
+                                }
+
+                                ui.label("Frame size (s)");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.frame_size_seconds)
+                                        .speed(0.001)
+                                        .range(0.001..=1.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("Hop (s)");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.hop_seconds)
+                                        .speed(0.001)
+                                        .range(0.001..=1.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("f_min (Hz)");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.f_min)
+                                        .speed(1.0)
+                                        .range(0.0..=20000.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("f_max (Hz)");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.f_max)
+                                        .speed(1.0)
+                                        .range(1.0..=24000.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("Window duration ×");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.window_duration_factor)
+                                        .speed(0.05)
+                                        .range(0.1..=4.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("Pre-emphasis");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.pre_emphasis)
+                                        .speed(0.01)
+                                        .range(0.0..=1.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("Cepstral lifter");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.lifter)
+                                        .speed(0.5)
+                                        .range(0.0..=100.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("Window");
+                                egui::ComboBox::from_id_salt("mfcc_window")
+                                    .selected_text(mfcc_window_label(p.window))
+                                    .show_ui(ui, |ui| {
+                                        for w in [
+                                            MfccWindow::PeriodicHann,
+                                            MfccWindow::Povey,
+                                            MfccWindow::PraatGaussian,
+                                            MfccWindow::Hamming,
+                                        ] {
+                                            ui.selectable_value(
+                                                &mut p.window,
+                                                w,
+                                                mfcc_window_label(w),
+                                            );
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label("Framing");
+                                egui::ComboBox::from_id_salt("mfcc_framing")
+                                    .selected_text(mfcc_framing_label(p.framing))
+                                    .show_ui(ui, |ui| {
+                                        for f in [MfccFraming::Centered, MfccFraming::SnipEdges] {
+                                            ui.selectable_value(
+                                                &mut p.framing,
+                                                f,
+                                                mfcc_framing_label(f),
+                                            );
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label("FFT size");
+                                egui::ComboBox::from_id_salt("mfcc_fft")
+                                    .selected_text(mfcc_fft_label(p.fft))
+                                    .show_ui(ui, |ui| {
+                                        for f in [MfccFft::WindowLength, MfccFft::NextPow2] {
+                                            ui.selectable_value(&mut p.fft, f, mfcc_fft_label(f));
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label("Mel scale");
+                                egui::ComboBox::from_id_salt("mfcc_mel")
+                                    .selected_text(mfcc_mel_label(p.mel_scale))
+                                    .show_ui(ui, |ui| {
+                                        for m in [MelScaleKind::Slaney, MelScaleKind::Htk] {
+                                            ui.selectable_value(
+                                                &mut p.mel_scale,
+                                                m,
+                                                mfcc_mel_label(m),
+                                            );
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label("Filter norm");
+                                egui::ComboBox::from_id_salt("mfcc_fnorm")
+                                    .selected_text(mfcc_fnorm_label(p.filter_norm))
+                                    .show_ui(ui, |ui| {
+                                        for n in
+                                            [MfccFilterNorm::AreaSlaney, MfccFilterNorm::UnitPeak]
+                                        {
+                                            ui.selectable_value(
+                                                &mut p.filter_norm,
+                                                n,
+                                                mfcc_fnorm_label(n),
+                                            );
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label("DCT norm");
+                                egui::ComboBox::from_id_salt("mfcc_dct")
+                                    .selected_text(mfcc_dct_label(p.dct))
+                                    .show_ui(ui, |ui| {
+                                        for d in [MfccDct::Ortho, MfccDct::Unnormalized] {
+                                            ui.selectable_value(&mut p.dct, d, mfcc_dct_label(d));
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label("Power scaling");
+                                egui::ComboBox::from_id_salt("mfcc_pnorm")
+                                    .selected_text(mfcc_pnorm_label(p.power_norm))
+                                    .show_ui(ui, |ui| {
+                                        for n in [MfccPowerNorm::Raw, MfccPowerNorm::PraatDuration]
+                                        {
+                                            ui.selectable_value(
+                                                &mut p.power_norm,
+                                                n,
+                                                mfcc_pnorm_label(n),
+                                            );
+                                        }
+                                    });
+                                ui.end_row();
+                            });
+                        ui.add_space(4.0);
+                        ui.checkbox(&mut p.remove_dc, "Remove DC (per-frame mean)");
+                        ui.checkbox(&mut p.triangle_in_mel, "Triangles linear in mel");
+                        ui.checkbox(&mut p.exclude_nyquist_bin, "Exclude Nyquist bin");
+                    });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if apply {
+            if let Some(ed) = self.mfcc_editor.take() {
+                self.persisted.mfcc.params = ed.params;
+            }
+        } else if close || !keep_open {
+            self.mfcc_editor = None;
         }
     }
 
@@ -9107,6 +9619,7 @@ impl SaddaApp {
         self.rebuild_tracks_if_stale(ui.ctx());
         self.rebuild_overlays_if_stale();
         self.rebuild_embedding_heatmap_if_stale(ui.ctx());
+        self.rebuild_mfcc_if_stale(ui.ctx());
         if self.active_envelope.is_some() || self.live_view.is_some() {
             let tracks = self.persisted.tracks;
             // Registered first → bottommost lane (just above the tiers).
@@ -9157,6 +9670,17 @@ impl SaddaApp {
                     .min_size(64.0)
                     .frame(egui::Frame::NONE)
                     .show_inside(ui, |ui| self.embedding_heatmap_lane_pane(ui));
+            }
+            // MFCC heatmap lane — registered last so it sits at the top of the
+            // lane stack (under the spectrogram). Like the embedding heatmap
+            // it's a 2D coeff×time view, so it gets the taller default height.
+            if self.live_view.is_none() && (self.persisted.mfcc.show || self.mfcc_error.is_some()) {
+                egui::Panel::bottom("mfcc_lane")
+                    .resizable(true)
+                    .default_size(MEASURE_LANE_HEIGHT * 2.0)
+                    .min_size(64.0)
+                    .frame(egui::Frame::NONE)
+                    .show_inside(ui, |ui| self.mfcc_lane_pane(ui));
             }
         }
 
@@ -9865,6 +10389,128 @@ impl SaddaApp {
 
         // Ctrl-snap: while Ctrl is held, selection edges snap to the nearest
         // existing interval boundary across active interval tiers (Slice 3c).
+        let ctrl_snap = ui.input(|i| i.modifiers.command);
+        let snap_bounds = if ctrl_snap {
+            self.active_interval_boundaries()
+        } else {
+            Vec::new()
+        };
+        apply_lane_selection_drag(
+            &mut self.timeline,
+            drag_start,
+            drag_to,
+            drag_ended,
+            clicked_time,
+            ctrl_snap,
+            &snap_bounds,
+        );
+        handle_zoom_and_scroll(&plot_response, &mut self.timeline);
+    }
+
+    /// MFCC heatmap lane. Draws the cached coefficient texture as a
+    /// colormapped image over the shared timeline, mirroring the embedding
+    /// heatmap. y-axis is the cepstral-coefficient index.
+    fn mfcc_lane_pane(&mut self, ui: &mut egui::Ui) {
+        if let Some(msg) = self.mfcc_error.clone() {
+            ui.centered_and_justified(|ui| {
+                ui.colored_label(egui::Color32::from_rgb(220, 80, 80), format!("MFCC: {msg}"));
+            });
+            return;
+        }
+        let Some(cache) = &self.active_mfcc else {
+            ui.centered_and_justified(|ui| {
+                ui.label(egui::RichText::new("(building MFCC…)").weak().italics());
+            });
+            return;
+        };
+
+        // Caption: preset id + coefficient count, plus a "(modified)" flag when
+        // the live params differ from the named preset's, and "(c0 hidden)".
+        // Checked against the built-ins only (pure, no per-frame disk I/O) —
+        // edits typically start from a built-in; for a user preset the id alone
+        // is shown.
+        let preset_id = self.persisted.mfcc.preset_id.clone();
+        let modified = sadda_engine::dsp::builtin_presets()
+            .into_iter()
+            .find(|p| p.id == preset_id)
+            .map(|p| p.params != self.persisted.mfcc.params)
+            .unwrap_or(false);
+        let c0_note = if self.persisted.mfcc.drop_c0 {
+            " · c0 hidden"
+        } else {
+            ""
+        };
+        ui.horizontal(|ui| {
+            ui.add_space(SIGNAL_LEFT_GUTTER + 4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "MFCC · {}{} · {} coeff{}{}",
+                    preset_id,
+                    if modified { " (modified)" } else { "" },
+                    cache.n_rows,
+                    if cache.n_rows == 1 { "" } else { "s" },
+                    c0_note,
+                ))
+                .weak(),
+            );
+        });
+
+        let duration = cache.duration_seconds;
+        let n_rows = cache.n_rows as f64;
+        let centre = egui_plot::PlotPoint::new(duration / 2.0, n_rows / 2.0);
+        let size = egui::Vec2::new(duration as f32, n_rows as f32);
+        let texture_id = cache.texture.id();
+        let cursor = self.timeline.cursor;
+        let view_start = self.timeline.view_start;
+        let view_end = self.timeline.view_end;
+        let selection = self.timeline.selection;
+        let mut clicked_time: Option<f64> = None;
+        let mut drag_start: Option<f64> = None;
+        let mut drag_to: Option<f64> = None;
+        let mut drag_ended = false;
+
+        let plot_response = Plot::new("mfcc_heatmap_plot")
+            .show_axes([true, true])
+            .y_axis_label("coeff")
+            .x_axis_label("seconds")
+            .y_axis_min_width(SIGNAL_LEFT_GUTTER)
+            .allow_drag(false)
+            .allow_zoom(false)
+            .allow_scroll(false)
+            .show(ui, |plot_ui| {
+                plot_ui.set_plot_bounds_x(view_start..=view_end);
+                plot_ui.set_plot_bounds_y(0.0..=n_rows);
+                plot_ui.image(egui_plot::PlotImage::new(
+                    "mfcc_heatmap_img",
+                    texture_id,
+                    centre,
+                    size,
+                ));
+                draw_cursor_line(plot_ui, cursor, 0.0, n_rows);
+                draw_selection_band(plot_ui, selection, 0.0, n_rows);
+
+                let resp = plot_ui.response();
+                if resp.drag_started() {
+                    drag_start = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
+                }
+                if resp.dragged() {
+                    drag_to = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
+                }
+                if resp.drag_stopped() {
+                    drag_ended = true;
+                }
+                if resp.clicked() {
+                    clicked_time = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
+                }
+            })
+            .response;
+
         let ctrl_snap = ui.input(|i| i.modifiers.command);
         let snap_bounds = if ctrl_snap {
             self.active_interval_boundaries()
