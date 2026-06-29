@@ -22,6 +22,8 @@ pub mod ml;
 #[cfg(feature = "ml")]
 pub mod models;
 pub mod pitch;
+pub mod pitch_preset;
+pub mod preset;
 pub mod refdist;
 pub mod storage;
 pub mod units;

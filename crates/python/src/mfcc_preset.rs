@@ -17,7 +17,7 @@ use sadda_engine::dsp::mfcc::{
     MelScaleKind, MfccDct, MfccFft, MfccFilterNorm, MfccFilters, MfccFraming, MfccParams,
     MfccPowerNorm, MfccWindow, mfcc_with_params,
 };
-use sadda_engine::dsp::preset::{MfccPreset, MfccPresetStore, PresetLineage, builtin_presets};
+use sadda_engine::dsp::preset::{MfccPreset, MfccPresetStore, builtin_presets};
 
 use crate::{PyAudio, engine_err_to_py};
 
@@ -135,28 +135,6 @@ fn parse_power_norm(s: &str) -> PyResult<MfccPowerNorm> {
         "praat_duration" => Ok(MfccPowerNorm::PraatDuration),
         other => Err(PyValueError::new_err(format!(
             "unknown power norm {other:?}; expected raw | praat_duration"
-        ))),
-    }
-}
-
-fn lineage_str(l: PresetLineage) -> &'static str {
-    match l {
-        PresetLineage::Librosa => "librosa",
-        PresetLineage::Kaldi => "kaldi",
-        PresetLineage::Praat => "praat",
-        PresetLineage::Htk => "htk",
-        PresetLineage::Custom => "custom",
-    }
-}
-fn parse_lineage(s: &str) -> PyResult<PresetLineage> {
-    match s {
-        "librosa" => Ok(PresetLineage::Librosa),
-        "kaldi" => Ok(PresetLineage::Kaldi),
-        "praat" => Ok(PresetLineage::Praat),
-        "htk" => Ok(PresetLineage::Htk),
-        "custom" => Ok(PresetLineage::Custom),
-        other => Err(PyValueError::new_err(format!(
-            "unknown lineage {other:?}; expected librosa | kaldi | praat | htk | custom"
         ))),
     }
 }
@@ -450,7 +428,7 @@ pub(crate) struct PyMfccPreset {
 #[pymethods]
 impl PyMfccPreset {
     /// Builds a preset from params + metadata (for saving a user preset).
-    /// `based_on` is one of librosa | kaldi | praat | htk | custom.
+    /// `based_on` is a free-text lineage label (e.g. "librosa", "custom").
     #[new]
     #[pyo3(signature = (id, params, *, version="1.0.0".to_string(), title="".to_string(),
         description="".to_string(), based_on="custom".to_string(), faithful=false, reference=None))]
@@ -464,19 +442,19 @@ impl PyMfccPreset {
         based_on: String,
         faithful: bool,
         reference: Option<String>,
-    ) -> PyResult<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             inner: MfccPreset {
                 id,
                 version,
                 title,
                 description,
-                based_on: parse_lineage(&based_on)?,
+                based_on,
                 faithful,
                 reference,
                 params: params.inner,
             },
-        })
+        }
     }
 
     #[getter]
@@ -495,11 +473,11 @@ impl PyMfccPreset {
     fn description(&self) -> &str {
         &self.inner.description
     }
-    /// The reference this preset derives from: librosa | kaldi | praat | htk |
-    /// custom.
+    /// The reference this preset derives from (free-text lineage label, e.g.
+    /// "librosa" / "kaldi" / "praat" / "custom").
     #[getter]
-    fn based_on(&self) -> &'static str {
-        lineage_str(self.inner.based_on)
+    fn based_on(&self) -> &str {
+        &self.inner.based_on
     }
     /// Whether running this preset through the pipeline reproduces its
     /// reference to tolerance. (The Praat built-in is `False` — its pipeline
@@ -528,9 +506,7 @@ impl PyMfccPreset {
     fn __repr__(&self) -> String {
         format!(
             "MfccPreset(id={:?}, based_on={:?}, faithful={})",
-            self.inner.id,
-            lineage_str(self.inner.based_on),
-            self.inner.faithful
+            self.inner.id, self.inner.based_on, self.inner.faithful
         )
     }
 }

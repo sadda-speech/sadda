@@ -19,6 +19,7 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pyme
 mod live;
 mod mfcc_preset;
 mod ml;
+mod pitch_preset;
 mod recipe;
 mod refdist;
 
@@ -4460,6 +4461,30 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     mfcc_preset_mod.add_class::<mfcc_preset::PyMfccPreset>()?;
     m.add("mfcc_preset", &mfcc_preset_mod)?;
     sys_modules.set_item("sadda._native.mfcc_preset", &mfcc_preset_mod)?;
+
+    // Pitch preset registry: sadda.dsp preset surface (roadmap item 6).
+    // Registered as `sadda._native.pitch_preset`; the Python
+    // `sadda/dsp/__init__.py` re-exports the params/preset types and the
+    // store functions, and dispatches `voiced_pitch(audio, params=…)`.
+    let pitch_preset_mod = PyModule::new(m.py(), "sadda._native.pitch_preset")?;
+    pitch_preset_mod.add_function(wrap_pyfunction!(
+        pitch_preset::store_root,
+        &pitch_preset_mod
+    )?)?;
+    pitch_preset_mod.add_function(wrap_pyfunction!(pitch_preset::builtin, &pitch_preset_mod)?)?;
+    pitch_preset_mod.add_function(wrap_pyfunction!(pitch_preset::list_all, &pitch_preset_mod)?)?;
+    pitch_preset_mod.add_function(wrap_pyfunction!(
+        pitch_preset::list_user,
+        &pitch_preset_mod
+    )?)?;
+    pitch_preset_mod.add_function(wrap_pyfunction!(pitch_preset::get, &pitch_preset_mod)?)?;
+    pitch_preset_mod.add_function(wrap_pyfunction!(pitch_preset::save, &pitch_preset_mod)?)?;
+    pitch_preset_mod.add_function(wrap_pyfunction!(pitch_preset::delete, &pitch_preset_mod)?)?;
+    pitch_preset_mod.add_function(wrap_pyfunction!(pitch_preset::compute, &pitch_preset_mod)?)?;
+    pitch_preset_mod.add_class::<pitch_preset::PyPitchParams>()?;
+    pitch_preset_mod.add_class::<pitch_preset::PyPitchPreset>()?;
+    m.add("pitch_preset", &pitch_preset_mod)?;
+    sys_modules.set_item("sadda._native.pitch_preset", &pitch_preset_mod)?;
     Ok(())
 }
 
