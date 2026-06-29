@@ -61,7 +61,19 @@ Reverse-engineered from Praat source (`NUMhertzToMel2`, `Sound_to_MelSpectrogram
   `MfccMethod::Praat` documented as approximate. To finish: get
   `Sound_createGaussian`'s exact formula + apply `windowCorrection`.
 
-### Design: one parameterized pipeline + presets (feasibility CONFIRMED, not yet built)
+### Design: one parameterized pipeline + presets (feasibility CONFIRMED; engine BUILT additively)
+
+**UPDATE (same session):** the engine half is now **built and committed**
+(`feat(dsp): unified MfccParams pipeline + reference presets`). `MfccParams`
+exposes every knob; `MfccParams::librosa/kaldi/praat` are presets; one
+`mfcc_with_params()` pipeline runs them. Proven: `mfcc_with_params(preset)`
+reproduces the librosa + Kaldi goldens to tolerance *and* agrees bit-for-bit
+with `mfcc(method)` (agreement test). The unification is real, not just
+designed. (Found en route: Kaldi triangulates filters linearly in *mel*,
+librosa/Praat in *Hz* — the `triangle_in_mel` knob.) Additive: the enum
+dispatch still calls the dedicated fns; collapsing it is mechanical (step 2
+below, now mostly done).
+
 
 User goal: *set the parameters that can vary, offer presets by authoritative
 reference (Praat/librosa/Kaldi/HTK) or user-defined, and "select a preset then
@@ -103,14 +115,16 @@ extends to pitch/formants.
 
 ### Roadmap (resume here)
 1. **Finish Praat** byte-exactness (`Sound_createGaussian` + `windowCorrection`).
-2. **`MfccParams` + `mfcc_with_params`** general pipeline; `librosa()/kaldi()/
-   praat()/htk()` preset constructors; prove it reproduces all goldens, then
-   `mfcc(…method)` delegates to it. (Additive first — keep the enum path until
-   the general pipeline is golden-green.)
-3. **On-disk preset registry** (builtin authoritative + user-defined) + schema.
-4. **Python**: `params=`/`preset=` + per-param override; stubs; tests.
-5. **GUI**: preset picker + per-parameter editing (also a backlogged design
-   session on *communicating* parameter effects via visualization).
+2. ✅ **`MfccParams` + `mfcc_with_params`** general pipeline + `librosa/kaldi/
+   praat` presets — built, golden-validated, agrees with the enum. *Remaining:*
+   collapse the enum dispatch to `mfcc_with_params` + delete the 3 now-redundant
+   dedicated fns (mechanical, agreement-test-guarded); add an `htk()` preset.
+3. **On-disk preset registry** (builtin authoritative + user-defined) + schema,
+   alongside `model-registry`/`refdist-registry`. Needs serde on the `Mfcc*`
+   enums + `MfccParams`.
+4. **Python**: expose `MfccParams`/presets + per-param override; stubs; tests.
+5. **GUI**: preset picker + per-parameter editing (+ backlogged design session
+   on *communicating* parameter effects via visualization).
 6. **Extend** the params+presets pattern to pitch (`PitchConfig`/`PitchMethod`)
    and formants (`FormantsConfig`/`LpcMethod`).
 
