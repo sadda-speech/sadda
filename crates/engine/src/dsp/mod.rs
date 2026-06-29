@@ -20,7 +20,10 @@ pub use formants::{FormantFrame, FormantsConfig, formants};
 pub use intensity::{IntensityFrame, intensity};
 pub use lpc::{LpcMethod, LpcResult, autocorr_lpc, burg_lpc, lpc};
 pub use ltas::{Ltas, ltas};
-pub use mfcc::{MfccMethod, log_mel, log_mel_whisper, mfcc};
+pub use mfcc::{
+    MelScaleKind, MfccDct, MfccFft, MfccFilterNorm, MfccFilters, MfccFraming, MfccLog, MfccMethod,
+    MfccParams, MfccPowerNorm, MfccWindow, log_mel, log_mel_whisper, mfcc, mfcc_with_params,
+};
 pub use roots::polynomial_roots;
 pub use spectrogram::power_spectrogram;
 pub use stft::{Shape, stft};

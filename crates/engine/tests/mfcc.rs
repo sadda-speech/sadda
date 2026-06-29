@@ -6,7 +6,7 @@
 use std::fs;
 use std::path::Path;
 
-use sadda_engine::dsp::{MfccMethod, mfcc};
+use sadda_engine::dsp::{MfccMethod, MfccParams, mfcc, mfcc_with_params};
 
 const SR: u32 = 16_000;
 const FRAME_S: f32 = 0.025;
@@ -105,6 +105,65 @@ fn mfcc_kaldi_matches_torchaudio_kaldi_golden() {
         max_abs < 1e-2,
         "max abs diff vs torchaudio kaldi golden = {max_abs} (expected < 1e-2)"
     );
+}
+
+#[test]
+fn unified_pipeline_reproduces_librosa_and_kaldi_presets() {
+    // The parameterized pipeline (mfcc_with_params) with a reference preset
+    // must equal that reference's golden bit-for-bit-to-tolerance — the proof
+    // that the three methods unify into one knob space.
+    let input = read_input();
+
+    let lg = read_golden("mfcc_librosa_golden.tsv");
+    let lp = MfccParams::librosa(FRAME_S, HOP_S, N_MELS, lg.len(), 0.0, SR as f32 / 2.0);
+    let lours = mfcc_with_params(&input, SR, &lp);
+    let mut lmax = 0.0_f32;
+    for c in 0..lg.len() {
+        for fr in 0..lg[0].len() {
+            lmax = lmax.max((lours[[fr, c]] - lg[c][fr]).abs());
+        }
+    }
+    assert!(lmax < 1e-2, "librosa preset vs golden = {lmax}");
+
+    let kg = read_golden("mfcc_kaldi_golden.tsv");
+    let kp = MfccParams::kaldi(FRAME_S, HOP_S, N_MELS, kg.len(), 0.0, SR as f32 / 2.0);
+    let kours = mfcc_with_params(&input, SR, &kp);
+    let mut kmax = 0.0_f32;
+    for c in 0..kg.len() {
+        for fr in 0..kg[0].len() {
+            kmax = kmax.max((kours[[fr, c]] - kg[c][fr]).abs());
+        }
+    }
+    assert!(kmax < 1e-2, "kaldi preset vs golden = {kmax}");
+}
+
+#[test]
+fn unified_pipeline_preset_matches_enum_method() {
+    // mfcc(method) and mfcc_with_params(preset) must agree — same algorithm,
+    // two entry points.
+    let input = read_input();
+    let viaenum = mfcc(
+        &input,
+        SR,
+        FRAME_S,
+        HOP_S,
+        N_MELS,
+        13,
+        0.0,
+        SR as f32 / 2.0,
+        MfccMethod::Librosa,
+    );
+    let viaparams = mfcc_with_params(
+        &input,
+        SR,
+        &MfccParams::librosa(FRAME_S, HOP_S, N_MELS, 13, 0.0, SR as f32 / 2.0),
+    );
+    assert_eq!(viaenum.dim(), viaparams.dim());
+    let mut d = 0.0_f32;
+    for (a, b) in viaenum.iter().zip(viaparams.iter()) {
+        d = d.max((a - b).abs());
+    }
+    assert!(d < 1e-5, "enum vs params drift = {d}");
 }
 
 #[test]

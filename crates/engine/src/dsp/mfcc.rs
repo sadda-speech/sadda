@@ -109,6 +109,12 @@ pub fn mfcc(
     assert!(n_mfcc > 0);
     assert!(f_max > f_min);
 
+    // Each named method is a point in the MfccParams space — `mfcc_with_params`
+    // reproduces all three (proven by `unified_pipeline_*` tests). The dedicated
+    // functions below remain the dispatch target for now; collapsing this match
+    // to `mfcc_with_params(MfccParams::from(method))` is a mechanical next step
+    // (guarded by the enum-vs-params agreement test). n_mels / f_min are ignored
+    // for Praat (it derives the filter count from the 100-mel spacing).
     match method {
         MfccMethod::Librosa => mfcc_librosa(
             samples,
@@ -130,8 +136,6 @@ pub fn mfcc(
             f_min,
             f_max,
         ),
-        // n_mels / f_min are ignored for Praat (it derives the filter count
-        // from the 100-mel spacing up to the Nyquist mel).
         MfccMethod::Praat => mfcc_praat(
             samples,
             sample_rate,
@@ -802,6 +806,521 @@ fn dct_ii_matrix(n_mels: usize, n_mfcc: usize) -> Vec<f32> {
         }
     }
     m
+}
+
+// ============================================================================
+// Parameterized MFCC: one pipeline, every knob — "pick a preset, then tweak".
+//
+// The named `MfccMethod` variants above are opaque faithful reproductions. The
+// types below expose the *parameter space* they live in (the 2026-06-29 design):
+// every reference difference is a per-stage scalar or enum, so one pipeline
+// (`mfcc_with_params`) covers all of them, and the presets (`MfccParams::librosa`
+// /`kaldi`/`praat`) are named points validated by the same goldens. This is what
+// lets a caller select a reference and then change an individual parameter.
+// ============================================================================
+
+/// Mel-scale convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MelScaleKind {
+    /// librosa default — piecewise linear-then-log (Slaney 1998).
+    Slaney,
+    /// HTK / O'Shaughnessy–Makhoul `2595·log10(1+f/700)` (Kaldi, Praat).
+    Htk,
+}
+
+/// Analysis window function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MfccWindow {
+    /// Periodic Hann (librosa).
+    PeriodicHann,
+    /// Symmetric Hann raised to 0.85 (Kaldi).
+    Povey,
+    /// Praat GAUSSIAN_2.
+    PraatGaussian,
+    /// Hamming (HTK).
+    Hamming,
+}
+
+/// Frame placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MfccFraming {
+    /// librosa `center=True`: zero-pad win/2 each side, `n = 1 + len/hop`.
+    Centered,
+    /// No centering: `n = 1 + (len − win)/hop` (Kaldi snip-edges, Praat).
+    SnipEdges,
+}
+
+/// FFT length rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MfccFft {
+    /// FFT size equals the window length (librosa).
+    WindowLength,
+    /// Round up to the next power of two (Kaldi, Praat).
+    NextPow2,
+}
+
+/// Triangular filterbank layout.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MfccFilters {
+    /// `n` filters spread over `[f_min, f_max]` (librosa, Kaldi).
+    NMels(usize),
+    /// Centres every `step_mel` from `first_mel`, count derived up to the
+    /// Nyquist mel (Praat — `n_mels` does not apply).
+    MelSpacing {
+        /// Centre of the first filter, in mel.
+        first_mel: f32,
+        /// Spacing between filter centres, in mel.
+        step_mel: f32,
+    },
+}
+
+/// Triangle height normalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MfccFilterNorm {
+    /// Slaney area norm: height `2/(f_high − f_low)` (librosa).
+    AreaSlaney,
+    /// Unit peak (Kaldi, Praat).
+    UnitPeak,
+}
+
+/// Log compression of mel energies.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MfccLog {
+    /// `10·log10(max(e, amin)/reference)`, with an optional *global* `top_db`
+    /// dynamic-range floor (librosa: ref 1, amin 1e-10, top_db 80; Praat:
+    /// ref 4e-10, no top_db).
+    Db {
+        /// dB reference (denominator): 1.0 for librosa, 4e-10 for Praat.
+        reference: f32,
+        /// Energy floor applied before the log (librosa 1e-10).
+        amin: f32,
+        /// Optional global dynamic-range floor in dB (librosa 80).
+        top_db: Option<f32>,
+    },
+    /// `ln(max(e, floor))` (Kaldi).
+    NaturalLn {
+        /// Energy floor applied before `ln` (Kaldi `f32::EPSILON`).
+        floor: f32,
+    },
+}
+
+/// DCT normalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MfccDct {
+    /// Orthonormal DCT-II (librosa, Kaldi).
+    Ortho,
+    /// Bare cosine sum `Σ_j P_j·cos(πm(j+0.5)/N)` (Praat).
+    Unnormalized,
+}
+
+/// Power-spectrum scaling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MfccPowerNorm {
+    /// Raw `|FFT|²` (librosa, Kaldi).
+    Raw,
+    /// Praat: `2/(nfft·win)·|FFT|²`.
+    PraatDuration,
+}
+
+/// The full MFCC parameter space. Build one with a preset
+/// ([`MfccParams::librosa`] / [`kaldi`](MfccParams::kaldi) /
+/// [`praat`](MfccParams::praat)) and then override individual fields, or
+/// construct from scratch. Run via [`mfcc_with_params`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MfccParams {
+    /// Base analysis-window duration in seconds (before `window_duration_factor`).
+    pub frame_size_seconds: f32,
+    /// Frame advance in seconds.
+    pub hop_seconds: f32,
+    /// Output columns (column 0 is c0).
+    pub n_mfcc: usize,
+    /// Lowest filterbank frequency in Hz.
+    pub f_min: f32,
+    /// Highest filterbank frequency in Hz (typically the Nyquist).
+    pub f_max: f32,
+    /// Analysis window function.
+    pub window: MfccWindow,
+    /// Window length = `frame_size · this · sr` (Praat uses 2.0).
+    pub window_duration_factor: f32,
+    /// Frame placement convention.
+    pub framing: MfccFraming,
+    /// FFT-length rule.
+    pub fft: MfccFft,
+    /// Subtract the per-frame mean before windowing (Kaldi).
+    pub remove_dc: bool,
+    /// Pre-emphasis coefficient `α` in `y[n] = x[n] − α·x[n−1]` (0 = none).
+    pub pre_emphasis: f32,
+    /// Mel-scale convention.
+    pub mel_scale: MelScaleKind,
+    /// Filterbank layout.
+    pub filters: MfccFilters,
+    /// Triangle height normalization.
+    pub filter_norm: MfccFilterNorm,
+    /// Triangle slopes are linear in the mel domain (Kaldi) rather than in Hz
+    /// (librosa, Praat).
+    pub triangle_in_mel: bool,
+    /// Drop the Nyquist FFT bin from the filterbank (Kaldi does).
+    pub exclude_nyquist_bin: bool,
+    /// Log compression of mel energies.
+    pub log: MfccLog,
+    /// DCT normalization.
+    pub dct: MfccDct,
+    /// Power-spectrum scaling.
+    pub power_norm: MfccPowerNorm,
+    /// Sinusoidal cepstral lifter `L` (0 = none).
+    pub lifter: f32,
+}
+
+impl MfccParams {
+    /// Faithful `librosa.feature.mfcc` (0.11) parameters.
+    pub fn librosa(
+        frame_size_seconds: f32,
+        hop_seconds: f32,
+        n_mels: usize,
+        n_mfcc: usize,
+        f_min: f32,
+        f_max: f32,
+    ) -> Self {
+        Self {
+            frame_size_seconds,
+            hop_seconds,
+            n_mfcc,
+            f_min,
+            f_max,
+            window: MfccWindow::PeriodicHann,
+            window_duration_factor: 1.0,
+            framing: MfccFraming::Centered,
+            fft: MfccFft::WindowLength,
+            remove_dc: false,
+            pre_emphasis: 0.0,
+            mel_scale: MelScaleKind::Slaney,
+            filters: MfccFilters::NMels(n_mels),
+            filter_norm: MfccFilterNorm::AreaSlaney,
+            triangle_in_mel: false,
+            exclude_nyquist_bin: false,
+            log: MfccLog::Db {
+                reference: 1.0,
+                amin: 1e-10,
+                top_db: Some(80.0),
+            },
+            dct: MfccDct::Ortho,
+            power_norm: MfccPowerNorm::Raw,
+            lifter: 0.0,
+        }
+    }
+
+    /// Faithful Kaldi `compute-mfcc-feats` parameters.
+    pub fn kaldi(
+        frame_size_seconds: f32,
+        hop_seconds: f32,
+        n_mels: usize,
+        n_mfcc: usize,
+        f_min: f32,
+        f_max: f32,
+    ) -> Self {
+        Self {
+            frame_size_seconds,
+            hop_seconds,
+            n_mfcc,
+            f_min,
+            f_max,
+            window: MfccWindow::Povey,
+            window_duration_factor: 1.0,
+            framing: MfccFraming::SnipEdges,
+            fft: MfccFft::NextPow2,
+            remove_dc: true,
+            pre_emphasis: 0.97,
+            mel_scale: MelScaleKind::Htk,
+            filters: MfccFilters::NMels(n_mels),
+            filter_norm: MfccFilterNorm::UnitPeak,
+            triangle_in_mel: true,
+            exclude_nyquist_bin: true,
+            log: MfccLog::NaturalLn {
+                floor: f32::EPSILON,
+            },
+            dct: MfccDct::Ortho,
+            power_norm: MfccPowerNorm::Raw,
+            lifter: 22.0,
+        }
+    }
+
+    /// Praat `Sound: To MFCC…` parameters (approximate — see
+    /// [`MfccMethod::Praat`]). `n_mfcc` includes c0; `n_mels` does not apply.
+    pub fn praat(frame_size_seconds: f32, hop_seconds: f32, n_mfcc: usize, f_max: f32) -> Self {
+        Self {
+            frame_size_seconds,
+            hop_seconds,
+            n_mfcc,
+            f_min: 0.0,
+            f_max,
+            window: MfccWindow::PraatGaussian,
+            window_duration_factor: 2.0,
+            framing: MfccFraming::SnipEdges,
+            fft: MfccFft::NextPow2,
+            remove_dc: false,
+            pre_emphasis: 0.0,
+            mel_scale: MelScaleKind::Htk,
+            filters: MfccFilters::MelSpacing {
+                first_mel: 100.0,
+                step_mel: 100.0,
+            },
+            filter_norm: MfccFilterNorm::UnitPeak,
+            triangle_in_mel: false,
+            exclude_nyquist_bin: false,
+            log: MfccLog::Db {
+                reference: 4e-10,
+                amin: f32::MIN_POSITIVE,
+                top_db: None,
+            },
+            dct: MfccDct::Unnormalized,
+            power_norm: MfccPowerNorm::PraatDuration,
+            lifter: 0.0,
+        }
+    }
+}
+
+/// General triangular mel filterbank, row-major `(num_filters, n_freq)`,
+/// parameterised by mel scale / layout / normalization. Reproduces the
+/// librosa (Slaney+area), Kaldi (HTK+unit-peak, Nyquist-excluded), and Praat
+/// (HTK+unit-peak+mel-spacing) banks exactly.
+fn mel_filterbank_general(
+    p: &MfccParams,
+    n_freq: usize,
+    nfft: usize,
+    sr: f32,
+) -> (Vec<f32>, usize) {
+    type MelFn = fn(f32) -> f32;
+    let (to_mel, to_hz): (MelFn, MelFn) = match p.mel_scale {
+        MelScaleKind::Slaney => (hz_to_mel_slaney, mel_to_hz_slaney),
+        MelScaleKind::Htk => (hz_to_mel_praat, mel_to_hz_praat),
+    };
+    // Mel edges (left, centre, right) per filter, plus the Hz width (for area
+    // norm). Triangle slopes are then evaluated in mel (Kaldi) or Hz (others).
+    let mut mel_edges: Vec<(f32, f32, f32)> = Vec::new();
+    match p.filters {
+        MfccFilters::NMels(n) => {
+            let mlo = to_mel(p.f_min);
+            let mhi = to_mel(p.f_max);
+            let e: Vec<f32> = (0..n + 2)
+                .map(|i| mlo + (mhi - mlo) * i as f32 / (n + 1) as f32)
+                .collect();
+            for m in 0..n {
+                mel_edges.push((e[m], e[m + 1], e[m + 2]));
+            }
+        }
+        MfccFilters::MelSpacing {
+            first_mel,
+            step_mel,
+        } => {
+            let mmax = to_mel(p.f_max);
+            let num = (((mmax - first_mel) / step_mel).round() as usize).max(1);
+            for k in 0..num {
+                let fc = first_mel + k as f32 * step_mel;
+                mel_edges.push(((fc - step_mel).max(0.0), fc, (fc + step_mel).min(mmax)));
+            }
+        }
+    }
+    let num = mel_edges.len();
+    let df = sr / nfft as f32;
+    let top_bin = if p.exclude_nyquist_bin {
+        n_freq.saturating_sub(1)
+    } else {
+        n_freq
+    };
+    let mut fb = vec![0.0_f32; num * n_freq];
+    for (m, &(lm, cm, rm)) in mel_edges.iter().enumerate() {
+        // Area norm uses the Hz width regardless of the slope domain (librosa).
+        let height = match p.filter_norm {
+            MfccFilterNorm::UnitPeak => 1.0,
+            MfccFilterNorm::AreaSlaney => 2.0 / (to_hz(rm) - to_hz(lm)).max(1e-12),
+        };
+        // Triangle vertices in the evaluation domain.
+        let (l, c, r) = if p.triangle_in_mel {
+            (lm, cm, rm)
+        } else {
+            (to_hz(lm), to_hz(cm), to_hz(rm))
+        };
+        for b in 0..top_bin {
+            let coord = if p.triangle_in_mel {
+                to_mel(b as f32 * df)
+            } else {
+                b as f32 * df
+            };
+            let w = if coord <= l || coord >= r {
+                0.0
+            } else if coord <= c {
+                (coord - l) / (c - l).max(1e-12)
+            } else {
+                (r - coord) / (r - c).max(1e-12)
+            };
+            fb[m * n_freq + b] = w * height;
+        }
+    }
+    (fb, num)
+}
+
+/// DCT matrix `(n_out, num_filters)` row-major for the chosen normalization.
+fn build_dct(kind: MfccDct, num_filters: usize, n_out: usize) -> Vec<f32> {
+    match kind {
+        MfccDct::Ortho => dct_ii_matrix(num_filters, n_out),
+        MfccDct::Unnormalized => {
+            let mut m = vec![0.0_f32; n_out * num_filters];
+            for c in 0..n_out {
+                for j in 0..num_filters {
+                    m[c * num_filters + j] = (std::f32::consts::PI * c as f32 * (j as f32 + 0.5)
+                        / num_filters as f32)
+                        .cos();
+                }
+            }
+            m
+        }
+    }
+}
+
+/// Computes MFCCs from an explicit [`MfccParams`]. Returns `(n_frames,
+/// n_mfcc)` frames-first. This is the unified pipeline the named
+/// [`MfccMethod`] presets are points in; use it to start from a reference
+/// preset and override individual parameters.
+pub fn mfcc_with_params(samples: &[f32], sample_rate: u32, p: &MfccParams) -> Array2<f32> {
+    assert!(sample_rate > 0 && p.n_mfcc > 0 && p.f_max > p.f_min);
+    let sr = sample_rate as f32;
+    let win = (p.frame_size_seconds * p.window_duration_factor * sr).round() as usize;
+    let hop = (p.hop_seconds * sr).round() as usize;
+    if win == 0 || hop == 0 || samples.is_empty() {
+        return Array2::zeros((0, p.n_mfcc));
+    }
+    let nfft = match p.fft {
+        MfccFft::WindowLength => win,
+        MfccFft::NextPow2 => win.next_power_of_two(),
+    };
+    let n_freq = nfft / 2 + 1;
+
+    let window = match p.window {
+        MfccWindow::PeriodicHann => hann_periodic(win),
+        MfccWindow::Povey => povey_window(win),
+        MfccWindow::PraatGaussian => praat_gaussian_window(win),
+        MfccWindow::Hamming => crate::dsp::windowing::hamming(win),
+    };
+    let (mel_fb, num_filters) = mel_filterbank_general(p, n_freq, nfft, sr);
+    if num_filters == 0 {
+        return Array2::zeros((0, p.n_mfcc));
+    }
+    let n_out = p.n_mfcc.min(num_filters);
+    let dct = build_dct(p.dct, num_filters, n_out);
+    let lifter: Vec<f32> = (0..n_out)
+        .map(|i| {
+            if p.lifter > 0.0 {
+                1.0 + (p.lifter / 2.0) * (std::f32::consts::PI * i as f32 / p.lifter).sin()
+            } else {
+                1.0
+            }
+        })
+        .collect();
+    let power_scale = match p.power_norm {
+        MfccPowerNorm::Raw => 1.0,
+        MfccPowerNorm::PraatDuration => 2.0 / (nfft as f32 * win as f32),
+    };
+
+    // Framing: Centered materialises a zero-padded source; SnipEdges reads
+    // `samples` directly. Either way frame f = src[f*hop .. f*hop+win].
+    let (src, n_frames): (std::borrow::Cow<[f32]>, usize) = match p.framing {
+        MfccFraming::Centered => {
+            let pad = win / 2;
+            let nf = 1 + samples.len() / hop;
+            let padded_len = ((nf - 1) * hop + win).max(samples.len() + 2 * pad);
+            let mut padded = vec![0.0_f32; padded_len];
+            padded[pad..pad + samples.len()].copy_from_slice(samples);
+            (std::borrow::Cow::Owned(padded), nf)
+        }
+        MfccFraming::SnipEdges => {
+            if samples.len() < win {
+                return Array2::zeros((0, p.n_mfcc));
+            }
+            (
+                std::borrow::Cow::Borrowed(samples),
+                1 + (samples.len() - win) / hop,
+            )
+        }
+    };
+
+    let mut planner = RealFftPlanner::<f32>::new();
+    let plan = planner.plan_fft_forward(nfft);
+    let mut fft_in = plan.make_input_vec();
+    let mut fft_out = plan.make_output_vec();
+    let mut frame = vec![0.0_f32; win];
+    let mut power = vec![0.0_f32; n_freq];
+    let mut grid = vec![0.0_f32; n_frames * num_filters];
+    let mut gmax = f32::NEG_INFINITY;
+    for f in 0..n_frames {
+        let start = f * hop;
+        frame.copy_from_slice(&src[start..start + win]);
+        if p.remove_dc {
+            let mean = frame.iter().sum::<f32>() / win as f32;
+            for s in frame.iter_mut() {
+                *s -= mean;
+            }
+        }
+        if p.pre_emphasis > 0.0 {
+            let a = p.pre_emphasis;
+            for i in (1..win).rev() {
+                frame[i] -= a * frame[i - 1];
+            }
+            frame[0] -= a * frame[0];
+        }
+        for d in fft_in[win..].iter_mut() {
+            *d = 0.0;
+        }
+        for (dst, (&s, &w)) in fft_in[..win]
+            .iter_mut()
+            .zip(frame.iter().zip(window.iter()))
+        {
+            *dst = s * w;
+        }
+        plan.process(&mut fft_in, &mut fft_out)
+            .expect("realfft buffers sized via make_*_vec");
+        for (i, c) in fft_out.iter().enumerate() {
+            power[i] = (c.re * c.re + c.im * c.im) * power_scale;
+        }
+        for m in 0..num_filters {
+            let mut e = 0.0_f32;
+            for (b, &pw) in power.iter().enumerate() {
+                e += pw * mel_fb[m * n_freq + b];
+            }
+            let v = match p.log {
+                MfccLog::Db {
+                    reference, amin, ..
+                } => 10.0 * (e.max(amin) / reference).log10(),
+                MfccLog::NaturalLn { floor } => e.max(floor).ln(),
+            };
+            grid[f * num_filters + m] = v;
+            if v > gmax {
+                gmax = v;
+            }
+        }
+    }
+    if let MfccLog::Db {
+        top_db: Some(td), ..
+    } = p.log
+    {
+        let floor = gmax - td;
+        for v in grid.iter_mut() {
+            if *v < floor {
+                *v = floor;
+            }
+        }
+    }
+
+    let mut out = Array2::<f32>::zeros((n_frames, p.n_mfcc));
+    for f in 0..n_frames {
+        for c in 0..n_out {
+            let mut acc = 0.0_f32;
+            for m in 0..num_filters {
+                acc += grid[f * num_filters + m] * dct[c * num_filters + m];
+            }
+            out[[f, c]] = acc * lifter[c];
+        }
+    }
+    out
 }
 
 #[cfg(test)]
