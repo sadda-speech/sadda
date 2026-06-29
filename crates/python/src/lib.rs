@@ -17,6 +17,7 @@ use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
 mod live;
+mod mfcc_preset;
 mod ml;
 mod recipe;
 mod refdist;
@@ -60,6 +61,9 @@ pub(crate) fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
             PyValueError::new_err(format!("measure '{measure}' unreliable: {reason}"))
         }
         sadda_engine::EngineError::Ml(msg) => PyRuntimeError::new_err(format!("ml error: {msg}")),
+        sadda_engine::EngineError::Preset(msg) => {
+            PyValueError::new_err(format!("preset error: {msg}"))
+        }
     }
 }
 
@@ -4438,6 +4442,24 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     ml_mod.add_class::<ml::PyModel>()?;
     m.add("ml", &ml_mod)?;
     sys_modules.set_item("sadda._native.ml", &ml_mod)?;
+
+    // MFCC preset registry: sadda.dsp preset surface (roadmap item 3/4).
+    // Registered as `sadda._native.mfcc_preset`; the Python
+    // `sadda/dsp/__init__.py` re-exports the params/preset types and the
+    // store functions, and dispatches `mfcc(audio, params=…)` to `compute`.
+    let mfcc_preset_mod = PyModule::new(m.py(), "sadda._native.mfcc_preset")?;
+    mfcc_preset_mod.add_function(wrap_pyfunction!(mfcc_preset::store_root, &mfcc_preset_mod)?)?;
+    mfcc_preset_mod.add_function(wrap_pyfunction!(mfcc_preset::builtin, &mfcc_preset_mod)?)?;
+    mfcc_preset_mod.add_function(wrap_pyfunction!(mfcc_preset::list_all, &mfcc_preset_mod)?)?;
+    mfcc_preset_mod.add_function(wrap_pyfunction!(mfcc_preset::list_user, &mfcc_preset_mod)?)?;
+    mfcc_preset_mod.add_function(wrap_pyfunction!(mfcc_preset::get, &mfcc_preset_mod)?)?;
+    mfcc_preset_mod.add_function(wrap_pyfunction!(mfcc_preset::save, &mfcc_preset_mod)?)?;
+    mfcc_preset_mod.add_function(wrap_pyfunction!(mfcc_preset::delete, &mfcc_preset_mod)?)?;
+    mfcc_preset_mod.add_function(wrap_pyfunction!(mfcc_preset::compute, &mfcc_preset_mod)?)?;
+    mfcc_preset_mod.add_class::<mfcc_preset::PyMfccParams>()?;
+    mfcc_preset_mod.add_class::<mfcc_preset::PyMfccPreset>()?;
+    m.add("mfcc_preset", &mfcc_preset_mod)?;
+    sys_modules.set_item("sadda._native.mfcc_preset", &mfcc_preset_mod)?;
     Ok(())
 }
 
