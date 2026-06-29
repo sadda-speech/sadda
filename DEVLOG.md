@@ -6,6 +6,63 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-29 — Generic preset core + pitch presets (three surfaces); item 6 pitch done
+
+Extended the preset pattern from MFCC to **pitch** (roadmap item 6), first
+**generalizing the registry** so the third/fourth domains don't duplicate it.
+Decisions taken with the user: *pitch first, full stack*; *generic `Preset<P>`
+core*.
+
+### Generic core (`crate::preset`)
+
+Extracted the MFCC store into a payload-generic registry: `Preset<P>` (id /
+version / title / description / `based_on` / `faithful` / `reference` /
+`params: P`), a `PresetStore<P>`, and a `PresetDomain` trait each param type
+implements to declare its on-disk `subdir()` + code-sourced `builtins()`. MFCC
+became `type MfccPreset = Preset<MfccParams>` / `MfccPresetStore =
+PresetStore<MfccParams>` via `impl PresetDomain for MfccParams` — ~250 lines of
+store code deleted, MFCC tests still green. The MFCC-specific `PresetLineage`
+enum collapsed into a free-text `based_on: String` (lineage vocabularies differ
+per domain: librosa/kaldi/praat vs praat/yin/pyin/swipe); the Python `based_on`
+getter/ctor simplified accordingly (no stub drift).
+
+### Pitch (engine + Python + GUI)
+
+- **Engine:** serde + `PartialEq` + `Copy` on `PitchConfig` / `PitchMethod`;
+  new `PitchParams { method, config }` (the pitch analogue of `MfccParams` —
+  the tracker API takes method *separately*, so the preset payload bundles
+  both) + `pitch_with_params`. `pitch_preset.rs`: `impl PresetDomain for
+  PitchParams` (subdir `pitch`) + four built-ins at their reference defaults
+  (`praat-ac` Boersma / `yin` / `pyin` / `swipe`), all `faithful` since
+  `PitchConfig::default()` already matches the Praat/paper defaults. Pinned
+  `PYin`'s serde name to `"pyin"` (not snake_case `p_yin`) to match the
+  `voiced_pitch(method=…)` vocabulary. 4 tests.
+- **Python:** `sadda._native.pitch_preset` submodule mirroring `mfcc_preset` —
+  `PitchParams` pyclass (`for_method` + getters + `.replace(**kwargs)` over all
+  16 knobs + `to_toml`), `PitchPreset`, store fns, `compute` (returns the same
+  `(times, freqs, voicing)` as `voiced_pitch`). `sadda.dsp.voiced_pitch(audio,
+  params=…)` now dispatches; preset surface PROVISIONAL. **`voiced_pitch(
+  params=preset)` is bit-equal to `voiced_pitch(method=…)`.** 9 tests.
+- **GUI:** unified the f0 lane onto a single `tracks.pitch_params: PitchParams`
+  (engine type, now `Copy` so `MeasureTrackConfig` stays `Copy`), *replacing*
+  the old `pitch_method` mirror + the three separate `f0_min/max/voicing`
+  fields (their values were identical to `PitchConfig::default()`, so behaviour
+  is preserved; y-axis bounds now read from the params). Removed the
+  `PitchMethodChoice` mirror. View ▸ DSP methods ▸ f0 is now a **preset
+  picker** + **Edit-parameters modal** (method ComboBox + min/max/voicing/
+  frame/hop, plus method-specific advanced sliders shown for the active
+  method); `pitch_preset_id` on `PersistedState` drives the menu label + a
+  "(modified)" flag.
+
+**Validation:** engine 226 lib tests, app 115 tests, Python 20 dsp-preset tests
+green; no stub drift; `fmt`/`clippy` clean workspace-wide; app boots cleanly
+(old persisted state without the removed `f0_*` fields migrates via
+`#[serde(default)]`). *Remaining:* item 6 **formants** (the generic core + this
+pattern make it a fast follow), and the live GUI-interaction check (boot- and
+pattern-validated only).
+
+---
+
 ## 2026-06-29 — MFCC preset registry: three surfaces (engine on-disk store + Python + GUI lane)
 
 Branch `feat/dsp-method-diversity`. Built roadmap items **3–5** in one slice
@@ -229,8 +286,14 @@ extends to pitch/formants.
 5. ✅ **GUI** — togglable MFCC heatmap lane (reuses the embedding-heatmap path)
    + View ▸ MFCC preset picker + modal per-parameter editor. The backlogged
    piece remains the deeper *communicating parameter effects* visualization.
-6. **Extend** the params+presets pattern to pitch (`PitchConfig`/`PitchMethod`)
-   and formants (`FormantsConfig`/`LpcMethod`).
+6. **Extend** the params+presets pattern to pitch + formants.
+   - ✅ **Generic core** (`crate::preset`: `Preset<P>` / `PresetStore<P>` /
+     `PresetDomain`) — MFCC refactored onto it; `based_on` now free-text.
+   - ✅ **Pitch** — `PitchParams` (method+config) + `pitch_preset.rs` builtins +
+     Python + GUI (f0 lane unified onto `pitch_params`; preset picker + editor).
+   - **Formants** — `impl PresetDomain for FormantsConfig` (already a unified
+     config; needs serde + `Copy` + builtins) + Python + GUI (the formant LPC
+     picker → preset picker, mirroring the f0 work). The fast follow.
 
 Backlog updated with: real-Kaldi golden, MFCC-in-GUI, DSP-parameter-communication
 design, GUI in-line help, plus the 2026-06-27 review items.

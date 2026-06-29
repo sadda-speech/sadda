@@ -1,9 +1,19 @@
-# sadda MFCC preset registry
+# sadda DSP preset registry
 
-An MFCC **preset** is a named, reusable parameter set for
-`sadda.dsp.mfcc(audio, params=…)` — a point in the [`MfccParams`] space plus
+A **preset** is a named, reusable parameter set for a DSP method plus
 provenance (which authoritative reference it derives from, whether it's a
-faithful reproduction, a citation).
+faithful reproduction, a citation). Each DSP domain has its own subdirectory
+and built-in set, all sharing the same `<id>.toml` format and the generic
+`sadda_engine::preset` core:
+
+| Domain | Subdir | Params | Built-ins | Used by |
+|---|---|---|---|---|
+| MFCC | `presets/mfcc/` | `MfccParams` | librosa / kaldi / praat | `sadda.dsp.mfcc(audio, params=…)` |
+| Pitch | `presets/pitch/` | `PitchParams` (method + config) | praat-ac / yin / pyin / swipe | `sadda.dsp.voiced_pitch(audio, params=…)` |
+
+(Formants is the next domain to land.) The MFCC examples below illustrate the
+format; pitch presets follow the same shape with a `[params]` table holding a
+`method` plus a `[params.config]` sub-table.
 
 Unlike the [reference-distribution](../refdist-registry/) and
 [model](../model-registry/) registries — which pair a metadata manifest with a
