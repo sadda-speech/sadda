@@ -2357,13 +2357,29 @@ def ltas(audio: Audio, *, bin_hz: builtins.float = 100.0) -> Ltas:
     bands (Welch-averaged power).
     """
 
-def mfcc(audio: Audio, *, frame_size_seconds: builtins.float = 0.02500000037252903, hop_seconds: builtins.float = 0.009999999776482582, n_mels: builtins.int = 40, n_mfcc: builtins.int = 13, f_min: builtins.float = 0.0, f_max: typing.Optional[builtins.float] = None) -> numpy.typing.NDArray[numpy.float32]:
+def mfcc(audio: Audio, *, frame_size_seconds: builtins.float = 0.02500000037252903, hop_seconds: builtins.float = 0.009999999776482582, n_mels: builtins.int = 40, n_mfcc: builtins.int = 13, f_min: builtins.float = 0.0, f_max: typing.Optional[builtins.float] = None, method: builtins.str = 'librosa') -> numpy.typing.NDArray[numpy.float32]:
     r"""
     Computes Mel-Frequency Cepstral Coefficients over an [`Audio`]. Returns
     a 2-D float32 NumPy array of shape `(n_frames, n_mfcc)`, frames-first.
     
-    Defaults match `librosa.feature.mfcc`: Slaney mel scale, `n_mels=40`,
-    `n_mfcc=13`, `f_min=0`, `f_max=sr/2`, 25 ms frame, 10 ms hop.
+    "MFCC" is a family, not one algorithm — toolkits differ on log base,
+    windowing, mel scale, framing, etc. `method` picks the reference
+    implementation to reproduce faithfully:
+    
+    - `"librosa"` (**default**) — faithful `librosa.feature.mfcc` (0.11):
+      Slaney mel scale + area norm, power spectrum, `10·log10` power-to-dB
+      with an 80 dB global floor, periodic Hann, `center=True` framing
+      (so `n_frames = 1 + n/hop`), orthonormal DCT-II.
+    - `"kaldi"` — faithful Kaldi `compute-mfcc-feats`: DC removal,
+      pre-emphasis 0.97, Povey window, power-of-two FFT, HTK mel scale with
+      unit-peak filters, natural-log energies, DCT-II, cepstral lifter (L=22),
+      `snip_edges` framing. Validated against torchaudio's kaldi-compliance.
+    - `"praat"` — Praat `Sound: To MFCC…` (Gaussian window, HTK mel,
+      unit-peak filters, un-normalised DCT, c0 in column 0). **Approximate**:
+      structurally faithful but not yet byte-exact (see `MfccMethod::Praat`).
+    
+    Other params: `n_mels=40`, `n_mfcc=13`, `f_min=0`, `f_max=sr/2`, 25 ms
+    frame, 10 ms hop.
     """
 
 def new_project(path: builtins.str | os.PathLike | pathlib.Path, name: builtins.str) -> Project:

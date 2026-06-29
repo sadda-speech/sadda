@@ -3734,6 +3734,17 @@ fn parse_lpc_method(s: &str) -> PyResult<sadda_engine::dsp::LpcMethod> {
     }
 }
 
+fn parse_mfcc_method(s: &str) -> PyResult<sadda_engine::dsp::MfccMethod> {
+    match s {
+        "librosa" => Ok(sadda_engine::dsp::MfccMethod::Librosa),
+        "kaldi" => Ok(sadda_engine::dsp::MfccMethod::Kaldi),
+        "praat" => Ok(sadda_engine::dsp::MfccMethod::Praat),
+        other => Err(PyValueError::new_err(format!(
+            "unknown MFCC method {other:?}; expected 'librosa', 'kaldi', or 'praat'"
+        ))),
+    }
+}
+
 /// Estimates f0 with a voicing decision and returns `(times, frequencies,
 /// voicing)` as three NumPy arrays. `times` is float64 seconds at frame
 /// centres; `frequencies` is float32 Hz; `voicing` is float32 in `[0, 1]`.
@@ -3868,8 +3879,24 @@ fn formants(
 /// Computes Mel-Frequency Cepstral Coefficients over an [`Audio`]. Returns
 /// a 2-D float32 NumPy array of shape `(n_frames, n_mfcc)`, frames-first.
 ///
-/// Defaults match `librosa.feature.mfcc`: Slaney mel scale, `n_mels=40`,
-/// `n_mfcc=13`, `f_min=0`, `f_max=sr/2`, 25 ms frame, 10 ms hop.
+/// "MFCC" is a family, not one algorithm — toolkits differ on log base,
+/// windowing, mel scale, framing, etc. `method` picks the reference
+/// implementation to reproduce faithfully:
+///
+/// - `"librosa"` (**default**) — faithful `librosa.feature.mfcc` (0.11):
+///   Slaney mel scale + area norm, power spectrum, `10·log10` power-to-dB
+///   with an 80 dB global floor, periodic Hann, `center=True` framing
+///   (so `n_frames = 1 + n/hop`), orthonormal DCT-II.
+/// - `"kaldi"` — faithful Kaldi `compute-mfcc-feats`: DC removal,
+///   pre-emphasis 0.97, Povey window, power-of-two FFT, HTK mel scale with
+///   unit-peak filters, natural-log energies, DCT-II, cepstral lifter (L=22),
+///   `snip_edges` framing. Validated against torchaudio's kaldi-compliance.
+/// - `"praat"` — Praat `Sound: To MFCC…` (Gaussian window, HTK mel,
+///   unit-peak filters, un-normalised DCT, c0 in column 0). **Approximate**:
+///   structurally faithful but not yet byte-exact (see `MfccMethod::Praat`).
+///
+/// Other params: `n_mels=40`, `n_mfcc=13`, `f_min=0`, `f_max=sr/2`, 25 ms
+/// frame, 10 ms hop.
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -3877,6 +3904,7 @@ fn formants(
     frame_size_seconds=0.025, hop_seconds=0.010,
     n_mels=40, n_mfcc=13,
     f_min=0.0, f_max=None,
+    method="librosa",
 ))]
 #[allow(clippy::too_many_arguments)]
 fn mfcc<'py>(
@@ -3888,9 +3916,11 @@ fn mfcc<'py>(
     n_mfcc: usize,
     f_min: f32,
     f_max: Option<f32>,
-) -> Bound<'py, PyArray2<f32>> {
+    method: &str,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
     let mono: Vec<f32> = audio.inner.mono_samples().collect();
     let f_max = f_max.unwrap_or(audio.inner.sample_rate as f32 / 2.0);
+    let mfcc_method = parse_mfcc_method(method)?;
     let arr = sadda_engine::dsp::mfcc(
         &mono,
         audio.inner.sample_rate,
@@ -3900,8 +3930,9 @@ fn mfcc<'py>(
         n_mfcc,
         f_min,
         f_max,
+        mfcc_method,
     );
-    arr.into_pyarray(py)
+    Ok(arr.into_pyarray(py))
 }
 
 /// Whisper-exact log-mel spectrogram, shape `(n_frames, n_mels)`.
