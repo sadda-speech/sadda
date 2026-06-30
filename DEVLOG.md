@@ -6,6 +6,45 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-20 — Pane focus + annotation navigation (keymap, round 2)
+
+Follow-up to the home-row keymap (merged the same day), adding keyboard
+annotation work and console focus — still aimed at mouse-free scanning.
+
+**Annotation navigation (its own keys, deliberately separate from the timeline
+selection keys so the two don't fight).** The upper-right row drives a
+*current-annotation* highlight: `u`/`i` = previous/next annotation on the
+current tier, `o`/`p` = previous/next tier. It reuses the existing
+`selected_annotation` highlight as the "current" annotation (so a click and the
+keys share one concept) and only pans the view to keep it visible — it does
+**not** move the timeline cursor/selection. `y` ("grab") is the deliberate
+bridge: it pulls the current annotation into the timeline selection + cursor
+(via the new `Timeline::set_selection_range`), so playback (`d`/`s`/`f`) then
+acts on it. `Enter` edits the current annotation's label when one is
+highlighted, else falls back to committing the timeline selection; `Esc` (or any
+home-row cursor move) clears the highlight, back to commit-mode.
+
+**Console focus (`Shift+↓` / `Shift+↑`).** We collapsed the originally-planned
+three-pane focus stack to what actually changes behavior: the Python console vs.
+everything else. `Shift+↓` opens + focuses the console; `Shift+↑` leaves it. The
+"all keys pass through to the console" requirement falls out of the existing
+text-edit guard (every shortcut already skips while a text field is focused), so
+the console is a clean slate for a future Vim/Emacs mode. `Shift+↑/↓` are
+reserved globally — consumed before the panels render — so they move focus even
+from inside the console editor (which would otherwise eat them for line-select).
+A ring marks the focused console.
+
+**Why hybrid, not modal.** Playback, view scroll/zoom, and bundle nav stay
+global; only annotation nav got new dedicated keys. Dedicated keys (vs. routing
+the home row by focus) mean annotation nav and cursor movement are live at once
+with no mode-switching — the smoother flow for actual annotating.
+
+Also carried `Timeline::set_selection_range(start, end)` (the selection analogue
+of `set_view_range`) onto this branch. Engine `step_id` helper unit-tested;
+cheatsheet updated.
+
+---
+
 ## 2026-06-20 — Two-handed, layout-independent keyboard navigation
 
 Reworked the desktop transport/navigation keymap into a mouse-free, two-handed

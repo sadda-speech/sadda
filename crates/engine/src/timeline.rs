@@ -123,6 +123,17 @@ impl Timeline {
         self.set_selection_end(hi + delta_seconds);
     }
 
+    /// Sets the selection to exactly `[start, end]` seconds in one call (sorted,
+    /// each edge clamped to the recording). The selection analogue of
+    /// [`set_view_range`](Self::set_view_range); unlike the edge setters it
+    /// needs no existing selection to seed from.
+    pub fn set_selection_range(&mut self, start: f64, end: f64) {
+        let lo = start.min(end).clamp(0.0, self.duration);
+        let hi = start.max(end).clamp(0.0, self.duration);
+        self.selection_anchor = None;
+        self.selection = Some((lo, hi));
+    }
+
     /// Begins a drag-selection anchored at `t` (seconds).
     pub fn begin_selection(&mut self, t: f64) {
         let t = t.clamp(0.0, self.duration);
@@ -383,6 +394,17 @@ mod tests {
         assert_eq!(t.selection, Some((3.0, 8.0)));
         t.move_selection_end_by(1.0); // (3, 9)
         assert_eq!(t.selection, Some((3.0, 9.0)));
+    }
+
+    #[test]
+    fn set_selection_range_sorts_and_clamps() {
+        let mut t = fresh(10.0);
+        // Needs no existing selection; sorts a reversed pair.
+        t.set_selection_range(7.0, 3.0);
+        assert_eq!(t.selection, Some((3.0, 7.0)));
+        // Each edge clamps to the recording.
+        t.set_selection_range(-5.0, 99.0);
+        assert_eq!(t.selection, Some((0.0, 10.0)));
     }
 
     #[test]

@@ -2261,6 +2261,11 @@ class Timeline:
         r"""
         Moves the selection's **end** edge **by** `delta_seconds`.
         """
+    def set_selection_range(self, start: builtins.float, end: builtins.float) -> None:
+        r"""
+        Sets the selection to exactly `[start, end]` seconds in one call (sorted
+        and clamped). The selection analogue of `set_view_range`.
+        """
     def set_point_selection(self, t: builtins.float) -> None:
         r"""
         Places a zero-width selection point at `t`.

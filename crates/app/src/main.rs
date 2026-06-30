@@ -286,10 +286,17 @@ struct SaddaApp {
     /// D10: resolved data for the right-side Reference panel (vowel-space
     /// scatter + histogram). Refreshed when its selection changes.
     reference: ReferenceView,
-    /// Currently-selected annotation in the tier strip. In-memory
-    /// only — clears on bundle change. Reached by C5 (cursor sync)
-    /// and D6/D7 (editing) when those slices land.
+    /// Currently-selected annotation in the tier strip — also the "current"
+    /// annotation that the `u`/`i`/`o`/`p` keyboard navigation moves. In-memory
+    /// only; clears on bundle change.
     selected_annotation: Option<AnnotationSelection>,
+    /// Current tier for keyboard annotation navigation (`o`/`p` move it,
+    /// `u`/`i` step annotations within it). Tracked separately from
+    /// `selected_annotation` so navigation survives landing on an empty tier.
+    nav_tier: Option<i64>,
+    /// Set when `Shift+↓` asks to focus the Python console; consumed on the next
+    /// frame by `script_panel` to grab editor focus.
+    focus_console_request: bool,
     /// Cached embedding-heatmap render. `None` when the lane is hidden
     /// (no tier selected) or no bundle is loaded. Rebuilt only when the
     /// bundle, the selected tier, or the colormap/normalization changes.
@@ -684,6 +691,12 @@ fn consume_physical_key(
     found
 }
 
+/// Stable widget id for the Python console editor, so focus can be requested /
+/// surrendered programmatically (`Shift+↓` / `Shift+↑`).
+fn console_editor_id() -> egui::Id {
+    egui::Id::new("sadda_script_console_editor")
+}
+
 /// The movement target selected by the currently-held modifiers: bare → cursor,
 /// `Shift` → selection start, `Alt` → selection end. Drives the held `k`/`l`
 /// glide, whose target can change mid-hold as modifiers are pressed/released.
@@ -741,6 +754,40 @@ fn span_for_action(
         PlayAction::RightOfSelection => (sel?.1, view_end),
     };
     (hi - lo > 1e-6).then_some((lo, hi))
+}
+
+#[cfg(test)]
+mod step_id_tests {
+    use super::step_id;
+
+    #[test]
+    fn steps_forward_and_back_clamping_at_ends() {
+        let ids = [10, 20, 30];
+        assert_eq!(step_id(&ids, Some(20), 1), Some(30));
+        assert_eq!(step_id(&ids, Some(20), -1), Some(10));
+        // Clamp at the ends (no wrap-around).
+        assert_eq!(step_id(&ids, Some(30), 1), Some(30));
+        assert_eq!(step_id(&ids, Some(10), -1), Some(10));
+    }
+
+    #[test]
+    fn no_current_enters_from_the_matching_end() {
+        let ids = [10, 20, 30];
+        assert_eq!(step_id(&ids, None, 1), Some(10)); // forward → first
+        assert_eq!(step_id(&ids, None, -1), Some(30)); // backward → last
+    }
+
+    #[test]
+    fn unknown_current_treated_as_none() {
+        let ids = [10, 20, 30];
+        assert_eq!(step_id(&ids, Some(99), 1), Some(10));
+    }
+
+    #[test]
+    fn empty_is_none() {
+        assert_eq!(step_id(&[], Some(1), 1), None);
+        assert_eq!(step_id(&[], None, 1), None);
+    }
 }
 
 #[cfg(test)]
@@ -1561,6 +1608,41 @@ enum AnnotationSelection {
     Point { tier_id: i64, annotation_id: i64 },
 }
 
+impl AnnotationSelection {
+    fn tier_id(self) -> i64 {
+        match self {
+            Self::Interval { tier_id, .. } | Self::Point { tier_id, .. } => tier_id,
+        }
+    }
+    fn annotation_id(self) -> i64 {
+        match self {
+            Self::Interval { annotation_id, .. } | Self::Point { annotation_id, .. } => {
+                annotation_id
+            }
+        }
+    }
+}
+
+/// Steps a list of ids by `dir` (+1 next / −1 prev) relative to `current`,
+/// clamping at the ends. With nothing current, returns the first item for a
+/// forward step and the last for a backward step. Pure → tested.
+fn step_id(ids: &[i64], current: Option<i64>, dir: i32) -> Option<i64> {
+    if ids.is_empty() {
+        return None;
+    }
+    match current.and_then(|c| ids.iter().position(|&x| x == c)) {
+        Some(pos) => {
+            let next = if dir >= 0 {
+                (pos + 1).min(ids.len() - 1)
+            } else {
+                pos.saturating_sub(1)
+            };
+            Some(ids[next])
+        }
+        None => Some(if dir >= 0 { ids[0] } else { ids[ids.len() - 1] }),
+    }
+}
+
 /// Cached spectrogram render. Invalidates whenever the bundle or the
 /// DSP config changes.
 struct SpectrogramCache {
@@ -1936,6 +2018,8 @@ impl SaddaApp {
             overlays: OverlayCache::default(),
             reference: ReferenceView::default(),
             selected_annotation: None,
+            nav_tier: None,
+            focus_console_request: false,
             active_embedding_heatmap: None,
             embedding_heatmap_error: None,
             timeline: TimelineState::default(),
@@ -6059,6 +6143,9 @@ impl SaddaApp {
             MoveTarget::SelectionEnd => self.timeline.set_selection_end(t),
         }
         self.timeline.scroll_into_view(self.target_value(target));
+        // A timeline move drops the "current annotation", so Enter goes back to
+        // committing the selection rather than editing an annotation.
+        self.selected_annotation = None;
     }
 
     /// Moves a timeline target **by** a relative number of seconds, then keeps
@@ -6070,6 +6157,7 @@ impl SaddaApp {
             MoveTarget::SelectionEnd => self.timeline.move_selection_end_by(delta),
         }
         self.timeline.scroll_into_view(self.target_value(target));
+        self.selected_annotation = None;
     }
 
     /// Zooms the view by `factor` (> 1 out, < 1 in), anchored at the cursor.
@@ -6121,6 +6209,240 @@ impl SaddaApp {
             bundles[target].id
         };
         self.select_bundle(target_id);
+    }
+
+    /// Ordered interval/point tier ids for the selected bundle — the navigable
+    /// tiers, in tier-strip order (matching the digit-key lane order).
+    fn navigable_tier_ids(&self) -> Vec<i64> {
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return Vec::new();
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return Vec::new();
+        };
+        match project.tiers(Some(bundle_id)) {
+            Ok(tiers) => tiers
+                .into_iter()
+                .filter(|t| matches!(t.r#type, TierType::Interval | TierType::Point))
+                .map(|t| t.id)
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// A navigable tier's annotations as `(id, anchor_time)` in time order, plus
+    /// whether it's a point tier. `None` if the tier isn't an interval/point
+    /// tier of the current project.
+    fn tier_annotation_anchors(&self, tier_id: i64) -> Option<(bool, Vec<(i64, f64)>)> {
+        let bundle_id = self.selected_bundle_id?;
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return None;
+        };
+        let tiers = project.tiers(Some(bundle_id)).ok()?;
+        let tier = tiers.iter().find(|t| t.id == tier_id)?;
+        match tier.r#type {
+            TierType::Interval => {
+                let rows = project.intervals(tier_id).ok()?;
+                Some((
+                    false,
+                    rows.iter().map(|r| (r.id, r.start_seconds)).collect(),
+                ))
+            }
+            TierType::Point => {
+                let rows = project.points(tier_id).ok()?;
+                Some((true, rows.iter().map(|r| (r.id, r.time_seconds)).collect()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolves (and records) the current tier for annotation navigation: the
+    /// tracked nav tier if still navigable, else the selected annotation's tier,
+    /// else the first navigable tier. `None` when there are no navigable tiers.
+    fn current_nav_tier(&mut self, tiers: &[i64]) -> Option<i64> {
+        if tiers.is_empty() {
+            self.nav_tier = None;
+            return None;
+        }
+        let chosen = self
+            .nav_tier
+            .filter(|t| tiers.contains(t))
+            .or_else(|| {
+                self.selected_annotation
+                    .map(|s| s.tier_id())
+                    .filter(|t| tiers.contains(t))
+            })
+            .unwrap_or(tiers[0]);
+        self.nav_tier = Some(chosen);
+        Some(chosen)
+    }
+
+    /// Sets the current annotation highlight (without touching the timeline
+    /// selection) and scrolls it into view.
+    fn set_current_annotation(
+        &mut self,
+        tier_id: i64,
+        ann_id: i64,
+        is_point: bool,
+        anchors: &[(i64, f64)],
+    ) {
+        self.selected_annotation = Some(if is_point {
+            AnnotationSelection::Point {
+                tier_id,
+                annotation_id: ann_id,
+            }
+        } else {
+            AnnotationSelection::Interval {
+                tier_id,
+                annotation_id: ann_id,
+            }
+        });
+        self.nav_tier = Some(tier_id);
+        if let Some((_, t)) = anchors.iter().find(|(id, _)| *id == ann_id) {
+            self.timeline.scroll_into_view(*t);
+        }
+    }
+
+    /// `u`/`i`: step the current annotation back/forward on the current tier.
+    fn nav_annotation(&mut self, dir: i32) {
+        let tiers = self.navigable_tier_ids();
+        let Some(tier_id) = self.current_nav_tier(&tiers) else {
+            return;
+        };
+        let Some((is_point, anchors)) = self.tier_annotation_anchors(tier_id) else {
+            return;
+        };
+        let ids: Vec<i64> = anchors.iter().map(|(id, _)| *id).collect();
+        let current = self
+            .selected_annotation
+            .filter(|s| s.tier_id() == tier_id)
+            .map(|s| s.annotation_id());
+        let Some(next) = step_id(&ids, current, dir) else {
+            return;
+        };
+        self.set_current_annotation(tier_id, next, is_point, &anchors);
+    }
+
+    /// `o`/`p`: move the current tier up/down and land on its first annotation.
+    fn nav_tier_by(&mut self, dir: i32) {
+        let tiers = self.navigable_tier_ids();
+        let Some(current) = self.current_nav_tier(&tiers) else {
+            return;
+        };
+        let Some(next_tier) = step_id(&tiers, Some(current), dir) else {
+            return;
+        };
+        self.nav_tier = Some(next_tier);
+        if let Some((is_point, anchors)) = self.tier_annotation_anchors(next_tier) {
+            match anchors.first().copied() {
+                Some((first_id, _)) => {
+                    self.set_current_annotation(next_tier, first_id, is_point, &anchors)
+                }
+                None => self.selected_annotation = None, // empty tier: keep nav, drop highlight
+            }
+        }
+    }
+
+    /// The `(start, end)` span of an annotation (a point is zero-width).
+    fn annotation_span(&self, sel: AnnotationSelection) -> Option<(f64, f64)> {
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return None;
+        };
+        match sel {
+            AnnotationSelection::Interval {
+                tier_id,
+                annotation_id,
+            } => project
+                .intervals(tier_id)
+                .ok()?
+                .iter()
+                .find(|r| r.id == annotation_id)
+                .map(|r| (r.start_seconds, r.end_seconds)),
+            AnnotationSelection::Point {
+                tier_id,
+                annotation_id,
+            } => project
+                .points(tier_id)
+                .ok()?
+                .iter()
+                .find(|r| r.id == annotation_id)
+                .map(|r| (r.time_seconds, r.time_seconds)),
+        }
+    }
+
+    /// `y`: pull the current annotation into the timeline selection + cursor,
+    /// keeping it as the current annotation (so `Enter` still edits it).
+    fn grab_current_annotation(&mut self) {
+        let Some(sel) = self.selected_annotation else {
+            return;
+        };
+        let Some((lo, hi)) = self.annotation_span(sel) else {
+            return;
+        };
+        if (hi - lo).abs() < 1e-9 {
+            self.timeline.set_point_selection(lo);
+        } else {
+            self.timeline.set_selection_range(lo, hi);
+        }
+        self.timeline.set_cursor(lo);
+        self.timeline.scroll_into_view(lo);
+    }
+
+    /// `Enter` on a current annotation: start an inline label edit on it.
+    fn edit_current_annotation(&mut self) {
+        let Some(sel) = self.selected_annotation else {
+            return;
+        };
+        let edit = {
+            let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+                return;
+            };
+            match sel {
+                AnnotationSelection::Interval {
+                    tier_id,
+                    annotation_id,
+                } => {
+                    let Ok(rows) = project.intervals(tier_id) else {
+                        return;
+                    };
+                    let Some(r) = rows.into_iter().find(|r| r.id == annotation_id) else {
+                        return;
+                    };
+                    LabelEdit {
+                        tier_id,
+                        annotation_id,
+                        kind: LabelEditKind::Interval,
+                        text: r.label.unwrap_or_default(),
+                        status: r.status,
+                        note: r.note.unwrap_or_default(),
+                        just_started: true,
+                        ..Default::default()
+                    }
+                }
+                AnnotationSelection::Point {
+                    tier_id,
+                    annotation_id,
+                } => {
+                    let Ok(rows) = project.points(tier_id) else {
+                        return;
+                    };
+                    let Some(r) = rows.into_iter().find(|r| r.id == annotation_id) else {
+                        return;
+                    };
+                    LabelEdit {
+                        tier_id,
+                        annotation_id,
+                        kind: LabelEditKind::Point,
+                        text: r.label.unwrap_or_default(),
+                        status: r.status,
+                        note: r.note.unwrap_or_default(),
+                        just_started: true,
+                        ..Default::default()
+                    }
+                }
+            }
+        };
+        self.label_edit = Some(edit);
     }
 
     /// Pauses (holds the playhead, emits silence) or resumes the current
@@ -8348,6 +8670,27 @@ impl eframe::App for SaddaApp {
         // work while the editor is focused.
         let text_editing = ui.ctx().text_edit_focused();
 
+        // ── Console focus toggle (Shift+↓ in, Shift+↑ out) ────────────────
+        // Reserved globally and handled before any widget renders (input is
+        // processed ahead of the panels), so it moves focus even while the
+        // console editor holds it. Shift+↓ opens + focuses the Python console
+        // — every other key then passes through to it, leaving room for a
+        // future Vim/Emacs mode; Shift+↑ surrenders that focus so the global
+        // shortcuts resume. Not gated on `text_editing` (must work inside the
+        // console).
+        {
+            let ctx = ui.ctx();
+            if matches!(self.app_state, AppState::ProjectLoaded { .. })
+                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::ArrowDown))
+            {
+                self.persisted.script_panel_open = true;
+                self.focus_console_request = true;
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::ArrowUp)) {
+                ctx.memory_mut(|m| m.surrender_focus(console_editor_id()));
+            }
+        }
+
         // ── Keyboard transport & navigation ───────────────────────────────
         // Two-handed, mouse-free scheme. Every binding is matched by PHYSICAL
         // key position (US-QWERTY) via `consume_physical_key`, so it follows the
@@ -8574,18 +8917,58 @@ impl eframe::App for SaddaApp {
         // point tiers. Skipped while text-editing, while a resolution prompt /
         // label edit / palette is up, or when any widget has focus (so Enter
         // reaches dialogs). No-op without a selection.
+        // ── Annotation navigation (u/i/o/p; y grabs) ──────────────────────
+        // Move the "current annotation" highlight without disturbing the
+        // timeline selection: u/i = prev/next annotation on the current tier,
+        // o/p = prev/next tier, y = grab the current annotation into the
+        // selection + cursor. Esc clears the highlight (back to commit-mode).
+        // Physical keys; skipped while editing text.
+        if !text_editing && self.selected_bundle_id.is_some() {
+            let ctx = ui.ctx().clone();
+            let consume = |key: egui::Key| {
+                ctx.input_mut(|i| consume_physical_key(i, egui::Modifiers::NONE, key))
+            };
+            if consume(egui::Key::U) {
+                self.nav_annotation(-1);
+            }
+            if consume(egui::Key::I) {
+                self.nav_annotation(1);
+            }
+            if consume(egui::Key::O) {
+                self.nav_tier_by(-1);
+            }
+            if consume(egui::Key::P) {
+                self.nav_tier_by(1);
+            }
+            if consume(egui::Key::Y) {
+                self.grab_current_annotation();
+            }
+            if self.selected_annotation.is_some()
+                && !self.command_palette_open
+                && consume(egui::Key::Escape)
+            {
+                self.selected_annotation = None;
+            }
+        }
+
+        // Enter edits the current annotation when one is selected (the u/i/o/p
+        // navigation target), otherwise commits the timeline selection.
         if !text_editing
             && self.pending_commit.is_none()
             && self.label_edit.is_none()
             && !self.command_palette_open
             && self.selected_bundle_id.is_some()
-            && self.timeline.selection.is_some()
+            && (self.selected_annotation.is_some() || self.timeline.selection.is_some())
             && ui.ctx().memory(|m| m.focused().is_none())
             && ui
                 .ctx()
                 .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
         {
-            self.enter_commit();
+            if self.selected_annotation.is_some() {
+                self.edit_current_annotation();
+            } else {
+                self.enter_commit();
+            }
         }
 
         // Arrow keys scrub the view left / right (a quarter-window per
@@ -8730,11 +9113,22 @@ impl eframe::App for SaddaApp {
         if self.persisted.script_panel_open
             && matches!(self.app_state, AppState::ProjectLoaded { .. })
         {
-            egui::Panel::bottom("script_panel")
+            let inner = egui::Panel::bottom("script_panel")
                 .resizable(true)
                 .default_size(220.0)
                 .min_size(120.0)
                 .show_inside(ui, |ui| self.script_panel(ui));
+            // Ring the console while it holds keyboard focus, so it's clear all
+            // keys are passing through to it (Shift+↑ steps back out).
+            if ui.ctx().memory(|m| m.focused()) == Some(console_editor_id()) {
+                let stroke = egui::Stroke::new(2.0, ui.visuals().selection.bg_fill);
+                ui.painter().rect_stroke(
+                    inner.response.rect,
+                    0.0,
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
+            }
         }
 
         match &self.app_state {
@@ -10962,14 +11356,21 @@ impl SaddaApp {
             .id_salt("script_code_scroll")
             .max_height(code_h)
             .show(ui, |ui| {
-                ui.add_sized(
+                let resp = ui.add_sized(
                     [ui.available_width(), code_h],
                     egui::TextEdit::multiline(&mut self.persisted.script_buffer)
+                        .id(console_editor_id())
                         .desired_rows(8)
                         .code_editor()
                         .layouter(&mut layouter)
                         .hint_text("# Embedded Python (stdlib). `import sadda.app` reads the live GUI:\nimport sadda.app\nprint(sadda.app.active_bundle())\n"),
                 );
+                // Shift+↓ asked to focus the console (handled before widgets
+                // render, so grab focus here on the requested frame).
+                if self.focus_console_request {
+                    resp.request_focus();
+                    self.focus_console_request = false;
+                }
             });
 
         ui.separator();
