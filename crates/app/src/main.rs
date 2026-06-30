@@ -317,6 +317,8 @@ struct SaddaApp {
     /// Open formant per-parameter editor (a working copy of
     /// `tracks.formant_params`). `None` when closed.
     formant_editor: Option<FormantsConfig>,
+    /// Open "save current params as a user preset" dialog. `None` when closed.
+    preset_save_dialog: Option<PresetSaveDialog>,
     /// Shared timeline state — cursor, view window, duration —
     /// plumbed into every C5+ pane. Reset on bundle change.
     timeline: TimelineState,
@@ -1535,6 +1537,25 @@ struct MfccParamsEditor {
     preset_id: String,
 }
 
+/// Which DSP family a preset save/delete acts on — lets one shared
+/// save-dialog and the delete handler cover MFCC / pitch / formants.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PresetTarget {
+    Mfcc,
+    Pitch,
+    Formant,
+}
+
+/// Modal state for "Save current parameters as a named user preset". The
+/// params come from the active lane config for `target`; this just collects
+/// the id + title and surfaces save errors (invalid id, built-in collision).
+struct PresetSaveDialog {
+    target: PresetTarget,
+    id: String,
+    title: String,
+    error: Option<String>,
+}
+
 /// D10: cached measure-track analysis for the selected bundle under
 /// the current [`MeasureTrackConfig`]. Mirrors [`SpectrogramCache`]:
 /// recomputed only when the bundle or the config changes (see
@@ -1883,6 +1904,7 @@ impl SaddaApp {
             mfcc_editor: None,
             pitch_editor: None,
             formant_editor: None,
+            preset_save_dialog: None,
             timeline: TimelineState::default(),
             playback: None,
             playback_origin: None,
@@ -8551,6 +8573,7 @@ impl eframe::App for SaddaApp {
         self.mfcc_param_editor_window(ui.ctx());
         self.f0_param_editor_window(ui.ctx());
         self.formant_param_editor_window(ui.ctx());
+        self.preset_save_dialog_window(ui.ctx());
         self.targets_panel_window(ui.ctx());
         self.dashboard_window(ui.ctx());
         self.notebook_window(ui.ctx());
@@ -9230,6 +9253,7 @@ impl SaddaApp {
             });
             ui.close();
         }
+        self.preset_save_delete_controls(ui, PresetTarget::Mfcc);
 
         ui.separator();
         ui.label("c0 (energy)");
@@ -9527,6 +9551,7 @@ impl SaddaApp {
             self.pitch_editor = Some(self.persisted.tracks.pitch_params);
             ui.close();
         }
+        self.preset_save_delete_controls(ui, PresetTarget::Pitch);
     }
 
     /// Modal per-parameter editor for the f0 lane's `PitchParams`. Edits a
@@ -9687,6 +9712,7 @@ impl SaddaApp {
             self.formant_editor = Some(self.persisted.tracks.formant_params);
             ui.close();
         }
+        self.preset_save_delete_controls(ui, PresetTarget::Formant);
     }
 
     /// Modal per-parameter editor for the formant lane's `FormantsConfig`.
@@ -9784,6 +9810,213 @@ impl SaddaApp {
             }
         } else if close || !keep_open {
             self.formant_editor = None;
+        }
+    }
+
+    /// Is `id` a (reserved, immutable) built-in preset for `target`? Used to
+    /// gate the GUI delete affordance to user presets only — checked in-memory
+    /// (no disk I/O).
+    fn is_builtin_preset(target: PresetTarget, id: &str) -> bool {
+        match target {
+            PresetTarget::Mfcc => sadda_engine::dsp::builtin_presets()
+                .iter()
+                .any(|p| p.id == id),
+            PresetTarget::Pitch => sadda_engine::pitch_preset::pitch_builtin_presets()
+                .iter()
+                .any(|p| p.id == id),
+            PresetTarget::Formant => sadda_engine::dsp::formant_builtin_presets()
+                .iter()
+                .any(|p| p.id == id),
+        }
+    }
+
+    /// The shared "Save current params as preset… / Delete this preset"
+    /// controls for a lane's preset submenu. `Save…` opens the dialog; `Delete`
+    /// shows only when the active preset is a user preset.
+    fn preset_save_delete_controls(&mut self, ui: &mut egui::Ui, target: PresetTarget) {
+        let current = match target {
+            PresetTarget::Mfcc => self.persisted.mfcc.preset_id.clone(),
+            PresetTarget::Pitch => self.persisted.pitch_preset_id.clone(),
+            PresetTarget::Formant => self.persisted.formant_preset_id.clone(),
+        };
+        if ui.button("Save current as preset…").clicked() {
+            self.preset_save_dialog = Some(PresetSaveDialog {
+                target,
+                id: String::new(),
+                title: String::new(),
+                error: None,
+            });
+            ui.close();
+        }
+        if !Self::is_builtin_preset(target, &current)
+            && ui.button(format!("Delete \"{current}\"")).clicked()
+        {
+            self.delete_user_preset(target, &current);
+            ui.close();
+        }
+    }
+
+    /// Saves the active lane params for `target` as a user preset named `id`.
+    /// `based_on` records the preset it was derived from; `faithful` is always
+    /// false (a user-saved set isn't a validated reference reproduction).
+    /// Returns an error message for the dialog on bad id / built-in collision.
+    fn save_user_preset(
+        &mut self,
+        target: PresetTarget,
+        id: &str,
+        title: &str,
+    ) -> Result<(), String> {
+        let to_err = |e: sadda_engine::EngineError| e.to_string();
+        match target {
+            PresetTarget::Mfcc => {
+                let preset = sadda_engine::dsp::MfccPreset {
+                    id: id.to_string(),
+                    version: "1.0.0".into(),
+                    title: title.to_string(),
+                    description: String::new(),
+                    based_on: self.persisted.mfcc.preset_id.clone(),
+                    faithful: false,
+                    reference: None,
+                    params: self.persisted.mfcc.params.clone(),
+                };
+                let store = sadda_engine::dsp::MfccPresetStore::user_default().map_err(to_err)?;
+                store.save(&preset).map_err(to_err)?;
+                self.persisted.mfcc.preset_id = id.to_string();
+            }
+            PresetTarget::Pitch => {
+                let preset = sadda_engine::pitch_preset::PitchPreset {
+                    id: id.to_string(),
+                    version: "1.0.0".into(),
+                    title: title.to_string(),
+                    description: String::new(),
+                    based_on: self.persisted.pitch_preset_id.clone(),
+                    faithful: false,
+                    reference: None,
+                    params: self.persisted.tracks.pitch_params,
+                };
+                let store =
+                    sadda_engine::pitch_preset::PitchPresetStore::user_default().map_err(to_err)?;
+                store.save(&preset).map_err(to_err)?;
+                self.persisted.pitch_preset_id = id.to_string();
+            }
+            PresetTarget::Formant => {
+                let preset = sadda_engine::dsp::formant_preset::FormantPreset {
+                    id: id.to_string(),
+                    version: "1.0.0".into(),
+                    title: title.to_string(),
+                    description: String::new(),
+                    based_on: self.persisted.formant_preset_id.clone(),
+                    faithful: false,
+                    reference: None,
+                    params: self.persisted.tracks.formant_params,
+                };
+                let store = sadda_engine::dsp::formant_preset::FormantPresetStore::user_default()
+                    .map_err(to_err)?;
+                store.save(&preset).map_err(to_err)?;
+                self.persisted.formant_preset_id = id.to_string();
+            }
+        }
+        Ok(())
+    }
+
+    /// Deletes the user preset `id` for `target`, then resets the active
+    /// selection to that family's first built-in. Surfaces failures via the
+    /// bottom error banner.
+    fn delete_user_preset(&mut self, target: PresetTarget, id: &str) {
+        let result = match target {
+            PresetTarget::Mfcc => sadda_engine::dsp::MfccPresetStore::user_default()
+                .and_then(|s| s.delete(id))
+                .map(|_| {
+                    let b = sadda_engine::dsp::builtin_presets().remove(0);
+                    self.persisted.mfcc.preset_id = b.id;
+                    self.persisted.mfcc.params = b.params;
+                }),
+            PresetTarget::Pitch => sadda_engine::pitch_preset::PitchPresetStore::user_default()
+                .and_then(|s| s.delete(id))
+                .map(|_| {
+                    let b = sadda_engine::pitch_preset::pitch_builtin_presets().remove(0);
+                    self.persisted.pitch_preset_id = b.id;
+                    self.persisted.tracks.pitch_params = b.params;
+                }),
+            PresetTarget::Formant => {
+                sadda_engine::dsp::formant_preset::FormantPresetStore::user_default()
+                    .and_then(|s| s.delete(id))
+                    .map(|_| {
+                        let b = sadda_engine::dsp::formant_builtin_presets().remove(0);
+                        self.persisted.formant_preset_id = b.id;
+                        self.persisted.tracks.formant_params = b.params;
+                    })
+            }
+        };
+        if let Err(e) = result {
+            self.set_error(format!("Couldn't delete preset: {e}"));
+        }
+    }
+
+    /// Modal for [`PresetSaveDialog`]: id + title fields, Save / Cancel. On
+    /// save the active lane params are written to the user store.
+    fn preset_save_dialog_window(&mut self, ctx: &egui::Context) {
+        if self.preset_save_dialog.is_none() {
+            return;
+        }
+        let mut save = false;
+        let mut close = false;
+        let mut keep_open = true;
+        egui::Window::new("Save preset")
+            .open(&mut keep_open)
+            .resizable(false)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                let d = self.preset_save_dialog.as_mut().expect("checked above");
+                ui.label(
+                    egui::RichText::new("Save the current parameters as a named user preset.")
+                        .weak()
+                        .small(),
+                );
+                egui::Grid::new("preset_save_grid")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label("Id");
+                        ui.text_edit_singleline(&mut d.id);
+                        ui.end_row();
+                        ui.label("Title");
+                        ui.text_edit_singleline(&mut d.title);
+                        ui.end_row();
+                    });
+                ui.label(
+                    egui::RichText::new("Letters, digits, '-' or '_'. Built-in ids are reserved.")
+                        .weak()
+                        .small(),
+                );
+                if let Some(e) = &d.error {
+                    ui.colored_label(egui::Color32::from_rgb(220, 80, 80), e);
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if save {
+            let (target, id, title) = {
+                let d = self.preset_save_dialog.as_ref().expect("checked above");
+                (d.target, d.id.clone(), d.title.clone())
+            };
+            match self.save_user_preset(target, &id, &title) {
+                Ok(()) => self.preset_save_dialog = None,
+                Err(e) => {
+                    if let Some(d) = self.preset_save_dialog.as_mut() {
+                        d.error = Some(e);
+                    }
+                }
+            }
+        } else if close || !keep_open {
+            self.preset_save_dialog = None;
         }
     }
 
