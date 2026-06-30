@@ -30,12 +30,14 @@ def reset_warn_state() -> None:
 
 
 def test_phase0_surface_is_importable_and_tiered() -> None:
-    assert callable(sadda.version)
     assert callable(sadda.load_wav)
     assert callable(sadda.f0)
     assert isinstance(sadda.Audio, type)
-    for sym in (sadda.version, sadda.load_wav, sadda.f0, sadda.Audio):
+    for sym in (sadda.load_wav, sadda.f0, sadda.Audio):
         assert get_stability(sym) == "stable", sym
+    # Version + schema are plain value constants, not tiered callables.
+    assert isinstance(sadda.__version__, str)
+    assert isinstance(sadda.SCHEMA_VERSION, int)
 
 
 def test_warning_classes_inherit_from_user_warning() -> None:
@@ -148,5 +150,5 @@ def test_pyo3_symbols_register_tier_even_without_attribute_set() -> None:
     # Native PyO3 functions / classes don't accept arbitrary attribute writes,
     # so the registry-based lookup is the only path that works for them.
     # Confirm that path is being exercised (and not silently broken).
-    key_version = f"{sadda._native.version.__module__}.{sadda._native.version.__qualname__}"
-    assert _tier_registry.get(key_version) == "stable"
+    key = f"{sadda._native.load_wav.__module__}.{sadda._native.load_wav.__qualname__}"
+    assert _tier_registry.get(key) == "stable"

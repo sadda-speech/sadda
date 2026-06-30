@@ -29,7 +29,7 @@ def test_new_project_smoke_test() -> None:
         proj = sadda.new_project(Path(td) / "p", "demo")
         assert proj.name == "demo"
         assert proj.root.endswith("p")
-        assert sadda.schema_version() >= 3
+        assert sadda.SCHEMA_VERSION >= 3
 
 
 def test_open_project_round_trip_via_disk() -> None:
@@ -153,6 +153,7 @@ def test_corpus_surface_is_stable() -> None:
         sadda.Bundle,
         sadda.Speaker,
         sadda.Session,
-        sadda.schema_version,
     ):
         assert get_stability(sym) == "stable", sym
+    # SCHEMA_VERSION is a plain value, not a tiered callable.
+    assert isinstance(sadda.SCHEMA_VERSION, int)
