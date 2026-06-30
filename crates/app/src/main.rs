@@ -286,10 +286,17 @@ struct SaddaApp {
     /// D10: resolved data for the right-side Reference panel (vowel-space
     /// scatter + histogram). Refreshed when its selection changes.
     reference: ReferenceView,
-    /// Currently-selected annotation in the tier strip. In-memory
-    /// only — clears on bundle change. Reached by C5 (cursor sync)
-    /// and D6/D7 (editing) when those slices land.
+    /// Currently-selected annotation in the tier strip — also the "current"
+    /// annotation that the `u`/`i`/`o`/`p` keyboard navigation moves. In-memory
+    /// only; clears on bundle change.
     selected_annotation: Option<AnnotationSelection>,
+    /// Current tier for keyboard annotation navigation (`o`/`p` move it,
+    /// `u`/`i` step annotations within it). Tracked separately from
+    /// `selected_annotation` so navigation survives landing on an empty tier.
+    nav_tier: Option<i64>,
+    /// Set when `Shift+↓` asks to focus the Python console; consumed on the next
+    /// frame by `script_panel` to grab editor focus.
+    focus_console_request: bool,
     /// Cached embedding-heatmap render. `None` when the lane is hidden
     /// (no tier selected) or no bundle is loaded. Rebuilt only when the
     /// bundle, the selected tier, or the colormap/normalization changes.
@@ -302,6 +309,9 @@ struct SaddaApp {
     /// Shared timeline state — cursor, view window, duration —
     /// plumbed into every C5+ pane. Reset on bundle change.
     timeline: TimelineState,
+    /// Held-key state driving the smooth `k`/`l` cursor/selection glide. Lives
+    /// here so it persists between frames; advanced once per frame in `ui`.
+    glide: GlideState,
     /// Live playback handle. `Some` while audio is playing; the
     /// app polls `is_finished()` each frame and drops it on
     /// completion (or on a second spacebar press).
@@ -595,6 +605,113 @@ mod selection_format_tests {
 /// Silent gap between loop repetitions for the span-playback keys (seconds).
 const LOOP_PAUSE_SECONDS: f64 = 0.5;
 
+/// Smooth-glide cursor/selection speed for the held `k`/`l` keys, as a fraction
+/// of the visible window per second. Starts at `BASE`, ramping to `MAX` after
+/// `RAMP_SECS` of holding, so a tap nudges precisely while a hold travels fast.
+const GLIDE_BASE_FRAC_PER_SEC: f64 = 0.4;
+const GLIDE_MAX_FRAC_PER_SEC: f64 = 2.0;
+const GLIDE_RAMP_SECS: f64 = 1.2;
+
+/// Keyboard view-pan step (`m`/`,` and the arrows), as a fraction of the window.
+const VIEW_PAN_FRAC: f64 = 0.25;
+/// Keyboard zoom factor per press (`Shift`+`m`/`,`), matching the mouse wheel.
+const KEY_ZOOM_FACTOR: f64 = 1.2;
+/// Padding around the selection for "zoom to selection", as a fraction of its
+/// length.
+const ZOOM_TO_SELECTION_PAD_FRAC: f64 = 0.1;
+
+/// Which timeline point the right-hand movement keys act on, chosen by modifier:
+/// bare = the cursor, `Shift` = the selection's start edge, `Alt` = its end.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MoveTarget {
+    Cursor,
+    SelectionStart,
+    SelectionEnd,
+}
+
+/// Which bundle the `q`/`w`/`e`/`r` keys jump to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BundleNav {
+    First,
+    Previous,
+    Next,
+    Last,
+}
+
+/// Held-key state for the smooth cursor/selection glide (`k`/`l`). Updated from
+/// raw key events each frame so it follows the **physical** key position (US
+/// QWERTY) regardless of the user's keyboard layout — a Dvorak typist glides
+/// with the keys where `k`/`l` sit, not where Dvorak would type them.
+#[derive(Debug, Clone, Copy, Default)]
+struct GlideState {
+    left: bool,
+    right: bool,
+    /// Seconds the current glide has been held, for the speed ramp.
+    held_secs: f64,
+}
+
+/// Exact modifier match (Shift / Alt / Ctrl / Cmd all compared), unlike egui's
+/// `consume_key`, which ignores extra Shift/Alt. We need exactness so a bare
+/// key, `Shift`+key, and `Alt`+key can drive three different actions.
+fn modifiers_exact(actual: egui::Modifiers, want: egui::Modifiers) -> bool {
+    actual.shift == want.shift
+        && actual.alt == want.alt
+        && actual.ctrl == want.ctrl
+        && actual.command == want.command
+}
+
+/// Like egui's `InputState::consume_key`, but matches the key by its **physical**
+/// position (US-QWERTY `Key`), falling back to the logical key when the backend
+/// reports none (e.g. the web target). This makes every positional binding
+/// layout-independent: the action follows where the key sits on the keyboard,
+/// not the character the active layout produces. Consumes the matched press so
+/// it doesn't also reach a focused widget. Modifiers must match exactly.
+fn consume_physical_key(
+    input: &mut egui::InputState,
+    modifiers: egui::Modifiers,
+    key: egui::Key,
+) -> bool {
+    let mut found = false;
+    input.events.retain(|ev| {
+        if let egui::Event::Key {
+            key: logical,
+            physical_key,
+            pressed: true,
+            modifiers: ev_mods,
+            ..
+        } = ev
+        {
+            if (*physical_key).unwrap_or(*logical) == key && modifiers_exact(*ev_mods, modifiers) {
+                found = true;
+                return false; // consume the matched press
+            }
+        }
+        true
+    });
+    found
+}
+
+/// Stable widget id for the Python console editor, so focus can be requested /
+/// surrendered programmatically (`Shift+↓` / `Shift+↑`).
+fn console_editor_id() -> egui::Id {
+    egui::Id::new("sadda_script_console_editor")
+}
+
+/// The movement target selected by the currently-held modifiers: bare → cursor,
+/// `Shift` → selection start, `Alt` → selection end. Drives the held `k`/`l`
+/// glide, whose target can change mid-hold as modifiers are pressed/released.
+fn movement_target(ctx: &egui::Context) -> MoveTarget {
+    ctx.input(|i| {
+        if i.modifiers.shift {
+            MoveTarget::SelectionStart
+        } else if i.modifiers.alt {
+            MoveTarget::SelectionEnd
+        } else {
+            MoveTarget::Cursor
+        }
+    })
+}
+
 /// A view-relative span the playback keys can audition. The **playhead** is the
 /// playback line (`timeline.cursor`); the selection is the drag-selected band.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -637,6 +754,40 @@ fn span_for_action(
         PlayAction::RightOfSelection => (sel?.1, view_end),
     };
     (hi - lo > 1e-6).then_some((lo, hi))
+}
+
+#[cfg(test)]
+mod step_id_tests {
+    use super::step_id;
+
+    #[test]
+    fn steps_forward_and_back_clamping_at_ends() {
+        let ids = [10, 20, 30];
+        assert_eq!(step_id(&ids, Some(20), 1), Some(30));
+        assert_eq!(step_id(&ids, Some(20), -1), Some(10));
+        // Clamp at the ends (no wrap-around).
+        assert_eq!(step_id(&ids, Some(30), 1), Some(30));
+        assert_eq!(step_id(&ids, Some(10), -1), Some(10));
+    }
+
+    #[test]
+    fn no_current_enters_from_the_matching_end() {
+        let ids = [10, 20, 30];
+        assert_eq!(step_id(&ids, None, 1), Some(10)); // forward → first
+        assert_eq!(step_id(&ids, None, -1), Some(30)); // backward → last
+    }
+
+    #[test]
+    fn unknown_current_treated_as_none() {
+        let ids = [10, 20, 30];
+        assert_eq!(step_id(&ids, Some(99), 1), Some(10));
+    }
+
+    #[test]
+    fn empty_is_none() {
+        assert_eq!(step_id(&[], Some(1), 1), None);
+        assert_eq!(step_id(&[], None, 1), None);
+    }
 }
 
 #[cfg(test)]
@@ -1457,6 +1608,41 @@ enum AnnotationSelection {
     Point { tier_id: i64, annotation_id: i64 },
 }
 
+impl AnnotationSelection {
+    fn tier_id(self) -> i64 {
+        match self {
+            Self::Interval { tier_id, .. } | Self::Point { tier_id, .. } => tier_id,
+        }
+    }
+    fn annotation_id(self) -> i64 {
+        match self {
+            Self::Interval { annotation_id, .. } | Self::Point { annotation_id, .. } => {
+                annotation_id
+            }
+        }
+    }
+}
+
+/// Steps a list of ids by `dir` (+1 next / −1 prev) relative to `current`,
+/// clamping at the ends. With nothing current, returns the first item for a
+/// forward step and the last for a backward step. Pure → tested.
+fn step_id(ids: &[i64], current: Option<i64>, dir: i32) -> Option<i64> {
+    if ids.is_empty() {
+        return None;
+    }
+    match current.and_then(|c| ids.iter().position(|&x| x == c)) {
+        Some(pos) => {
+            let next = if dir >= 0 {
+                (pos + 1).min(ids.len() - 1)
+            } else {
+                pos.saturating_sub(1)
+            };
+            Some(ids[next])
+        }
+        None => Some(if dir >= 0 { ids[0] } else { ids[ids.len() - 1] }),
+    }
+}
+
 /// Cached spectrogram render. Invalidates whenever the bundle or the
 /// DSP config changes.
 struct SpectrogramCache {
@@ -1832,9 +2018,12 @@ impl SaddaApp {
             overlays: OverlayCache::default(),
             reference: ReferenceView::default(),
             selected_annotation: None,
+            nav_tier: None,
+            focus_console_request: false,
             active_embedding_heatmap: None,
             embedding_heatmap_error: None,
             timeline: TimelineState::default(),
+            glide: GlideState::default(),
             playback: None,
             playback_origin: None,
             pending_commit: None,
@@ -5899,6 +6088,363 @@ impl SaddaApp {
         }
     }
 
+    /// Whether a real (non-point) span is selected.
+    fn has_span_selection(&self) -> bool {
+        self.timeline
+            .selection
+            .map(|s| !selection_is_point(s))
+            .unwrap_or(false)
+    }
+
+    /// Plays the span to the left of the current focus — the selection's left
+    /// flank if a real span is selected, else everything left of the playhead.
+    fn play_left_of_focus(&mut self, loop_mode: LoopMode) {
+        let action = if self.has_span_selection() {
+            PlayAction::LeftOfSelection
+        } else {
+            PlayAction::LeftOfPlayhead
+        };
+        self.play_action(action, loop_mode);
+    }
+
+    /// Mirror of [`play_left_of_focus`](Self::play_left_of_focus) for the right.
+    fn play_right_of_focus(&mut self, loop_mode: LoopMode) {
+        let action = if self.has_span_selection() {
+            PlayAction::RightOfSelection
+        } else {
+            PlayAction::RightOfPlayhead
+        };
+        self.play_action(action, loop_mode);
+    }
+
+    /// The current time of a movement target (after clamping / seeding).
+    fn target_value(&self, target: MoveTarget) -> f64 {
+        match target {
+            MoveTarget::Cursor => self.timeline.cursor,
+            MoveTarget::SelectionStart => self
+                .timeline
+                .selection
+                .map(|(lo, _)| lo)
+                .unwrap_or(self.timeline.cursor),
+            MoveTarget::SelectionEnd => self
+                .timeline
+                .selection
+                .map(|(_, hi)| hi)
+                .unwrap_or(self.timeline.cursor),
+        }
+    }
+
+    /// Moves a timeline target (cursor or a selection edge) **to** an absolute
+    /// time, then pans the view the minimum amount to keep that point visible.
+    fn move_target_to(&mut self, target: MoveTarget, t: f64) {
+        match target {
+            MoveTarget::Cursor => self.timeline.set_cursor(t),
+            MoveTarget::SelectionStart => self.timeline.set_selection_start(t),
+            MoveTarget::SelectionEnd => self.timeline.set_selection_end(t),
+        }
+        self.timeline.scroll_into_view(self.target_value(target));
+        // A timeline move drops the "current annotation", so Enter goes back to
+        // committing the selection rather than editing an annotation.
+        self.selected_annotation = None;
+    }
+
+    /// Moves a timeline target **by** a relative number of seconds, then keeps
+    /// it visible. Used by the smooth `k`/`l` glide.
+    fn move_target_by(&mut self, target: MoveTarget, delta: f64) {
+        match target {
+            MoveTarget::Cursor => self.timeline.move_cursor_by(delta),
+            MoveTarget::SelectionStart => self.timeline.move_selection_start_by(delta),
+            MoveTarget::SelectionEnd => self.timeline.move_selection_end_by(delta),
+        }
+        self.timeline.scroll_into_view(self.target_value(target));
+        self.selected_annotation = None;
+    }
+
+    /// Zooms the view by `factor` (> 1 out, < 1 in), anchored at the cursor.
+    fn zoom_view(&mut self, factor: f64) {
+        let anchor = self.timeline.cursor;
+        self.timeline.zoom_at(anchor, factor);
+    }
+
+    /// Frames the whole recording in the view.
+    fn fit_whole_recording(&mut self) {
+        let dur = self.timeline.duration;
+        self.timeline.set_view_range(0.0, dur);
+    }
+
+    /// Frames the current selection (with a little padding). No-op without a
+    /// real span selection.
+    fn zoom_to_selection(&mut self) {
+        if let Some((lo, hi)) = self.timeline.selection {
+            if hi - lo > 1e-6 {
+                let pad = (hi - lo) * ZOOM_TO_SELECTION_PAD_FRAC;
+                self.timeline.set_view_range(lo - pad, hi + pad);
+            }
+        }
+    }
+
+    /// Jumps to another bundle by ordered position (`q`/`w`/`e`/`r`). No-op when
+    /// no project is loaded or it has no bundles.
+    fn navigate_bundle(&mut self, which: BundleNav) {
+        let target_id = {
+            let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+                return;
+            };
+            let Ok(bundles) = project.bundles() else {
+                return;
+            };
+            if bundles.is_empty() {
+                return;
+            }
+            let last = bundles.len() - 1;
+            let idx = self
+                .selected_bundle_id
+                .and_then(|id| bundles.iter().position(|b| b.id == id));
+            let target = match which {
+                BundleNav::First => 0,
+                BundleNav::Last => last,
+                BundleNav::Previous => idx.map(|i| i.saturating_sub(1)).unwrap_or(0),
+                BundleNav::Next => idx.map(|i| (i + 1).min(last)).unwrap_or(0),
+            };
+            bundles[target].id
+        };
+        self.select_bundle(target_id);
+    }
+
+    /// Ordered interval/point tier ids for the selected bundle — the navigable
+    /// tiers, in tier-strip order (matching the digit-key lane order).
+    fn navigable_tier_ids(&self) -> Vec<i64> {
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return Vec::new();
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return Vec::new();
+        };
+        match project.tiers(Some(bundle_id)) {
+            Ok(tiers) => tiers
+                .into_iter()
+                .filter(|t| matches!(t.r#type, TierType::Interval | TierType::Point))
+                .map(|t| t.id)
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// A navigable tier's annotations as `(id, anchor_time)` in time order, plus
+    /// whether it's a point tier. `None` if the tier isn't an interval/point
+    /// tier of the current project.
+    fn tier_annotation_anchors(&self, tier_id: i64) -> Option<(bool, Vec<(i64, f64)>)> {
+        let bundle_id = self.selected_bundle_id?;
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return None;
+        };
+        let tiers = project.tiers(Some(bundle_id)).ok()?;
+        let tier = tiers.iter().find(|t| t.id == tier_id)?;
+        match tier.r#type {
+            TierType::Interval => {
+                let rows = project.intervals(tier_id).ok()?;
+                Some((
+                    false,
+                    rows.iter().map(|r| (r.id, r.start_seconds)).collect(),
+                ))
+            }
+            TierType::Point => {
+                let rows = project.points(tier_id).ok()?;
+                Some((true, rows.iter().map(|r| (r.id, r.time_seconds)).collect()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolves (and records) the current tier for annotation navigation: the
+    /// tracked nav tier if still navigable, else the selected annotation's tier,
+    /// else the first navigable tier. `None` when there are no navigable tiers.
+    fn current_nav_tier(&mut self, tiers: &[i64]) -> Option<i64> {
+        if tiers.is_empty() {
+            self.nav_tier = None;
+            return None;
+        }
+        let chosen = self
+            .nav_tier
+            .filter(|t| tiers.contains(t))
+            .or_else(|| {
+                self.selected_annotation
+                    .map(|s| s.tier_id())
+                    .filter(|t| tiers.contains(t))
+            })
+            .unwrap_or(tiers[0]);
+        self.nav_tier = Some(chosen);
+        Some(chosen)
+    }
+
+    /// Sets the current annotation highlight (without touching the timeline
+    /// selection) and scrolls it into view.
+    fn set_current_annotation(
+        &mut self,
+        tier_id: i64,
+        ann_id: i64,
+        is_point: bool,
+        anchors: &[(i64, f64)],
+    ) {
+        self.selected_annotation = Some(if is_point {
+            AnnotationSelection::Point {
+                tier_id,
+                annotation_id: ann_id,
+            }
+        } else {
+            AnnotationSelection::Interval {
+                tier_id,
+                annotation_id: ann_id,
+            }
+        });
+        self.nav_tier = Some(tier_id);
+        if let Some((_, t)) = anchors.iter().find(|(id, _)| *id == ann_id) {
+            self.timeline.scroll_into_view(*t);
+        }
+    }
+
+    /// `u`/`i`: step the current annotation back/forward on the current tier.
+    fn nav_annotation(&mut self, dir: i32) {
+        let tiers = self.navigable_tier_ids();
+        let Some(tier_id) = self.current_nav_tier(&tiers) else {
+            return;
+        };
+        let Some((is_point, anchors)) = self.tier_annotation_anchors(tier_id) else {
+            return;
+        };
+        let ids: Vec<i64> = anchors.iter().map(|(id, _)| *id).collect();
+        let current = self
+            .selected_annotation
+            .filter(|s| s.tier_id() == tier_id)
+            .map(|s| s.annotation_id());
+        let Some(next) = step_id(&ids, current, dir) else {
+            return;
+        };
+        self.set_current_annotation(tier_id, next, is_point, &anchors);
+    }
+
+    /// `o`/`p`: move the current tier up/down and land on its first annotation.
+    fn nav_tier_by(&mut self, dir: i32) {
+        let tiers = self.navigable_tier_ids();
+        let Some(current) = self.current_nav_tier(&tiers) else {
+            return;
+        };
+        let Some(next_tier) = step_id(&tiers, Some(current), dir) else {
+            return;
+        };
+        self.nav_tier = Some(next_tier);
+        if let Some((is_point, anchors)) = self.tier_annotation_anchors(next_tier) {
+            match anchors.first().copied() {
+                Some((first_id, _)) => {
+                    self.set_current_annotation(next_tier, first_id, is_point, &anchors)
+                }
+                None => self.selected_annotation = None, // empty tier: keep nav, drop highlight
+            }
+        }
+    }
+
+    /// The `(start, end)` span of an annotation (a point is zero-width).
+    fn annotation_span(&self, sel: AnnotationSelection) -> Option<(f64, f64)> {
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return None;
+        };
+        match sel {
+            AnnotationSelection::Interval {
+                tier_id,
+                annotation_id,
+            } => project
+                .intervals(tier_id)
+                .ok()?
+                .iter()
+                .find(|r| r.id == annotation_id)
+                .map(|r| (r.start_seconds, r.end_seconds)),
+            AnnotationSelection::Point {
+                tier_id,
+                annotation_id,
+            } => project
+                .points(tier_id)
+                .ok()?
+                .iter()
+                .find(|r| r.id == annotation_id)
+                .map(|r| (r.time_seconds, r.time_seconds)),
+        }
+    }
+
+    /// `y`: pull the current annotation into the timeline selection + cursor,
+    /// keeping it as the current annotation (so `Enter` still edits it).
+    fn grab_current_annotation(&mut self) {
+        let Some(sel) = self.selected_annotation else {
+            return;
+        };
+        let Some((lo, hi)) = self.annotation_span(sel) else {
+            return;
+        };
+        if (hi - lo).abs() < 1e-9 {
+            self.timeline.set_point_selection(lo);
+        } else {
+            self.timeline.set_selection_range(lo, hi);
+        }
+        self.timeline.set_cursor(lo);
+        self.timeline.scroll_into_view(lo);
+    }
+
+    /// `Enter` on a current annotation: start an inline label edit on it.
+    fn edit_current_annotation(&mut self) {
+        let Some(sel) = self.selected_annotation else {
+            return;
+        };
+        let edit = {
+            let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+                return;
+            };
+            match sel {
+                AnnotationSelection::Interval {
+                    tier_id,
+                    annotation_id,
+                } => {
+                    let Ok(rows) = project.intervals(tier_id) else {
+                        return;
+                    };
+                    let Some(r) = rows.into_iter().find(|r| r.id == annotation_id) else {
+                        return;
+                    };
+                    LabelEdit {
+                        tier_id,
+                        annotation_id,
+                        kind: LabelEditKind::Interval,
+                        text: r.label.unwrap_or_default(),
+                        status: r.status,
+                        note: r.note.unwrap_or_default(),
+                        just_started: true,
+                        ..Default::default()
+                    }
+                }
+                AnnotationSelection::Point {
+                    tier_id,
+                    annotation_id,
+                } => {
+                    let Ok(rows) = project.points(tier_id) else {
+                        return;
+                    };
+                    let Some(r) = rows.into_iter().find(|r| r.id == annotation_id) else {
+                        return;
+                    };
+                    LabelEdit {
+                        tier_id,
+                        annotation_id,
+                        kind: LabelEditKind::Point,
+                        text: r.label.unwrap_or_default(),
+                        status: r.status,
+                        note: r.note.unwrap_or_default(),
+                        just_started: true,
+                        ..Default::default()
+                    }
+                }
+            }
+        };
+        self.label_edit = Some(edit);
+    }
+
     /// Pauses (holds the playhead, emits silence) or resumes the current
     /// playback. No-op when nothing is playing.
     fn toggle_pause(&mut self) {
@@ -8124,49 +8670,212 @@ impl eframe::App for SaddaApp {
         // work while the editor is focused.
         let text_editing = ui.ctx().text_edit_focused();
 
-        // ── Praat-style span playback (Slice 1) ──────────────────────────
-        // Space plays the selection-or-view once; pressed again while playing
-        // it pauses, again continues. Ctrl/Cmd+Space loops it (0.5 s gap). The
-        // directional keys audition view-relative spans: `,`/`.` around the
-        // playhead, `[`/`]` around the selection; their Ctrl/Cmd variants loop.
-        // Esc stops and returns to the span start. All
-        // skipped while a text field is focused (so the keys reach the editor).
-        // `consume_key` keeps the press from falling through to a focused widget.
-        if !text_editing && self.active_envelope.is_some() {
+        // ── Console focus toggle (Shift+↓ in, Shift+↑ out) ────────────────
+        // Reserved globally and handled before any widget renders (input is
+        // processed ahead of the panels), so it moves focus even while the
+        // console editor holds it. Shift+↓ opens + focuses the Python console
+        // — every other key then passes through to it, leaving room for a
+        // future Vim/Emacs mode; Shift+↑ surrenders that focus so the global
+        // shortcuts resume. Not gated on `text_editing` (must work inside the
+        // console).
+        {
             let ctx = ui.ctx();
+            if matches!(self.app_state, AppState::ProjectLoaded { .. })
+                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::ArrowDown))
+            {
+                self.persisted.script_panel_open = true;
+                self.focus_console_request = true;
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::ArrowUp)) {
+                ctx.memory_mut(|m| m.surrender_focus(console_editor_id()));
+            }
+        }
+
+        // ── Keyboard transport & navigation ───────────────────────────────
+        // Two-handed, mouse-free scheme. Every binding is matched by PHYSICAL
+        // key position (US-QWERTY) via `consume_physical_key`, so it follows the
+        // key's location regardless of layout (Dvorak/AZERTY) and consumes the
+        // press so it can't also reach a focused widget. All skipped while a
+        // text field is focused, so the keys reach the editor instead.
+        //
+        //   Left hand (playback):  a=stop  s=play-left  d=play/pause  f=play-right
+        //                          Shift+s/d/f loops the span; Space/Esc alias d/a.
+        //   Right hand (move):     h=rec-start j=view-start k/l=glide-left/right
+        //                          ;=view-end '=rec-end. Bare=cursor, Shift=sel
+        //                          start, Alt=sel end (seeded at the cursor).
+        //   Lower right (view):    n=view→start m/,=pan-left/right .=view→end;
+        //                          Shift = zoom (n=fit-all m=out ,=in .=to-sel).
+        if !text_editing && self.active_envelope.is_some() {
+            let ctx = ui.ctx().clone();
+            let consume = |mods: egui::Modifiers, key: egui::Key| {
+                ctx.input_mut(|i| consume_physical_key(i, mods, key))
+            };
+            const NONE: egui::Modifiers = egui::Modifiers::NONE;
+            const SHIFT: egui::Modifiers = egui::Modifiers::SHIFT;
+            const ALT: egui::Modifiers = egui::Modifiers::ALT;
             let looped = LoopMode::Loop {
                 pause_seconds: LOOP_PAUSE_SECONDS,
             };
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space)) {
+
+            // ----- Left hand: playback -----
+            // d (and Space): play selection-or-view once; re-press toggles pause.
+            if consume(NONE, egui::Key::D) || consume(NONE, egui::Key::Space) {
                 if self.playback.is_some() {
                     self.toggle_pause();
                 } else {
                     self.play_action(PlayAction::SelectionOrView, LoopMode::Once);
                 }
             }
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Space)) {
+            if consume(SHIFT, egui::Key::D) || consume(SHIFT, egui::Key::Space) {
                 self.play_action(PlayAction::SelectionOrView, looped);
             }
-            for (key, action) in [
-                (egui::Key::Comma, PlayAction::LeftOfPlayhead),
-                (egui::Key::Period, PlayAction::RightOfPlayhead),
-                (egui::Key::OpenBracket, PlayAction::LeftOfSelection),
-                (egui::Key::CloseBracket, PlayAction::RightOfSelection),
-            ] {
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
-                    self.play_action(action, LoopMode::Once);
-                }
-                if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key)) {
-                    self.play_action(action, looped);
+            // s / f: play left / right of focus (the selection if a real span is
+            // selected, else the cursor). Shift loops.
+            if consume(NONE, egui::Key::S) {
+                self.play_left_of_focus(LoopMode::Once);
+            }
+            if consume(SHIFT, egui::Key::S) {
+                self.play_left_of_focus(looped);
+            }
+            if consume(NONE, egui::Key::F) {
+                self.play_right_of_focus(LoopMode::Once);
+            }
+            if consume(SHIFT, egui::Key::F) {
+                self.play_right_of_focus(looped);
+            }
+            // a / Esc: stop + return to the span start. Only while playing; Esc
+            // yields to an open command palette.
+            if self.playback.is_some() {
+                let stop = consume(NONE, egui::Key::A)
+                    || (!self.command_palette_open && consume(NONE, egui::Key::Escape));
+                if stop {
+                    self.stop_and_return();
                 }
             }
-            // Esc stops + returns to the span start — only while playing, and
-            // only when no overlay is capturing Esc (e.g. the command palette).
-            if self.playback.is_some()
-                && !self.command_palette_open
-                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-            {
-                self.stop_and_return();
+
+            // ----- Right hand: cursor / selection movement -----
+            // Absolute jumps (h/j/;/'); the modifier picks cursor / sel-start /
+            // sel-end. Targets are read from the pre-move view window.
+            let view_start = self.timeline.view_start;
+            let view_end = self.timeline.view_end;
+            let duration = self.timeline.duration;
+            for (key, dest) in [
+                (egui::Key::H, 0.0),
+                (egui::Key::J, view_start),
+                (egui::Key::Semicolon, view_end),
+                (egui::Key::Quote, duration),
+            ] {
+                if consume(NONE, key) {
+                    self.move_target_to(MoveTarget::Cursor, dest);
+                }
+                if consume(SHIFT, key) {
+                    self.move_target_to(MoveTarget::SelectionStart, dest);
+                }
+                if consume(ALT, key) {
+                    self.move_target_to(MoveTarget::SelectionEnd, dest);
+                }
+            }
+
+            // Smooth glide (k/l held). egui only exposes *logical* `keys_down`,
+            // so track the held PHYSICAL keys from raw events (consuming them so
+            // they don't leak), then advance once per frame by the frame's dt.
+            ctx.input_mut(|i| {
+                i.events.retain(|ev| {
+                    if let egui::Event::Key {
+                        key: logical,
+                        physical_key,
+                        pressed,
+                        ..
+                    } = ev
+                    {
+                        match (*physical_key).unwrap_or(*logical) {
+                            egui::Key::K => {
+                                self.glide.left = *pressed;
+                                return false;
+                            }
+                            egui::Key::L => {
+                                self.glide.right = *pressed;
+                                return false;
+                            }
+                            _ => {}
+                        }
+                    }
+                    true
+                });
+            });
+            // A window blur can swallow the key-up; clear a stuck glide.
+            if !ctx.input(|i| i.focused) {
+                self.glide.left = false;
+                self.glide.right = false;
+            }
+            if self.glide.left ^ self.glide.right {
+                let dt = ctx.input(|i| i.stable_dt) as f64;
+                if dt > 0.0 {
+                    self.glide.held_secs += dt;
+                    let ramp = (self.glide.held_secs / GLIDE_RAMP_SECS).clamp(0.0, 1.0);
+                    let frac = GLIDE_BASE_FRAC_PER_SEC
+                        + (GLIDE_MAX_FRAC_PER_SEC - GLIDE_BASE_FRAC_PER_SEC) * ramp;
+                    let dir = if self.glide.right { 1.0 } else { -1.0 };
+                    let delta = dir * frac * self.timeline.view_range() * dt;
+                    let target = movement_target(&ctx);
+                    self.move_target_by(target, delta);
+                }
+                ctx.request_repaint(); // keep animating while held
+            } else {
+                self.glide.held_secs = 0.0;
+            }
+
+            // ----- Lower right: view scroll (bare) / zoom (Shift) -----
+            let pan = self.timeline.view_range() * VIEW_PAN_FRAC;
+            if consume(NONE, egui::Key::N) {
+                self.timeline.set_view_start(0.0);
+            }
+            if consume(NONE, egui::Key::M) {
+                self.timeline.scroll_by(-pan);
+            }
+            if consume(NONE, egui::Key::Comma) {
+                self.timeline.scroll_by(pan);
+            }
+            if consume(NONE, egui::Key::Period) {
+                self.timeline.set_view_start(duration);
+            }
+            if consume(SHIFT, egui::Key::N) {
+                self.fit_whole_recording();
+            }
+            if consume(SHIFT, egui::Key::M) {
+                self.zoom_view(KEY_ZOOM_FACTOR);
+            }
+            if consume(SHIFT, egui::Key::Comma) {
+                self.zoom_view(1.0 / KEY_ZOOM_FACTOR);
+            }
+            if consume(SHIFT, egui::Key::Period) {
+                self.zoom_to_selection();
+            }
+        } else {
+            // Off the timeline (editing text or no audio loaded): drop any
+            // in-progress glide so it doesn't resume on return.
+            self.glide = GlideState::default();
+        }
+
+        // ── Bundle navigation (q/w/e/r) ───────────────────────────────────
+        // First / previous / next / last bundle. Physical keys, skipped while
+        // editing text; active whenever a project is open.
+        if !text_editing && matches!(self.app_state, AppState::ProjectLoaded { .. }) {
+            let ctx = ui.ctx().clone();
+            let consume = |key: egui::Key| {
+                ctx.input_mut(|i| consume_physical_key(i, egui::Modifiers::NONE, key))
+            };
+            if consume(egui::Key::Q) {
+                self.navigate_bundle(BundleNav::First);
+            }
+            if consume(egui::Key::W) {
+                self.navigate_bundle(BundleNav::Previous);
+            }
+            if consume(egui::Key::E) {
+                self.navigate_bundle(BundleNav::Next);
+            }
+            if consume(egui::Key::R) {
+                self.navigate_bundle(BundleNav::Last);
             }
         }
 
@@ -8208,18 +8917,58 @@ impl eframe::App for SaddaApp {
         // point tiers. Skipped while text-editing, while a resolution prompt /
         // label edit / palette is up, or when any widget has focus (so Enter
         // reaches dialogs). No-op without a selection.
+        // ── Annotation navigation (u/i/o/p; y grabs) ──────────────────────
+        // Move the "current annotation" highlight without disturbing the
+        // timeline selection: u/i = prev/next annotation on the current tier,
+        // o/p = prev/next tier, y = grab the current annotation into the
+        // selection + cursor. Esc clears the highlight (back to commit-mode).
+        // Physical keys; skipped while editing text.
+        if !text_editing && self.selected_bundle_id.is_some() {
+            let ctx = ui.ctx().clone();
+            let consume = |key: egui::Key| {
+                ctx.input_mut(|i| consume_physical_key(i, egui::Modifiers::NONE, key))
+            };
+            if consume(egui::Key::U) {
+                self.nav_annotation(-1);
+            }
+            if consume(egui::Key::I) {
+                self.nav_annotation(1);
+            }
+            if consume(egui::Key::O) {
+                self.nav_tier_by(-1);
+            }
+            if consume(egui::Key::P) {
+                self.nav_tier_by(1);
+            }
+            if consume(egui::Key::Y) {
+                self.grab_current_annotation();
+            }
+            if self.selected_annotation.is_some()
+                && !self.command_palette_open
+                && consume(egui::Key::Escape)
+            {
+                self.selected_annotation = None;
+            }
+        }
+
+        // Enter edits the current annotation when one is selected (the u/i/o/p
+        // navigation target), otherwise commits the timeline selection.
         if !text_editing
             && self.pending_commit.is_none()
             && self.label_edit.is_none()
             && !self.command_palette_open
             && self.selected_bundle_id.is_some()
-            && self.timeline.selection.is_some()
+            && (self.selected_annotation.is_some() || self.timeline.selection.is_some())
             && ui.ctx().memory(|m| m.focused().is_none())
             && ui
                 .ctx()
                 .input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
         {
-            self.enter_commit();
+            if self.selected_annotation.is_some() {
+                self.edit_current_annotation();
+            } else {
+                self.enter_commit();
+            }
         }
 
         // Arrow keys scrub the view left / right (a quarter-window per
@@ -8364,11 +9113,22 @@ impl eframe::App for SaddaApp {
         if self.persisted.script_panel_open
             && matches!(self.app_state, AppState::ProjectLoaded { .. })
         {
-            egui::Panel::bottom("script_panel")
+            let inner = egui::Panel::bottom("script_panel")
                 .resizable(true)
                 .default_size(220.0)
                 .min_size(120.0)
                 .show_inside(ui, |ui| self.script_panel(ui));
+            // Ring the console while it holds keyboard focus, so it's clear all
+            // keys are passing through to it (Shift+↑ steps back out).
+            if ui.ctx().memory(|m| m.focused()) == Some(console_editor_id()) {
+                let stroke = egui::Stroke::new(2.0, ui.visuals().selection.bg_fill);
+                ui.painter().rect_stroke(
+                    inner.response.rect,
+                    0.0,
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
+            }
         }
 
         match &self.app_state {
@@ -10596,14 +11356,21 @@ impl SaddaApp {
             .id_salt("script_code_scroll")
             .max_height(code_h)
             .show(ui, |ui| {
-                ui.add_sized(
+                let resp = ui.add_sized(
                     [ui.available_width(), code_h],
                     egui::TextEdit::multiline(&mut self.persisted.script_buffer)
+                        .id(console_editor_id())
                         .desired_rows(8)
                         .code_editor()
                         .layouter(&mut layouter)
                         .hint_text("# Embedded Python (stdlib). `import sadda.app` reads the live GUI:\nimport sadda.app\nprint(sadda.app.active_bundle())\n"),
                 );
+                // Shift+↓ asked to focus the console (handled before widgets
+                // render, so grab focus here on the requested frame).
+                if self.focus_console_request {
+                    resp.request_focus();
+                    self.focus_console_request = false;
+                }
             });
 
         ui.separator();

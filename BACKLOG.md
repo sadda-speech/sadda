@@ -16,6 +16,9 @@ Status: `[ ]` open · `[~]` in progress · `[x]` done (move to DEVLOG when shipp
 
 _Raw captures land here; groomed into the sections below on request._
 
+- [ ] **UI miscellany (next round)** — aggregator for small UI tweaks to batch together; add sub-bullets as they come up — _added 2026-06-20_
+  <!-- pane focus-shifting + annotation navigation promoted to active work (feat/pane-focus-nav); cursor-at-window-center dropped (start time is fine) -->
+
 - [ ] **Rhythm metrics** — speech rhythm/timing measures (e.g. %V, ΔC/ΔV, VarcoV/VarcoC, nPVI/rPVI) computed over interval tiers — _added 2026-06-05_
 - [ ] Fix table alignment in docs Quickstart → "Query annotations" → `print(df.head())` output — _added 2026-06-04_
 
