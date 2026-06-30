@@ -36,6 +36,9 @@ sadda-engine = { path = "../engine", features = ["download"] }
 pyo3 = { version = "0.28" }
 numpy = "0.28"
 ndarray = "0.16"
+# Serialize MfccParams/MfccPreset to TOML for the `.to_toml()` introspection
+# escape hatch (the on-disk preset format; engine owns the parse side).
+toml = "0.8"
 pyo3-stub-gen = "0.22"
 # E1 live recording: cpal Stream + rtrb are required here (not in
 # sadda-engine) because engine::live keeps itself free of audio-hardware

@@ -16,8 +16,11 @@ use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
+mod formant_preset;
 mod live;
+mod mfcc_preset;
 mod ml;
+mod pitch_preset;
 mod recipe;
 mod refdist;
 
@@ -60,6 +63,9 @@ pub(crate) fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
             PyValueError::new_err(format!("measure '{measure}' unreliable: {reason}"))
         }
         sadda_engine::EngineError::Ml(msg) => PyRuntimeError::new_err(format!("ml error: {msg}")),
+        sadda_engine::EngineError::Preset(msg) => {
+            PyValueError::new_err(format!("preset error: {msg}"))
+        }
     }
 }
 
@@ -3675,8 +3681,8 @@ fn intensity<'py>(
 /// NaN-padded.
 #[gen_stub_pyclass]
 #[pyclass(module = "sadda._native", name = "FormantFrame", frozen)]
-struct PyFormantFrame {
-    inner: sadda_engine::dsp::FormantFrame,
+pub(crate) struct PyFormantFrame {
+    pub(crate) inner: sadda_engine::dsp::FormantFrame,
 }
 
 #[gen_stub_pymethods]
@@ -3730,6 +3736,17 @@ fn parse_lpc_method(s: &str) -> PyResult<sadda_engine::dsp::LpcMethod> {
         "burg" => Ok(sadda_engine::dsp::LpcMethod::Burg),
         other => Err(PyValueError::new_err(format!(
             "unknown LPC method {other:?}; expected 'autocorrelation' or 'burg'"
+        ))),
+    }
+}
+
+fn parse_mfcc_method(s: &str) -> PyResult<sadda_engine::dsp::MfccMethod> {
+    match s {
+        "librosa" => Ok(sadda_engine::dsp::MfccMethod::Librosa),
+        "kaldi" => Ok(sadda_engine::dsp::MfccMethod::Kaldi),
+        "praat" => Ok(sadda_engine::dsp::MfccMethod::Praat),
+        other => Err(PyValueError::new_err(format!(
+            "unknown MFCC method {other:?}; expected 'librosa', 'kaldi', or 'praat'"
         ))),
     }
 }
@@ -3868,8 +3885,24 @@ fn formants(
 /// Computes Mel-Frequency Cepstral Coefficients over an [`Audio`]. Returns
 /// a 2-D float32 NumPy array of shape `(n_frames, n_mfcc)`, frames-first.
 ///
-/// Defaults match `librosa.feature.mfcc`: Slaney mel scale, `n_mels=40`,
-/// `n_mfcc=13`, `f_min=0`, `f_max=sr/2`, 25 ms frame, 10 ms hop.
+/// "MFCC" is a family, not one algorithm — toolkits differ on log base,
+/// windowing, mel scale, framing, etc. `method` picks the reference
+/// implementation to reproduce faithfully:
+///
+/// - `"librosa"` (**default**) — faithful `librosa.feature.mfcc` (0.11):
+///   Slaney mel scale + area norm, power spectrum, `10·log10` power-to-dB
+///   with an 80 dB global floor, periodic Hann, `center=True` framing
+///   (so `n_frames = 1 + n/hop`), orthonormal DCT-II.
+/// - `"kaldi"` — faithful Kaldi `compute-mfcc-feats`: DC removal,
+///   pre-emphasis 0.97, Povey window, power-of-two FFT, HTK mel scale with
+///   unit-peak filters, natural-log energies, DCT-II, cepstral lifter (L=22),
+///   `snip_edges` framing. Validated against torchaudio's kaldi-compliance.
+/// - `"praat"` — Praat `Sound: To MFCC…` (Gaussian window, HTK mel,
+///   unit-peak filters, un-normalised DCT, c0 in column 0). **Approximate**:
+///   structurally faithful but not yet byte-exact (see `MfccMethod::Praat`).
+///
+/// Other params: `n_mels=40`, `n_mfcc=13`, `f_min=0`, `f_max=sr/2`, 25 ms
+/// frame, 10 ms hop.
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -3877,6 +3910,7 @@ fn formants(
     frame_size_seconds=0.025, hop_seconds=0.010,
     n_mels=40, n_mfcc=13,
     f_min=0.0, f_max=None,
+    method="librosa",
 ))]
 #[allow(clippy::too_many_arguments)]
 fn mfcc<'py>(
@@ -3888,9 +3922,11 @@ fn mfcc<'py>(
     n_mfcc: usize,
     f_min: f32,
     f_max: Option<f32>,
-) -> Bound<'py, PyArray2<f32>> {
+    method: &str,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
     let mono: Vec<f32> = audio.inner.mono_samples().collect();
     let f_max = f_max.unwrap_or(audio.inner.sample_rate as f32 / 2.0);
+    let mfcc_method = parse_mfcc_method(method)?;
     let arr = sadda_engine::dsp::mfcc(
         &mono,
         audio.inner.sample_rate,
@@ -3900,8 +3936,9 @@ fn mfcc<'py>(
         n_mfcc,
         f_min,
         f_max,
+        mfcc_method,
     );
-    arr.into_pyarray(py)
+    Ok(arr.into_pyarray(py))
 }
 
 /// Whisper-exact log-mel spectrogram, shape `(n_frames, n_mels)`.
@@ -4567,6 +4604,82 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     ml_mod.add_class::<ml::PyModel>()?;
     m.add("ml", &ml_mod)?;
     sys_modules.set_item("sadda._native.ml", &ml_mod)?;
+
+    // MFCC preset registry: sadda.dsp preset surface (roadmap item 3/4).
+    // Registered as `sadda._native.mfcc_preset`; the Python
+    // `sadda/dsp/__init__.py` re-exports the params/preset types and the
+    // store functions, and dispatches `mfcc(audio, params=…)` to `compute`.
+    let mfcc_preset_mod = PyModule::new(m.py(), "sadda._native.mfcc_preset")?;
+    mfcc_preset_mod.add_function(wrap_pyfunction!(mfcc_preset::store_root, &mfcc_preset_mod)?)?;
+    mfcc_preset_mod.add_function(wrap_pyfunction!(mfcc_preset::builtin, &mfcc_preset_mod)?)?;
+    mfcc_preset_mod.add_function(wrap_pyfunction!(mfcc_preset::list_all, &mfcc_preset_mod)?)?;
+    mfcc_preset_mod.add_function(wrap_pyfunction!(mfcc_preset::list_user, &mfcc_preset_mod)?)?;
+    mfcc_preset_mod.add_function(wrap_pyfunction!(mfcc_preset::get, &mfcc_preset_mod)?)?;
+    mfcc_preset_mod.add_function(wrap_pyfunction!(mfcc_preset::save, &mfcc_preset_mod)?)?;
+    mfcc_preset_mod.add_function(wrap_pyfunction!(mfcc_preset::delete, &mfcc_preset_mod)?)?;
+    mfcc_preset_mod.add_function(wrap_pyfunction!(mfcc_preset::compute, &mfcc_preset_mod)?)?;
+    mfcc_preset_mod.add_class::<mfcc_preset::PyMfccParams>()?;
+    mfcc_preset_mod.add_class::<mfcc_preset::PyMfccPreset>()?;
+    m.add("mfcc_preset", &mfcc_preset_mod)?;
+    sys_modules.set_item("sadda._native.mfcc_preset", &mfcc_preset_mod)?;
+
+    // Pitch preset registry: sadda.dsp preset surface (roadmap item 6).
+    // Registered as `sadda._native.pitch_preset`; the Python
+    // `sadda/dsp/__init__.py` re-exports the params/preset types and the
+    // store functions, and dispatches `voiced_pitch(audio, params=…)`.
+    let pitch_preset_mod = PyModule::new(m.py(), "sadda._native.pitch_preset")?;
+    pitch_preset_mod.add_function(wrap_pyfunction!(
+        pitch_preset::store_root,
+        &pitch_preset_mod
+    )?)?;
+    pitch_preset_mod.add_function(wrap_pyfunction!(pitch_preset::builtin, &pitch_preset_mod)?)?;
+    pitch_preset_mod.add_function(wrap_pyfunction!(pitch_preset::list_all, &pitch_preset_mod)?)?;
+    pitch_preset_mod.add_function(wrap_pyfunction!(
+        pitch_preset::list_user,
+        &pitch_preset_mod
+    )?)?;
+    pitch_preset_mod.add_function(wrap_pyfunction!(pitch_preset::get, &pitch_preset_mod)?)?;
+    pitch_preset_mod.add_function(wrap_pyfunction!(pitch_preset::save, &pitch_preset_mod)?)?;
+    pitch_preset_mod.add_function(wrap_pyfunction!(pitch_preset::delete, &pitch_preset_mod)?)?;
+    pitch_preset_mod.add_function(wrap_pyfunction!(pitch_preset::compute, &pitch_preset_mod)?)?;
+    pitch_preset_mod.add_class::<pitch_preset::PyPitchParams>()?;
+    pitch_preset_mod.add_class::<pitch_preset::PyPitchPreset>()?;
+    m.add("pitch_preset", &pitch_preset_mod)?;
+    sys_modules.set_item("sadda._native.pitch_preset", &pitch_preset_mod)?;
+
+    // Formant preset registry: sadda.dsp preset surface (roadmap item 6).
+    let formant_preset_mod = PyModule::new(m.py(), "sadda._native.formant_preset")?;
+    formant_preset_mod.add_function(wrap_pyfunction!(
+        formant_preset::store_root,
+        &formant_preset_mod
+    )?)?;
+    formant_preset_mod.add_function(wrap_pyfunction!(
+        formant_preset::builtin,
+        &formant_preset_mod
+    )?)?;
+    formant_preset_mod.add_function(wrap_pyfunction!(
+        formant_preset::list_all,
+        &formant_preset_mod
+    )?)?;
+    formant_preset_mod.add_function(wrap_pyfunction!(
+        formant_preset::list_user,
+        &formant_preset_mod
+    )?)?;
+    formant_preset_mod.add_function(wrap_pyfunction!(formant_preset::get, &formant_preset_mod)?)?;
+    formant_preset_mod
+        .add_function(wrap_pyfunction!(formant_preset::save, &formant_preset_mod)?)?;
+    formant_preset_mod.add_function(wrap_pyfunction!(
+        formant_preset::delete,
+        &formant_preset_mod
+    )?)?;
+    formant_preset_mod.add_function(wrap_pyfunction!(
+        formant_preset::compute,
+        &formant_preset_mod
+    )?)?;
+    formant_preset_mod.add_class::<formant_preset::PyFormantsParams>()?;
+    formant_preset_mod.add_class::<formant_preset::PyFormantPreset>()?;
+    m.add("formant_preset", &formant_preset_mod)?;
+    sys_modules.set_item("sadda._native.formant_preset", &formant_preset_mod)?;
     Ok(())
 }
 

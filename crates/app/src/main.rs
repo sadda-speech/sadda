@@ -22,8 +22,10 @@ use pyo3::prelude::*;
 use sadda_engine::{LiveConfig, LiveResults, LiveSession, Project, StoppedSession, TierType};
 // D10 measure tracks: the engine already emits these per-frame
 // time series; the GUI computes + caches + renders them as lanes.
-use sadda_engine::dsp::{FormantFrame, FormantsConfig, IntensityFrame, formants, intensity};
-use sadda_engine::pitch::{PitchConfig, PitchFrame, PitchMethod, pitch};
+use sadda_engine::dsp::{
+    FormantFrame, FormantsConfig, IntensityFrame, LpcMethod, formants, intensity,
+};
+use sadda_engine::pitch::{PitchFrame, PitchMethod, pitch_with_params};
 // D10 refdist overlays: resolve a distribution from the store and turn
 // it into a band the lane draws behind its contour.
 use sadda_engine::{Histogram, MeasureKind, RefDist, RefdistStore, Summary};
@@ -36,8 +38,8 @@ use crate::sadda_app::{
     with_snapshot_active,
 };
 use crate::state::{
-    ColormapKind, EmbeddingHeatmapConfig, EnvelopeCache, MeasureTrackConfig, PersistedState,
-    PlotPalette, RefdistOverlay, SpectrogramConfig, ThemePref, TimelineState,
+    ColormapKind, EmbeddingHeatmapConfig, EnvelopeCache, MeasureTrackConfig, MfccLaneConfig,
+    PersistedState, PlotPalette, RefdistOverlay, SpectrogramConfig, ThemePref, TimelineState,
     build_envelope_for_range, colormap_bake, format_reference_lane_caption, nearest_frame_index,
     normalize_embedding, power_to_db_normalized, truncate_label,
 };
@@ -306,6 +308,24 @@ struct SaddaApp {
     /// the Parquet sidecar can't be read. Surfaced as a hint inside the
     /// lane so the lane keeps drawing instead of blanking out silently.
     embedding_heatmap_error: Option<String>,
+    /// Cached MFCC heatmap render. `None` when the lane is hidden or no
+    /// bundle is loaded. Rebuilt when the bundle or the MFCC lane config
+    /// (preset / params / colormap / normalization) changes.
+    active_mfcc: Option<MfccCache>,
+    /// Sticky error from the last MFCC-lane build (e.g. the selection is too
+    /// short for one frame). Surfaced inside the lane.
+    mfcc_error: Option<String>,
+    /// Open MFCC per-parameter editor (a working copy of the lane's params).
+    /// `None` when the editor modal is closed.
+    mfcc_editor: Option<MfccParamsEditor>,
+    /// Open f0 per-parameter editor (a working copy of `tracks.pitch_params`).
+    /// `None` when the editor modal is closed.
+    pitch_editor: Option<sadda_engine::pitch::PitchParams>,
+    /// Open formant per-parameter editor (a working copy of
+    /// `tracks.formant_params`). `None` when closed.
+    formant_editor: Option<FormantsConfig>,
+    /// Open "save current params as a user preset" dialog. `None` when closed.
+    preset_save_dialog: Option<PresetSaveDialog>,
     /// Shared timeline state — cursor, view window, duration —
     /// plumbed into every C5+ pane. Reset on bundle change.
     timeline: TimelineState,
@@ -1677,6 +1697,51 @@ struct EmbeddingHeatmapCache {
     tier_name: String,
 }
 
+/// Cached MFCC heatmap render. Mirrors [`EmbeddingHeatmapCache`]: an MFCC
+/// result is a `(n_frames × n_coeffs)` matrix, rendered exactly like the
+/// embedding heatmap (transpose → per-coefficient normalize → colormap →
+/// texture). Invalidates by `==` on the whole [`MfccLaneConfig`].
+struct MfccCache {
+    bundle_id: i64,
+    config: MfccLaneConfig,
+    /// GPU texture handle for the colormapped coefficient matrix.
+    texture: egui::TextureHandle,
+    /// Bundle duration in seconds (x-axis upper bound).
+    duration_seconds: f64,
+    /// Number of coefficient rows displayed (y-axis upper bound) — `n_mfcc`,
+    /// or `n_mfcc − 1` when c0 is dropped.
+    n_rows: usize,
+}
+
+/// Working copy for the MFCC per-parameter editor modal. Holds an editable
+/// [`MfccParams`](sadda_engine::dsp::MfccParams); on Apply it is written back
+/// to the lane config (invalidating the cache), on Cancel it's discarded.
+struct MfccParamsEditor {
+    /// The params being edited (seeded from the lane's current params).
+    params: sadda_engine::dsp::MfccParams,
+    /// The preset id this editor was opened from (for the "based on …" label).
+    preset_id: String,
+}
+
+/// Which DSP family a preset save/delete acts on — lets one shared
+/// save-dialog and the delete handler cover MFCC / pitch / formants.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PresetTarget {
+    Mfcc,
+    Pitch,
+    Formant,
+}
+
+/// Modal state for "Save current parameters as a named user preset". The
+/// params come from the active lane config for `target`; this just collects
+/// the id + title and surfaces save errors (invalid id, built-in collision).
+struct PresetSaveDialog {
+    target: PresetTarget,
+    id: String,
+    title: String,
+    error: Option<String>,
+}
+
 /// D10: cached measure-track analysis for the selected bundle under
 /// the current [`MeasureTrackConfig`]. Mirrors [`SpectrogramCache`]:
 /// recomputed only when the bundle or the config changes (see
@@ -2022,6 +2087,12 @@ impl SaddaApp {
             focus_console_request: false,
             active_embedding_heatmap: None,
             embedding_heatmap_error: None,
+            active_mfcc: None,
+            mfcc_error: None,
+            mfcc_editor: None,
+            pitch_editor: None,
+            formant_editor: None,
+            preset_save_dialog: None,
             timeline: TimelineState::default(),
             glide: GlideState::default(),
             playback: None,
@@ -2507,6 +2578,8 @@ impl SaddaApp {
                     self.active_spectrogram = None;
                     self.active_embedding_heatmap = None;
                     self.embedding_heatmap_error = None;
+                    self.active_mfcc = None;
+                    self.mfcc_error = None;
                     self.selected_annotation = None;
                     self.timeline = TimelineState::default();
                     self.playback = None;
@@ -3760,6 +3833,8 @@ impl SaddaApp {
         self.selected_bundle_id = Some(bundle_id);
         self.active_embedding_heatmap = None;
         self.embedding_heatmap_error = None;
+        self.active_mfcc = None;
+        self.mfcc_error = None;
         self.selected_annotation = None;
         self.playback = None;
         self.draft_edit = DraftEdit::None;
@@ -3782,6 +3857,8 @@ impl SaddaApp {
         self.active_spectrogram = None;
         self.active_embedding_heatmap = None;
         self.embedding_heatmap_error = None;
+        self.active_mfcc = None;
+        self.mfcc_error = None;
         self.selected_annotation = None;
         self.playback = None;
         self.draft_edit = DraftEdit::None;
@@ -6683,6 +6760,41 @@ impl SaddaApp {
         }
     }
 
+    /// Rebuild the MFCC heatmap texture if the bundle or the MFCC lane config
+    /// changed. Synchronous (like the spectrogram / embedding heatmap) — the
+    /// MFCC pipeline is cheap relative to the GPU upload. Skips entirely when
+    /// the lane is hidden.
+    fn rebuild_mfcc_if_stale(&mut self, ctx: &egui::Context) {
+        let Some(env) = &self.active_envelope else {
+            self.active_mfcc = None;
+            self.mfcc_error = None;
+            return;
+        };
+        let cfg = self.persisted.mfcc.clone();
+        if !cfg.show {
+            self.active_mfcc = None;
+            self.mfcc_error = None;
+            return;
+        }
+        let bundle_id = env.bundle_id;
+        if let Some(c) = &self.active_mfcc {
+            if c.bundle_id == bundle_id && c.config == cfg {
+                return;
+            }
+        }
+        let env = env.clone();
+        match build_mfcc_heatmap_texture(ctx, &env, cfg) {
+            Ok(c) => {
+                self.active_mfcc = Some(c);
+                self.mfcc_error = None;
+            }
+            Err(e) => {
+                self.active_mfcc = None;
+                self.mfcc_error = Some(e);
+            }
+        }
+    }
+
     /// D10 / P2: dispatch a background measure-track build (f0 / formants /
     /// intensity) if the cache is stale. Runs the FFT/LPC work on a worker
     /// thread; [`poll_analysis`](Self::poll_analysis) installs the result.
@@ -6821,6 +6933,9 @@ struct SpectrogramImage {
 
 /// A completed async analysis job (P2). It carries the bundle + config it was
 /// computed for, so the UI installs it only if that's still what's selected.
+// Variants differ in size (the Tracks config embeds the full PitchParams);
+// this is a one-shot channel message sent rarely, so the size gap is moot.
+#[allow(clippy::large_enum_variant)]
 enum AnalysisResult {
     Spectrogram {
         bundle_id: i64,
@@ -7006,6 +7121,175 @@ fn build_embedding_heatmap_texture(
     })
 }
 
+fn lpc_method_label(m: LpcMethod) -> &'static str {
+    match m {
+        LpcMethod::Burg => "Burg (Praat, default)",
+        LpcMethod::Autocorrelation => "Autocorrelation (Levinson–Durbin)",
+    }
+}
+
+fn pitch_method_label(m: PitchMethod) -> &'static str {
+    match m {
+        PitchMethod::Boersma => "Boersma (Praat, default)",
+        PitchMethod::Yin => "YIN",
+        PitchMethod::PYin => "pYIN (librosa)",
+        PitchMethod::Swipe => "SWIPE′",
+        PitchMethod::Autocorrelation => "Autocorrelation (naive)",
+        PitchMethod::WindowedAutocorrelation => "Windowed autocorrelation",
+    }
+}
+
+fn mfcc_window_label(w: sadda_engine::dsp::MfccWindow) -> &'static str {
+    use sadda_engine::dsp::MfccWindow::*;
+    match w {
+        PeriodicHann => "Periodic Hann (librosa)",
+        Povey => "Povey (Kaldi)",
+        PraatGaussian => "Gaussian-2 (Praat)",
+        Hamming => "Hamming (HTK)",
+    }
+}
+fn mfcc_framing_label(f: sadda_engine::dsp::MfccFraming) -> &'static str {
+    use sadda_engine::dsp::MfccFraming::*;
+    match f {
+        Centered => "Centered (librosa)",
+        SnipEdges => "Snip edges",
+    }
+}
+fn mfcc_fft_label(f: sadda_engine::dsp::MfccFft) -> &'static str {
+    use sadda_engine::dsp::MfccFft::*;
+    match f {
+        WindowLength => "Window length",
+        NextPow2 => "Next power of two",
+    }
+}
+fn mfcc_mel_label(m: sadda_engine::dsp::MelScaleKind) -> &'static str {
+    use sadda_engine::dsp::MelScaleKind::*;
+    match m {
+        Slaney => "Slaney (librosa)",
+        Htk => "HTK (Kaldi/Praat)",
+    }
+}
+fn mfcc_fnorm_label(n: sadda_engine::dsp::MfccFilterNorm) -> &'static str {
+    use sadda_engine::dsp::MfccFilterNorm::*;
+    match n {
+        AreaSlaney => "Slaney area",
+        UnitPeak => "Unit peak",
+    }
+}
+fn mfcc_dct_label(d: sadda_engine::dsp::MfccDct) -> &'static str {
+    use sadda_engine::dsp::MfccDct::*;
+    match d {
+        Ortho => "Orthonormal",
+        Unnormalized => "Un-normalised (Praat)",
+    }
+}
+fn mfcc_pnorm_label(n: sadda_engine::dsp::MfccPowerNorm) -> &'static str {
+    use sadda_engine::dsp::MfccPowerNorm::*;
+    match n {
+        Raw => "Raw |FFT|²",
+        PraatDuration => "Praat duration-scaled",
+    }
+}
+
+/// Computes the MFCCs for the bundle under `cfg.params`, transposes to a
+/// coefficient-major matrix, applies the c0 display mode (separate scale + gap
+/// / inline / hidden), normalizes per coefficient, colormaps it, and uploads
+/// it as an egui texture. Mirrors
+/// [`build_embedding_heatmap_texture`] — an MFCC result is the same
+/// `(rows × frames)` shape as an embedding tier. Returns the cache or an
+/// actionable message (selection too short → shown inside the lane).
+fn build_mfcc_heatmap_texture(
+    ctx: &egui::Context,
+    env: &EnvelopeCache,
+    cfg: MfccLaneConfig,
+) -> Result<MfccCache, String> {
+    let mfcc = sadda_engine::dsp::mfcc_with_params(&env.mono_samples, env.sample_rate, &cfg.params);
+    let (n_frames, n_mfcc) = mfcc.dim();
+    if n_frames == 0 || n_mfcc == 0 {
+        return Err(
+            "selection is too short to compute an MFCC frame at these settings".to_string(),
+        );
+    }
+    // Full coefficient-major / frame-minor `[n_mfcc * n_frames]` f32 buffer
+    // (rows = coefficients c0..c{n−1}, columns = frames).
+    let mut row_major: Vec<f32> = vec![0.0; n_mfcc * n_frames];
+    for f in 0..n_frames {
+        for c in 0..n_mfcc {
+            row_major[c * n_frames + f] = mfcc[(f, c)];
+        }
+    }
+
+    // Bucket the time axis if longer than the texture cap (as the spectrogram
+    // and embedding heatmap do).
+    let (display_width, full) = if n_frames > MAX_SPECTROGRAM_WIDTH {
+        let stride = n_frames.div_ceil(MAX_SPECTROGRAM_WIDTH);
+        let new_width = n_frames.div_ceil(stride);
+        let mut out = vec![0.0f32; n_mfcc * new_width];
+        for c in 0..n_mfcc {
+            for x in 0..new_width {
+                let start = x * stride;
+                let end = (start + stride).min(n_frames);
+                let mut acc = 0.0f32;
+                for f in start..end {
+                    acc += row_major[c * n_frames + f];
+                }
+                out[c * new_width + x] = acc / (end - start) as f32;
+            }
+        }
+        (new_width, out)
+    } else {
+        (n_frames, row_major)
+    };
+    let w = display_width;
+    let row_bytes = w * 4;
+
+    // c0 (overall log-energy) is orders larger than the spectral-shape
+    // coefficients c1+. Three display modes (the `Separate` default keeps it
+    // visible but on its own scale + a gap, so it can't be misread as just
+    // another shape coefficient, and can't anchor a shared-scale normalization):
+    let bake = |rows_buf: &[f32], rows: usize, mode| {
+        let norm = normalize_embedding(rows_buf, rows, w, mode);
+        colormap_bake(&norm, w, rows, cfg.colormap)
+    };
+    let (n_rows, rgba) = match cfg.c0 {
+        crate::state::MfccC0Display::Hidden if n_mfcc > 1 => {
+            let rows = n_mfcc - 1;
+            (rows, bake(&full[w..], rows, cfg.normalization)) // skip the c0 row
+        }
+        crate::state::MfccC0Display::Separate if n_mfcc > 1 => {
+            // c1+ on the chosen scale; c0 always on its own (per-coeff z-score),
+            // stacked below a small transparent gap.
+            let rows_rest = n_mfcc - 1;
+            let rgba_rest = bake(&full[w..], rows_rest, cfg.normalization);
+            let rgba_c0 = bake(
+                &full[..w],
+                1,
+                crate::state::EmbeddingNormalization::PerDimZScore,
+            );
+            let gap = 1usize; // transparent separator row
+            let total = rows_rest + gap + 1;
+            let mut rgba = vec![0u8; total * row_bytes]; // gap rows stay alpha=0
+            rgba[..rgba_rest.len()].copy_from_slice(&rgba_rest);
+            let c0_off = (rows_rest + gap) * row_bytes;
+            rgba[c0_off..c0_off + rgba_c0.len()].copy_from_slice(&rgba_c0);
+            (total, rgba)
+        }
+        // Inline (or the single-coefficient fallback): one shared scale.
+        _ => (n_mfcc, bake(&full, n_mfcc, cfg.normalization)),
+    };
+
+    let image = egui::ColorImage::from_rgba_unmultiplied([w, n_rows], &rgba);
+    let texture = ctx.load_texture("mfcc_heatmap", image, egui::TextureOptions::LINEAR);
+
+    Ok(MfccCache {
+        bundle_id: env.bundle_id,
+        config: cfg,
+        texture,
+        duration_seconds: env.duration_seconds,
+        n_rows,
+    })
+}
+
 /// D10: run the engine's per-frame analyses for the visible lanes and
 /// pack them into a [`MeasureTrackCache`]. Hidden lanes are skipped so
 /// toggling a lane off reclaims its analysis cost. Pitch needs an
@@ -7027,18 +7311,13 @@ fn compute_measure_tracks(env: &EnvelopeCache, cfg: MeasureTrackConfig) -> Measu
     let mut vad_error = None;
     if let Some(audio) = &audio {
         if cfg.f0_visible {
-            let pcfg = PitchConfig {
-                min_freq_hz: cfg.f0_min_hz,
-                max_freq_hz: cfg.f0_max_hz,
-                voicing_threshold: cfg.f0_voicing_threshold,
-                ..PitchConfig::default()
-            };
             let t = std::time::Instant::now();
-            // Boersma (the canonical default) is octave-robust; the simpler
-            // windowed-autocorrelation tracker latched onto subharmonics of
-            // clean tones (150→75, 250→83.3). ~1.6× slower but still ~40 ms for
-            // 30 s of 44.1 kHz audio, and this lane is computed async (P2).
-            f0 = pitch(audio, &pcfg, PitchMethod::default());
+            // The full f0 spec (method + config) is user-selectable via
+            // View ▸ DSP methods (preset picker + parameter editor). Default
+            // is Boersma at Praat's defaults — octave-robust, unlike the
+            // simpler windowed-autocorrelation tracker, which latched onto
+            // subharmonics of clean tones (150→75, 250→83.3). Computed async (P2).
+            f0 = pitch_with_params(audio, &cfg.pitch_params);
             perf_log("  · f0", t.elapsed());
         }
         if cfg.vad_visible {
@@ -7054,12 +7333,10 @@ fn compute_measure_tracks(env: &EnvelopeCache, cfg: MeasureTrackConfig) -> Measu
     }
 
     let formants = if cfg.formants_visible {
-        let fcfg = FormantsConfig {
-            n_formants: cfg.formant_count,
-            ..FormantsConfig::default()
-        };
         let t = std::time::Instant::now();
-        let r = formants(&env.mono_samples, sr, &fcfg);
+        // Full formant spec (LPC method + count + knobs) is user-selectable via
+        // View ▸ DSP methods (preset picker + parameter editor).
+        let r = formants(&env.mono_samples, sr, &cfg.formant_params);
         perf_log("  · formants", t.elapsed());
         r
     } else {
@@ -9042,6 +9319,10 @@ impl eframe::App for SaddaApp {
         self.label_edit_window(ui.ctx());
         self.rubric_editor_window(ui.ctx());
         self.criteria_editor_window(ui.ctx());
+        self.mfcc_param_editor_window(ui.ctx());
+        self.f0_param_editor_window(ui.ctx());
+        self.formant_param_editor_window(ui.ctx());
+        self.preset_save_dialog_window(ui.ctx());
         self.targets_panel_window(ui.ctx());
         self.dashboard_window(ui.ctx());
         self.notebook_window(ui.ctx());
@@ -9527,11 +9808,46 @@ impl SaddaApp {
             ui.checkbox(&mut self.persisted.tracks.formants_visible, "Formants");
             ui.checkbox(&mut self.persisted.tracks.intensity_visible, "Intensity");
             ui.checkbox(&mut self.persisted.tracks.vad_visible, "VAD (speech)");
+            // Per-lane DSP method selection. Each choice persists and
+            // invalidates the track cache, so the lane recomputes on the next
+            // frame. (MFCC has its own lane + preset picker under View ▸ MFCC.)
+            ui.menu_button("DSP methods", |ui| {
+                // Flag when the live params drift from the named preset (built-ins
+                // checked in-memory; no per-frame disk I/O).
+                let f0_modified = sadda_engine::pitch_preset::pitch_builtin_presets()
+                    .into_iter()
+                    .find(|p| p.id == self.persisted.pitch_preset_id)
+                    .map(|p| p.params != self.persisted.tracks.pitch_params)
+                    .unwrap_or(false);
+                let f0_label = format!(
+                    "f0: {}{}",
+                    self.persisted.pitch_preset_id,
+                    if f0_modified { " (modified)" } else { "" }
+                );
+                ui.menu_button(f0_label, |ui| self.f0_preset_submenu(ui));
+
+                let fmt_modified = sadda_engine::dsp::formant_builtin_presets()
+                    .into_iter()
+                    .find(|p| p.id == self.persisted.formant_preset_id)
+                    .map(|p| p.params != self.persisted.tracks.formant_params)
+                    .unwrap_or(false);
+                let fmt_label = format!(
+                    "Formants: {}{}",
+                    self.persisted.formant_preset_id,
+                    if fmt_modified { " (modified)" } else { "" }
+                );
+                ui.menu_button(fmt_label, |ui| self.formant_preset_submenu(ui));
+            });
             // E12: embedding-heatmap submenu — tier picker (lists the
             // continuous_vector tiers of the active bundle) + colormap +
             // normalization. Hidden when no project / bundle is loaded.
             ui.menu_button("Embedding heatmap", |ui| {
                 self.embedding_heatmap_submenu(ui);
+            });
+            // MFCC lane — show toggle, preset picker, edit-parameters, and
+            // colormap / normalization / c0 display knobs.
+            ui.menu_button("MFCC", |ui| {
+                self.mfcc_submenu(ui);
             });
             // D10: reference-distribution overlay pickers, one per
             // band-capable lane. Each lists installed distributions whose
@@ -9637,6 +9953,7 @@ impl SaddaApp {
             (ColormapKind::Cividis, "Cividis (CVD-safe)"),
             (ColormapKind::Viridis, "Viridis"),
             (ColormapKind::Magma, "Magma"),
+            (ColormapKind::Hot, "Hot"),
             (ColormapKind::Greyscale, "Greyscale"),
         ] {
             ui.radio_value(&mut self.persisted.embedding.colormap, cm, label);
@@ -9659,6 +9976,807 @@ impl SaddaApp {
             ),
         ] {
             ui.radio_value(&mut self.persisted.embedding.normalization, mode, label);
+        }
+    }
+
+    /// View ▸ MFCC submenu: show toggle, preset picker (built-in + user
+    /// presets from the on-disk registry), edit-parameters, and the
+    /// colormap / normalization / c0 display knobs.
+    fn mfcc_submenu(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.persisted.mfcc.show, "Show MFCC lane");
+
+        ui.separator();
+        ui.label("Preset");
+        // List presets from the user store (built-ins + on-disk); fall back to
+        // the built-ins alone if the store can't be opened.
+        let presets = sadda_engine::dsp::MfccPresetStore::user_default()
+            .map(|s| s.list())
+            .unwrap_or_else(|_| sadda_engine::dsp::builtin_presets());
+        for preset in &presets {
+            let selected = self.persisted.mfcc.preset_id == preset.id;
+            let label = if preset.title.is_empty() {
+                preset.id.clone()
+            } else {
+                preset.title.clone()
+            };
+            if ui.radio(selected, label).clicked() {
+                self.persisted.mfcc.preset_id = preset.id.clone();
+                self.persisted.mfcc.params = preset.params.clone();
+            }
+        }
+
+        ui.separator();
+        if ui.button("Edit parameters…").clicked() {
+            self.mfcc_editor = Some(MfccParamsEditor {
+                params: self.persisted.mfcc.params.clone(),
+                preset_id: self.persisted.mfcc.preset_id.clone(),
+            });
+            ui.close();
+        }
+        self.preset_save_delete_controls(ui, PresetTarget::Mfcc);
+
+        ui.separator();
+        ui.label("c0 (energy)");
+        for mode in crate::state::MfccC0Display::all() {
+            ui.radio_value(&mut self.persisted.mfcc.c0, mode, mode.label());
+        }
+
+        ui.separator();
+        ui.label("Colormap");
+        for &(cm, label) in &[
+            (ColormapKind::Cividis, "Cividis (CVD-safe)"),
+            (ColormapKind::Viridis, "Viridis"),
+            (ColormapKind::Magma, "Magma"),
+            (ColormapKind::Hot, "Hot"),
+            (ColormapKind::Greyscale, "Greyscale"),
+        ] {
+            ui.radio_value(&mut self.persisted.mfcc.colormap, cm, label);
+        }
+
+        ui.separator();
+        ui.label("Normalization");
+        for &(mode, label) in &[
+            (
+                crate::state::EmbeddingNormalization::PerDimZScore,
+                "Per-coeff z-score (default)",
+            ),
+            (
+                crate::state::EmbeddingNormalization::GlobalZScore,
+                "Global z-score",
+            ),
+            (
+                crate::state::EmbeddingNormalization::GlobalMinMax,
+                "Global min–max",
+            ),
+        ] {
+            ui.radio_value(&mut self.persisted.mfcc.normalization, mode, label);
+        }
+    }
+
+    /// Modal per-parameter editor for the MFCC lane's [`MfccParams`]. Edits a
+    /// working copy; Apply writes it back to the lane config (invalidating the
+    /// cache so the lane recomputes), Cancel discards. Editing away from the
+    /// named preset is honest — the lane caption then flags "(modified)".
+    fn mfcc_param_editor_window(&mut self, ctx: &egui::Context) {
+        use sadda_engine::dsp::{
+            MelScaleKind, MfccDct, MfccFft, MfccFilterNorm, MfccFilters, MfccFraming,
+            MfccPowerNorm, MfccWindow,
+        };
+        if self.mfcc_editor.is_none() {
+            return;
+        }
+        let mut apply = false;
+        let mut close = false;
+        let mut keep_open = true;
+        egui::Window::new("MFCC parameters")
+            .open(&mut keep_open)
+            .resizable(true)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                let ed = self.mfcc_editor.as_mut().expect("checked above");
+                ui.label(
+                    egui::RichText::new(format!("Based on preset: {}", ed.preset_id))
+                        .weak()
+                        .italics(),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Editing these makes it a custom parameter set (the lane flags it as \
+                         modified). Faithfulness to the reference is only guaranteed for the \
+                         unedited preset.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.separator();
+                let p = &mut ed.params;
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("mfcc_param_grid")
+                            .num_columns(2)
+                            .spacing([12.0, 6.0])
+                            .show(ui, |ui| {
+                                ui.label("Coefficients (n_mfcc)");
+                                ui.add(egui::DragValue::new(&mut p.n_mfcc).range(1..=64));
+                                ui.end_row();
+
+                                if let MfccFilters::NMels { n_mels } = &mut p.filters {
+                                    ui.label("Mel filters (n_mels)");
+                                    ui.add(egui::DragValue::new(n_mels).range(1..=512));
+                                    ui.end_row();
+                                }
+
+                                ui.label("Frame size (s)");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.frame_size_seconds)
+                                        .speed(0.001)
+                                        .range(0.001..=1.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("Hop (s)");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.hop_seconds)
+                                        .speed(0.001)
+                                        .range(0.001..=1.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("f_min (Hz)");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.f_min)
+                                        .speed(1.0)
+                                        .range(0.0..=20000.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("f_max (Hz)");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.f_max)
+                                        .speed(1.0)
+                                        .range(1.0..=24000.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("Window duration ×");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.window_duration_factor)
+                                        .speed(0.05)
+                                        .range(0.1..=4.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("Pre-emphasis");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.pre_emphasis)
+                                        .speed(0.01)
+                                        .range(0.0..=1.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("Cepstral lifter");
+                                ui.add(
+                                    egui::DragValue::new(&mut p.lifter)
+                                        .speed(0.5)
+                                        .range(0.0..=100.0),
+                                );
+                                ui.end_row();
+
+                                ui.label("Window");
+                                egui::ComboBox::from_id_salt("mfcc_window")
+                                    .selected_text(mfcc_window_label(p.window))
+                                    .show_ui(ui, |ui| {
+                                        for w in [
+                                            MfccWindow::PeriodicHann,
+                                            MfccWindow::Povey,
+                                            MfccWindow::PraatGaussian,
+                                            MfccWindow::Hamming,
+                                        ] {
+                                            ui.selectable_value(
+                                                &mut p.window,
+                                                w,
+                                                mfcc_window_label(w),
+                                            );
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label("Framing");
+                                egui::ComboBox::from_id_salt("mfcc_framing")
+                                    .selected_text(mfcc_framing_label(p.framing))
+                                    .show_ui(ui, |ui| {
+                                        for f in [MfccFraming::Centered, MfccFraming::SnipEdges] {
+                                            ui.selectable_value(
+                                                &mut p.framing,
+                                                f,
+                                                mfcc_framing_label(f),
+                                            );
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label("FFT size");
+                                egui::ComboBox::from_id_salt("mfcc_fft")
+                                    .selected_text(mfcc_fft_label(p.fft))
+                                    .show_ui(ui, |ui| {
+                                        for f in [MfccFft::WindowLength, MfccFft::NextPow2] {
+                                            ui.selectable_value(&mut p.fft, f, mfcc_fft_label(f));
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label("Mel scale");
+                                egui::ComboBox::from_id_salt("mfcc_mel")
+                                    .selected_text(mfcc_mel_label(p.mel_scale))
+                                    .show_ui(ui, |ui| {
+                                        for m in [MelScaleKind::Slaney, MelScaleKind::Htk] {
+                                            ui.selectable_value(
+                                                &mut p.mel_scale,
+                                                m,
+                                                mfcc_mel_label(m),
+                                            );
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label("Filter norm");
+                                egui::ComboBox::from_id_salt("mfcc_fnorm")
+                                    .selected_text(mfcc_fnorm_label(p.filter_norm))
+                                    .show_ui(ui, |ui| {
+                                        for n in
+                                            [MfccFilterNorm::AreaSlaney, MfccFilterNorm::UnitPeak]
+                                        {
+                                            ui.selectable_value(
+                                                &mut p.filter_norm,
+                                                n,
+                                                mfcc_fnorm_label(n),
+                                            );
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label("DCT norm");
+                                egui::ComboBox::from_id_salt("mfcc_dct")
+                                    .selected_text(mfcc_dct_label(p.dct))
+                                    .show_ui(ui, |ui| {
+                                        for d in [MfccDct::Ortho, MfccDct::Unnormalized] {
+                                            ui.selectable_value(&mut p.dct, d, mfcc_dct_label(d));
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label("Power scaling");
+                                egui::ComboBox::from_id_salt("mfcc_pnorm")
+                                    .selected_text(mfcc_pnorm_label(p.power_norm))
+                                    .show_ui(ui, |ui| {
+                                        for n in [MfccPowerNorm::Raw, MfccPowerNorm::PraatDuration]
+                                        {
+                                            ui.selectable_value(
+                                                &mut p.power_norm,
+                                                n,
+                                                mfcc_pnorm_label(n),
+                                            );
+                                        }
+                                    });
+                                ui.end_row();
+                            });
+                        ui.add_space(4.0);
+                        ui.checkbox(&mut p.remove_dc, "Remove DC (per-frame mean)");
+                        ui.checkbox(&mut p.triangle_in_mel, "Triangles linear in mel");
+                        ui.checkbox(&mut p.exclude_nyquist_bin, "Exclude Nyquist bin");
+                    });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if apply {
+            if let Some(ed) = self.mfcc_editor.take() {
+                self.persisted.mfcc.params = ed.params;
+            }
+        } else if close || !keep_open {
+            self.mfcc_editor = None;
+        }
+    }
+
+    /// View ▸ DSP methods ▸ f0 submenu: preset picker (built-in + user pitch
+    /// presets) + Edit-parameters. Selecting a preset sets the whole
+    /// `tracks.pitch_params` (method + config), driving the f0 lane.
+    fn f0_preset_submenu(&mut self, ui: &mut egui::Ui) {
+        let presets = sadda_engine::pitch_preset::PitchPresetStore::user_default()
+            .map(|s| s.list())
+            .unwrap_or_else(|_| sadda_engine::pitch_preset::pitch_builtin_presets());
+        for preset in &presets {
+            let selected = self.persisted.pitch_preset_id == preset.id;
+            let label = if preset.title.is_empty() {
+                preset.id.clone()
+            } else {
+                preset.title.clone()
+            };
+            if ui.radio(selected, label).clicked() {
+                self.persisted.pitch_preset_id = preset.id.clone();
+                self.persisted.tracks.pitch_params = preset.params;
+            }
+        }
+        ui.separator();
+        if ui.button("Edit parameters…").clicked() {
+            self.pitch_editor = Some(self.persisted.tracks.pitch_params);
+            ui.close();
+        }
+        self.preset_save_delete_controls(ui, PresetTarget::Pitch);
+    }
+
+    /// Modal per-parameter editor for the f0 lane's `PitchParams`. Edits a
+    /// working copy; Apply writes it back to `tracks.pitch_params` (the f0
+    /// lane recomputes), Cancel discards.
+    fn f0_param_editor_window(&mut self, ctx: &egui::Context) {
+        if self.pitch_editor.is_none() {
+            return;
+        }
+        let mut apply = false;
+        let mut close = false;
+        let mut keep_open = true;
+        egui::Window::new("f0 parameters")
+            .open(&mut keep_open)
+            .resizable(true)
+            .default_width(380.0)
+            .show(ctx, |ui| {
+                let p = self.pitch_editor.as_mut().expect("checked above");
+                ui.label(
+                    egui::RichText::new(
+                        "Editing these makes it a custom parameter set (the menu flags it \
+                         as modified).",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.separator();
+                egui::Grid::new("f0_param_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Method");
+                        egui::ComboBox::from_id_salt("f0_method")
+                            .selected_text(pitch_method_label(p.method))
+                            .show_ui(ui, |ui| {
+                                for m in [
+                                    PitchMethod::Boersma,
+                                    PitchMethod::Yin,
+                                    PitchMethod::PYin,
+                                    PitchMethod::Swipe,
+                                    PitchMethod::Autocorrelation,
+                                    PitchMethod::WindowedAutocorrelation,
+                                ] {
+                                    ui.selectable_value(&mut p.method, m, pitch_method_label(m));
+                                }
+                            });
+                        ui.end_row();
+
+                        let c = &mut p.config;
+                        ui.label("Min f0 (Hz)");
+                        ui.add(
+                            egui::DragValue::new(&mut c.min_freq_hz)
+                                .speed(1.0)
+                                .range(20.0..=1000.0),
+                        );
+                        ui.end_row();
+                        ui.label("Max f0 (Hz)");
+                        ui.add(
+                            egui::DragValue::new(&mut c.max_freq_hz)
+                                .speed(1.0)
+                                .range(50.0..=4000.0),
+                        );
+                        ui.end_row();
+                        ui.label("Voicing threshold");
+                        ui.add(
+                            egui::DragValue::new(&mut c.voicing_threshold)
+                                .speed(0.01)
+                                .range(0.0..=1.0),
+                        );
+                        ui.end_row();
+                        ui.label("Frame size (s)");
+                        ui.add(
+                            egui::DragValue::new(&mut c.frame_size_seconds)
+                                .speed(0.001)
+                                .range(0.005..=0.2),
+                        );
+                        ui.end_row();
+                        ui.label("Hop (s)");
+                        ui.add(
+                            egui::DragValue::new(&mut c.hop_size_seconds)
+                                .speed(0.001)
+                                .range(0.001..=0.1),
+                        );
+                        ui.end_row();
+                    });
+
+                // Method-specific advanced knobs, shown only for the active method.
+                let c = &mut p.config;
+                match p.method {
+                    PitchMethod::Boersma => {
+                        ui.separator();
+                        ui.label(egui::RichText::new("Boersma path-finding").weak());
+                        ui.add(
+                            egui::Slider::new(&mut c.boersma_octave_cost, 0.0..=0.2)
+                                .text("octave cost"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut c.boersma_octave_jump_cost, 0.0..=2.0)
+                                .text("octave-jump cost"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut c.boersma_voiced_unvoiced_cost, 0.0..=1.0)
+                                .text("voiced↔unvoiced cost"),
+                        );
+                    }
+                    PitchMethod::Yin | PitchMethod::PYin => {
+                        ui.separator();
+                        ui.label(egui::RichText::new("YIN / pYIN").weak());
+                        ui.add(
+                            egui::Slider::new(&mut c.yin_threshold, 0.01..=0.5)
+                                .text("YIN threshold"),
+                        );
+                    }
+                    _ => {}
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if apply {
+            if let Some(params) = self.pitch_editor.take() {
+                self.persisted.tracks.pitch_params = params;
+            }
+        } else if close || !keep_open {
+            self.pitch_editor = None;
+        }
+    }
+
+    /// View ▸ DSP methods ▸ Formants submenu: a preset picker (built-in + user)
+    /// and an Edit-parameters button. Selecting a preset sets the whole
+    /// `tracks.formant_params`, driving the formant lane.
+    fn formant_preset_submenu(&mut self, ui: &mut egui::Ui) {
+        let presets = sadda_engine::dsp::formant_preset::FormantPresetStore::user_default()
+            .map(|s| s.list())
+            .unwrap_or_else(|_| sadda_engine::dsp::formant_builtin_presets());
+        for preset in &presets {
+            let selected = self.persisted.formant_preset_id == preset.id;
+            let label = if preset.title.is_empty() {
+                preset.id.clone()
+            } else {
+                preset.title.clone()
+            };
+            if ui.radio(selected, label).clicked() {
+                self.persisted.formant_preset_id = preset.id.clone();
+                self.persisted.tracks.formant_params = preset.params;
+            }
+        }
+        ui.separator();
+        if ui.button("Edit parameters…").clicked() {
+            self.formant_editor = Some(self.persisted.tracks.formant_params);
+            ui.close();
+        }
+        self.preset_save_delete_controls(ui, PresetTarget::Formant);
+    }
+
+    /// Modal per-parameter editor for the formant lane's `FormantsConfig`.
+    /// Apply writes it back to `tracks.formant_params` (the lane recomputes).
+    fn formant_param_editor_window(&mut self, ctx: &egui::Context) {
+        if self.formant_editor.is_none() {
+            return;
+        }
+        let mut apply = false;
+        let mut close = false;
+        let mut keep_open = true;
+        egui::Window::new("Formant parameters")
+            .open(&mut keep_open)
+            .resizable(true)
+            .default_width(380.0)
+            .show(ctx, |ui| {
+                let c = self.formant_editor.as_mut().expect("checked above");
+                ui.label(
+                    egui::RichText::new(
+                        "Editing these makes it a custom parameter set (the menu flags it \
+                         as modified).",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.separator();
+                egui::Grid::new("formant_param_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("LPC method");
+                        egui::ComboBox::from_id_salt("formant_method")
+                            .selected_text(lpc_method_label(c.lpc_method))
+                            .show_ui(ui, |ui| {
+                                for m in [LpcMethod::Burg, LpcMethod::Autocorrelation] {
+                                    ui.selectable_value(&mut c.lpc_method, m, lpc_method_label(m));
+                                }
+                            });
+                        ui.end_row();
+
+                        ui.label("Formants (n)");
+                        ui.add(egui::DragValue::new(&mut c.n_formants).range(1..=8));
+                        ui.end_row();
+                        ui.label("Pre-emphasis");
+                        ui.add(
+                            egui::DragValue::new(&mut c.pre_emphasis)
+                                .speed(0.01)
+                                .range(0.0..=1.0),
+                        );
+                        ui.end_row();
+                        ui.label("Max bandwidth (Hz)");
+                        ui.add(
+                            egui::DragValue::new(&mut c.max_bandwidth_hz)
+                                .speed(10.0)
+                                .range(50.0..=5000.0),
+                        );
+                        ui.end_row();
+                        ui.label("Min frequency (Hz)");
+                        ui.add(
+                            egui::DragValue::new(&mut c.min_frequency_hz)
+                                .speed(1.0)
+                                .range(0.0..=1000.0),
+                        );
+                        ui.end_row();
+                        ui.label("Frame size (s)");
+                        ui.add(
+                            egui::DragValue::new(&mut c.frame_size_seconds)
+                                .speed(0.001)
+                                .range(0.005..=0.2),
+                        );
+                        ui.end_row();
+                        ui.label("Hop (s)");
+                        ui.add(
+                            egui::DragValue::new(&mut c.hop_seconds)
+                                .speed(0.001)
+                                .range(0.001..=0.1),
+                        );
+                        ui.end_row();
+                    });
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Apply").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if apply {
+            if let Some(params) = self.formant_editor.take() {
+                self.persisted.tracks.formant_params = params;
+            }
+        } else if close || !keep_open {
+            self.formant_editor = None;
+        }
+    }
+
+    /// Is `id` a (reserved, immutable) built-in preset for `target`? Used to
+    /// gate the GUI delete affordance to user presets only — checked in-memory
+    /// (no disk I/O).
+    fn is_builtin_preset(target: PresetTarget, id: &str) -> bool {
+        match target {
+            PresetTarget::Mfcc => sadda_engine::dsp::builtin_presets()
+                .iter()
+                .any(|p| p.id == id),
+            PresetTarget::Pitch => sadda_engine::pitch_preset::pitch_builtin_presets()
+                .iter()
+                .any(|p| p.id == id),
+            PresetTarget::Formant => sadda_engine::dsp::formant_builtin_presets()
+                .iter()
+                .any(|p| p.id == id),
+        }
+    }
+
+    /// The shared "Save current params as preset… / Delete this preset"
+    /// controls for a lane's preset submenu. `Save…` opens the dialog; `Delete`
+    /// shows only when the active preset is a user preset.
+    fn preset_save_delete_controls(&mut self, ui: &mut egui::Ui, target: PresetTarget) {
+        let current = match target {
+            PresetTarget::Mfcc => self.persisted.mfcc.preset_id.clone(),
+            PresetTarget::Pitch => self.persisted.pitch_preset_id.clone(),
+            PresetTarget::Formant => self.persisted.formant_preset_id.clone(),
+        };
+        if ui.button("Save current as preset…").clicked() {
+            self.preset_save_dialog = Some(PresetSaveDialog {
+                target,
+                id: String::new(),
+                title: String::new(),
+                error: None,
+            });
+            ui.close();
+        }
+        if !Self::is_builtin_preset(target, &current)
+            && ui.button(format!("Delete \"{current}\"")).clicked()
+        {
+            self.delete_user_preset(target, &current);
+            ui.close();
+        }
+    }
+
+    /// Saves the active lane params for `target` as a user preset named `id`.
+    /// `based_on` records the preset it was derived from; `faithful` is always
+    /// false (a user-saved set isn't a validated reference reproduction).
+    /// Returns an error message for the dialog on bad id / built-in collision.
+    fn save_user_preset(
+        &mut self,
+        target: PresetTarget,
+        id: &str,
+        title: &str,
+    ) -> Result<(), String> {
+        let to_err = |e: sadda_engine::EngineError| e.to_string();
+        match target {
+            PresetTarget::Mfcc => {
+                let preset = sadda_engine::dsp::MfccPreset {
+                    id: id.to_string(),
+                    version: "1.0.0".into(),
+                    title: title.to_string(),
+                    description: String::new(),
+                    based_on: self.persisted.mfcc.preset_id.clone(),
+                    faithful: false,
+                    reference: None,
+                    params: self.persisted.mfcc.params.clone(),
+                };
+                let store = sadda_engine::dsp::MfccPresetStore::user_default().map_err(to_err)?;
+                store.save(&preset).map_err(to_err)?;
+                self.persisted.mfcc.preset_id = id.to_string();
+            }
+            PresetTarget::Pitch => {
+                let preset = sadda_engine::pitch_preset::PitchPreset {
+                    id: id.to_string(),
+                    version: "1.0.0".into(),
+                    title: title.to_string(),
+                    description: String::new(),
+                    based_on: self.persisted.pitch_preset_id.clone(),
+                    faithful: false,
+                    reference: None,
+                    params: self.persisted.tracks.pitch_params,
+                };
+                let store =
+                    sadda_engine::pitch_preset::PitchPresetStore::user_default().map_err(to_err)?;
+                store.save(&preset).map_err(to_err)?;
+                self.persisted.pitch_preset_id = id.to_string();
+            }
+            PresetTarget::Formant => {
+                let preset = sadda_engine::dsp::formant_preset::FormantPreset {
+                    id: id.to_string(),
+                    version: "1.0.0".into(),
+                    title: title.to_string(),
+                    description: String::new(),
+                    based_on: self.persisted.formant_preset_id.clone(),
+                    faithful: false,
+                    reference: None,
+                    params: self.persisted.tracks.formant_params,
+                };
+                let store = sadda_engine::dsp::formant_preset::FormantPresetStore::user_default()
+                    .map_err(to_err)?;
+                store.save(&preset).map_err(to_err)?;
+                self.persisted.formant_preset_id = id.to_string();
+            }
+        }
+        Ok(())
+    }
+
+    /// Deletes the user preset `id` for `target`, then resets the active
+    /// selection to that family's first built-in. Surfaces failures via the
+    /// bottom error banner.
+    fn delete_user_preset(&mut self, target: PresetTarget, id: &str) {
+        let result = match target {
+            PresetTarget::Mfcc => sadda_engine::dsp::MfccPresetStore::user_default()
+                .and_then(|s| s.delete(id))
+                .map(|_| {
+                    let b = sadda_engine::dsp::builtin_presets().remove(0);
+                    self.persisted.mfcc.preset_id = b.id;
+                    self.persisted.mfcc.params = b.params;
+                }),
+            PresetTarget::Pitch => sadda_engine::pitch_preset::PitchPresetStore::user_default()
+                .and_then(|s| s.delete(id))
+                .map(|_| {
+                    let b = sadda_engine::pitch_preset::pitch_builtin_presets().remove(0);
+                    self.persisted.pitch_preset_id = b.id;
+                    self.persisted.tracks.pitch_params = b.params;
+                }),
+            PresetTarget::Formant => {
+                sadda_engine::dsp::formant_preset::FormantPresetStore::user_default()
+                    .and_then(|s| s.delete(id))
+                    .map(|_| {
+                        let b = sadda_engine::dsp::formant_builtin_presets().remove(0);
+                        self.persisted.formant_preset_id = b.id;
+                        self.persisted.tracks.formant_params = b.params;
+                    })
+            }
+        };
+        if let Err(e) = result {
+            self.set_error(format!("Couldn't delete preset: {e}"));
+        }
+    }
+
+    /// Modal for [`PresetSaveDialog`]: id + title fields, Save / Cancel. On
+    /// save the active lane params are written to the user store.
+    fn preset_save_dialog_window(&mut self, ctx: &egui::Context) {
+        if self.preset_save_dialog.is_none() {
+            return;
+        }
+        let mut save = false;
+        let mut close = false;
+        let mut keep_open = true;
+        egui::Window::new("Save preset")
+            .open(&mut keep_open)
+            .resizable(false)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                let d = self.preset_save_dialog.as_mut().expect("checked above");
+                ui.label(
+                    egui::RichText::new("Save the current parameters as a named user preset.")
+                        .weak()
+                        .small(),
+                );
+                egui::Grid::new("preset_save_grid")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label("Id");
+                        ui.text_edit_singleline(&mut d.id);
+                        ui.end_row();
+                        ui.label("Title");
+                        ui.text_edit_singleline(&mut d.title);
+                        ui.end_row();
+                    });
+                ui.label(
+                    egui::RichText::new("Letters, digits, '-' or '_'. Built-in ids are reserved.")
+                        .weak()
+                        .small(),
+                );
+                if let Some(e) = &d.error {
+                    ui.colored_label(egui::Color32::from_rgb(220, 80, 80), e);
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if save {
+            let (target, id, title) = {
+                let d = self.preset_save_dialog.as_ref().expect("checked above");
+                (d.target, d.id.clone(), d.title.clone())
+            };
+            match self.save_user_preset(target, &id, &title) {
+                Ok(()) => self.preset_save_dialog = None,
+                Err(e) => {
+                    if let Some(d) = self.preset_save_dialog.as_mut() {
+                        d.error = Some(e);
+                    }
+                }
+            }
+        } else if close || !keep_open {
+            self.preset_save_dialog = None;
         }
     }
 
@@ -9819,6 +10937,7 @@ impl SaddaApp {
         self.rebuild_tracks_if_stale(ui.ctx());
         self.rebuild_overlays_if_stale();
         self.rebuild_embedding_heatmap_if_stale(ui.ctx());
+        self.rebuild_mfcc_if_stale(ui.ctx());
         if self.active_envelope.is_some() || self.live_view.is_some() {
             let tracks = self.persisted.tracks;
             // Registered first → bottommost lane (just above the tiers).
@@ -9869,6 +10988,17 @@ impl SaddaApp {
                     .min_size(64.0)
                     .frame(egui::Frame::NONE)
                     .show_inside(ui, |ui| self.embedding_heatmap_lane_pane(ui));
+            }
+            // MFCC heatmap lane — registered last so it sits at the top of the
+            // lane stack (under the spectrogram). Like the embedding heatmap
+            // it's a 2D coeff×time view, so it gets the taller default height.
+            if self.live_view.is_none() && (self.persisted.mfcc.show || self.mfcc_error.is_some()) {
+                egui::Panel::bottom("mfcc_lane")
+                    .resizable(true)
+                    .default_size(MEASURE_LANE_HEIGHT * 2.0)
+                    .min_size(64.0)
+                    .frame(egui::Frame::NONE)
+                    .show_inside(ui, |ui| self.mfcc_lane_pane(ui));
             }
         }
 
@@ -10205,6 +11335,7 @@ impl SaddaApp {
                     for kind in [
                         ColormapKind::Viridis,
                         ColormapKind::Magma,
+                        ColormapKind::Hot,
                         ColormapKind::Cividis,
                         ColormapKind::Greyscale,
                     ] {
@@ -10260,17 +11391,20 @@ impl SaddaApp {
             return;
         };
         let frames = &tc.f0;
-        let threshold = cfg.f0_voicing_threshold;
+        let threshold = cfg.pitch_params.config.voicing_threshold;
         let band = self.overlays.f0.as_ref().and_then(|(_, b)| b.as_ref());
         let palette = self.persisted.palette;
         let x0 = self.timeline.view_start;
         let x1 = self.timeline.view_end;
-        let y_top = cfg.f0_max_hz as f64;
+        let y_top = cfg.pitch_params.config.max_freq_hz as f64;
         measure_lane(
             ui,
             "f0_lane_plot",
             &mut self.timeline,
-            (cfg.f0_min_hz as f64, cfg.f0_max_hz as f64),
+            (
+                cfg.pitch_params.config.min_freq_hz as f64,
+                cfg.pitch_params.config.max_freq_hz as f64,
+            ),
             "f0 (Hz)",
             |plot_ui| {
                 // Band first, behind the contour.
@@ -10313,7 +11447,7 @@ impl SaddaApp {
             return;
         };
         let frames = &tc.formants;
-        let n = cfg.formant_count;
+        let n = cfg.formant_params.n_formants;
         let palette = self.persisted.palette;
         measure_lane(
             ui,
@@ -10577,6 +11711,128 @@ impl SaddaApp {
 
         // Ctrl-snap: while Ctrl is held, selection edges snap to the nearest
         // existing interval boundary across active interval tiers (Slice 3c).
+        let ctrl_snap = ui.input(|i| i.modifiers.command);
+        let snap_bounds = if ctrl_snap {
+            self.active_interval_boundaries()
+        } else {
+            Vec::new()
+        };
+        apply_lane_selection_drag(
+            &mut self.timeline,
+            drag_start,
+            drag_to,
+            drag_ended,
+            clicked_time,
+            ctrl_snap,
+            &snap_bounds,
+        );
+        handle_zoom_and_scroll(&plot_response, &mut self.timeline);
+    }
+
+    /// MFCC heatmap lane. Draws the cached coefficient texture as a
+    /// colormapped image over the shared timeline, mirroring the embedding
+    /// heatmap. y-axis is the cepstral-coefficient index.
+    fn mfcc_lane_pane(&mut self, ui: &mut egui::Ui) {
+        if let Some(msg) = self.mfcc_error.clone() {
+            ui.centered_and_justified(|ui| {
+                ui.colored_label(egui::Color32::from_rgb(220, 80, 80), format!("MFCC: {msg}"));
+            });
+            return;
+        }
+        let Some(cache) = &self.active_mfcc else {
+            ui.centered_and_justified(|ui| {
+                ui.label(egui::RichText::new("(building MFCC…)").weak().italics());
+            });
+            return;
+        };
+
+        // Caption: preset id + coefficient count, plus a "(modified)" flag when
+        // the live params differ from the named preset's, and "(c0 hidden)".
+        // Checked against the built-ins only (pure, no per-frame disk I/O) —
+        // edits typically start from a built-in; for a user preset the id alone
+        // is shown.
+        let preset_id = self.persisted.mfcc.preset_id.clone();
+        let modified = sadda_engine::dsp::builtin_presets()
+            .into_iter()
+            .find(|p| p.id == preset_id)
+            .map(|p| p.params != self.persisted.mfcc.params)
+            .unwrap_or(false);
+        let c0_note = match self.persisted.mfcc.c0 {
+            crate::state::MfccC0Display::Hidden => " · c0 hidden",
+            crate::state::MfccC0Display::Separate => " · c0 separate",
+            crate::state::MfccC0Display::Inline => "",
+        };
+        ui.horizontal(|ui| {
+            ui.add_space(SIGNAL_LEFT_GUTTER + 4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "MFCC · {}{} · {} coeff{}{}",
+                    preset_id,
+                    if modified { " (modified)" } else { "" },
+                    cache.n_rows,
+                    if cache.n_rows == 1 { "" } else { "s" },
+                    c0_note,
+                ))
+                .weak(),
+            );
+        });
+
+        let duration = cache.duration_seconds;
+        let n_rows = cache.n_rows as f64;
+        let centre = egui_plot::PlotPoint::new(duration / 2.0, n_rows / 2.0);
+        let size = egui::Vec2::new(duration as f32, n_rows as f32);
+        let texture_id = cache.texture.id();
+        let cursor = self.timeline.cursor;
+        let view_start = self.timeline.view_start;
+        let view_end = self.timeline.view_end;
+        let selection = self.timeline.selection;
+        let mut clicked_time: Option<f64> = None;
+        let mut drag_start: Option<f64> = None;
+        let mut drag_to: Option<f64> = None;
+        let mut drag_ended = false;
+
+        let plot_response = Plot::new("mfcc_heatmap_plot")
+            .show_axes([true, true])
+            .y_axis_label("coeff")
+            .x_axis_label("seconds")
+            .y_axis_min_width(SIGNAL_LEFT_GUTTER)
+            .allow_drag(false)
+            .allow_zoom(false)
+            .allow_scroll(false)
+            .show(ui, |plot_ui| {
+                plot_ui.set_plot_bounds_x(view_start..=view_end);
+                plot_ui.set_plot_bounds_y(0.0..=n_rows);
+                plot_ui.image(egui_plot::PlotImage::new(
+                    "mfcc_heatmap_img",
+                    texture_id,
+                    centre,
+                    size,
+                ));
+                draw_cursor_line(plot_ui, cursor, 0.0, n_rows);
+                draw_selection_band(plot_ui, selection, 0.0, n_rows);
+
+                let resp = plot_ui.response();
+                if resp.drag_started() {
+                    drag_start = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
+                }
+                if resp.dragged() {
+                    drag_to = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
+                }
+                if resp.drag_stopped() {
+                    drag_ended = true;
+                }
+                if resp.clicked() {
+                    clicked_time = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
+                }
+            })
+            .response;
+
         let ctrl_snap = ui.input(|i| i.modifiers.command);
         let snap_bounds = if ctrl_snap {
             self.active_interval_boundaries()
@@ -11206,7 +12462,7 @@ impl SaddaApp {
         let active_param = self.reference.active_param.clone();
         let kind = self.reference.kind;
         let cursor = self.timeline.cursor;
-        let threshold = self.persisted.tracks.f0_voicing_threshold;
+        let threshold = self.persisted.tracks.pitch_params.config.voicing_threshold;
         let measured_vowel = self
             .active_tracks
             .as_ref()

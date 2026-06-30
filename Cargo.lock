@@ -4235,6 +4235,7 @@ dependencies = [
  "pyo3-stub-gen",
  "rtrb",
  "sadda-engine",
+ "toml 0.8.23",
 ]
 
 [[package]]
