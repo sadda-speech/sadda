@@ -9170,6 +9170,7 @@ impl SaddaApp {
             (ColormapKind::Cividis, "Cividis (CVD-safe)"),
             (ColormapKind::Viridis, "Viridis"),
             (ColormapKind::Magma, "Magma"),
+            (ColormapKind::Hot, "Hot"),
             (ColormapKind::Greyscale, "Greyscale"),
         ] {
             ui.radio_value(&mut self.persisted.embedding.colormap, cm, label);
@@ -9242,6 +9243,7 @@ impl SaddaApp {
             (ColormapKind::Cividis, "Cividis (CVD-safe)"),
             (ColormapKind::Viridis, "Viridis"),
             (ColormapKind::Magma, "Magma"),
+            (ColormapKind::Hot, "Hot"),
             (ColormapKind::Greyscale, "Greyscale"),
         ] {
             ui.radio_value(&mut self.persisted.mfcc.colormap, cm, label);
@@ -10340,6 +10342,7 @@ impl SaddaApp {
                     for kind in [
                         ColormapKind::Viridis,
                         ColormapKind::Magma,
+                        ColormapKind::Hot,
                         ColormapKind::Cividis,
                         ColormapKind::Greyscale,
                     ] {

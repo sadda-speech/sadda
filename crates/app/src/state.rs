@@ -422,6 +422,10 @@ pub enum ColormapKind {
     Viridis,
     /// Dark-mode-friendly perceptually-uniform alternate; black → purple → red → yellow.
     Magma,
+    /// matplotlib / MATLAB `hot`: black → red → orange → yellow → white — a
+    /// piecewise-linear RGB ramp (red fills first, then green, then blue).
+    /// Not perceptually uniform, unlike Viridis / Magma / Cividis.
+    Hot,
     /// Perceptually-uniform map optimised for colour-vision deficiency
     /// (dark blue → grey → yellow). The accessibility pick — it stays
     /// monotonic in luminance for all common forms of CVD.
@@ -436,6 +440,7 @@ impl ColormapKind {
         match self {
             ColormapKind::Viridis => "Viridis",
             ColormapKind::Magma => "Magma",
+            ColormapKind::Hot => "Hot",
             ColormapKind::Cividis => "Cividis (CVD-safe)",
             ColormapKind::Greyscale => "Greyscale",
         }
@@ -947,6 +952,19 @@ fn sample_colormap(kind: ColormapKind, t: f32) -> (u8, u8, u8) {
             let c = colorous::MAGMA.eval_continuous(t);
             (c.r, c.g, c.b)
         }
+        ColormapKind::Hot => {
+            // matplotlib / MATLAB `hot`: black → red → orange → yellow → white.
+            // Red fills over the first 3/8, green over the next 3/8, blue over
+            // the last 2/8.
+            let r = (8.0 / 3.0 * t).clamp(0.0, 1.0);
+            let g = ((8.0 * t - 3.0) / 3.0).clamp(0.0, 1.0);
+            let b = (4.0 * t - 3.0).clamp(0.0, 1.0);
+            (
+                (r * 255.0).round() as u8,
+                (g * 255.0).round() as u8,
+                (b * 255.0).round() as u8,
+            )
+        }
         ColormapKind::Cividis => {
             let c = colorous::CIVIDIS.eval_continuous(t);
             (c.r, c.g, c.b)
@@ -1033,6 +1051,20 @@ mod spectrogram_tests {
         assert_ne!(
             sample_colormap(ColormapKind::Cividis, 0.5),
             sample_colormap(ColormapKind::Viridis, 0.5),
+        );
+    }
+
+    #[test]
+    fn hot_colormap_ramps_black_to_white_and_is_not_magma() {
+        // black → red → orange → yellow → white (matplotlib/MATLAB `hot`).
+        assert_eq!(sample_colormap(ColormapKind::Hot, 0.0), (0, 0, 0));
+        assert_eq!(sample_colormap(ColormapKind::Hot, 0.375), (255, 0, 0)); // red
+        assert_eq!(sample_colormap(ColormapKind::Hot, 0.75), (255, 255, 0)); // yellow
+        assert_eq!(sample_colormap(ColormapKind::Hot, 1.0), (255, 255, 255));
+        // Magma is preserved as its own (distinct) perceptually-uniform map.
+        assert_ne!(
+            sample_colormap(ColormapKind::Hot, 0.5),
+            sample_colormap(ColormapKind::Magma, 0.5),
         );
     }
 
