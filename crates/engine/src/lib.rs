@@ -26,6 +26,7 @@ pub mod pitch_preset;
 pub mod preset;
 pub mod refdist;
 pub mod storage;
+pub mod timeline;
 pub mod units;
 
 pub use agreement::{AgreementOptions, AgreementReport};
@@ -65,6 +66,7 @@ pub use refdist::{
     RefDist, RefdistManifest, RefdistStore, RegistryEntry, RegistryIndex, Schema as RefdistSchema,
     Summary, scaffold,
 };
+pub use timeline::Timeline;
 pub use units::{Decibels, Hertz, Ratio, Seconds};
 
 /// Returns the engine crate's semver string, taken from `Cargo.toml` at build

@@ -45,6 +45,7 @@ __all__ = [
     "Target",
     "Tier",
     "TierImpact",
+    "Timeline",
     "VocabEntry",
     "abi",
     "avqi",
@@ -2188,6 +2189,131 @@ class TierImpact:
     def affected_annotations(self) -> builtins.int:
         r"""
         Current annotations now out of the current vocabulary.
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class Timeline:
+    r"""
+    Timeline navigation state: a cursor (playhead), a visible view window, and an
+    optional `(start, end)` selection over a recording of `duration` seconds.
+    
+    Every action comes as a **move-to** (absolute) / **move-by** (relative) pair
+    — e.g. `set_cursor(t)` vs `move_cursor_by(dt)` — so scripts can drive the
+    same navigation the desktop app's keyboard does. Times are in seconds; the
+    cursor and selection clamp to `[0, duration]`, and the view always stays
+    within the recording.
+    
+    Construct with `Timeline(duration_seconds)`.
+    """
+    @property
+    def cursor(self) -> builtins.float:
+        r"""
+        Cursor (playhead) position, in seconds.
+        """
+    @property
+    def view_start(self) -> builtins.float:
+        r"""
+        Left edge of the visible view window, in seconds.
+        """
+    @property
+    def view_end(self) -> builtins.float:
+        r"""
+        Right edge of the visible view window, in seconds (exclusive).
+        """
+    @property
+    def duration(self) -> builtins.float:
+        r"""
+        Recording duration, in seconds.
+        """
+    @property
+    def view_range(self) -> builtins.float:
+        r"""
+        Width of the visible window (`view_end - view_start`), in seconds.
+        """
+    @property
+    def selection(self) -> typing.Optional[tuple[builtins.float, builtins.float]]:
+        r"""
+        The current selection as `(start, end)` seconds, or `None`.
+        """
+    def __new__(cls, duration_seconds: builtins.float) -> Timeline:
+        r"""
+        Builds a timeline for a recording of `duration_seconds`, with the view
+        spanning the whole recording and the cursor at the start.
+        """
+    def reset_for_bundle(self, duration_seconds: builtins.float) -> None:
+        r"""
+        Re-initialises for a freshly-loaded recording: view spans the whole
+        recording, cursor at 0, no selection.
+        """
+    def set_cursor(self, t: builtins.float) -> None:
+        r"""
+        Moves the cursor **to** `t` seconds (clamped to the recording).
+        """
+    def move_cursor_by(self, delta_seconds: builtins.float) -> None:
+        r"""
+        Moves the cursor **by** `delta_seconds` (negative = left).
+        """
+    def set_selection_start(self, t: builtins.float) -> None:
+        r"""
+        Sets the selection's **start** edge **to** `t`, seeding a selection at
+        the cursor when none exists and clamping so `start <= end`.
+        """
+    def move_selection_start_by(self, delta_seconds: builtins.float) -> None:
+        r"""
+        Moves the selection's **start** edge **by** `delta_seconds`.
+        """
+    def set_selection_end(self, t: builtins.float) -> None:
+        r"""
+        Sets the selection's **end** edge **to** `t`, seeding a selection at the
+        cursor when none exists and clamping so `end >= start`.
+        """
+    def move_selection_end_by(self, delta_seconds: builtins.float) -> None:
+        r"""
+        Moves the selection's **end** edge **by** `delta_seconds`.
+        """
+    def set_selection_range(self, start: builtins.float, end: builtins.float) -> None:
+        r"""
+        Sets the selection to exactly `[start, end]` seconds in one call (sorted
+        and clamped). The selection analogue of `set_view_range`.
+        """
+    def set_point_selection(self, t: builtins.float) -> None:
+        r"""
+        Places a zero-width selection point at `t`.
+        """
+    def clear_selection(self) -> None:
+        r"""
+        Clears any selection.
+        """
+    def set_view_start(self, t: builtins.float) -> None:
+        r"""
+        Pans the view so it starts **at** `t` seconds, preserving the range.
+        """
+    def scroll_by(self, delta_seconds: builtins.float) -> None:
+        r"""
+        Pans the view **by** `delta_seconds`, preserving the range.
+        """
+    def set_view_range(self, start: builtins.float, end: builtins.float) -> None:
+        r"""
+        Frames the view to exactly `[start, end]` seconds (clamped). Use for
+        "fit whole recording" (`0, duration`) or "zoom to selection".
+        """
+    def zoom_at(self, time_seconds: builtins.float, factor: builtins.float) -> None:
+        r"""
+        Zooms around `time_seconds` by `factor` (< 1 zooms in, > 1 zooms out).
+        """
+    def scroll_into_view(self, t: builtins.float) -> None:
+        r"""
+        Pans the minimum amount to bring `t` into the visible window.
+        """
+    def ensure_cursor_visible(self) -> None:
+        r"""
+        Shifts the view (if needed) so the cursor sits a quarter of the way in
+        from the left edge — the playback-follow convention.
+        """
+    def pixel_to_time(self, pixel_x: builtins.float, plot_width_px: builtins.float) -> builtins.float:
+        r"""
+        Maps a pixel-x within `[0, plot_width_px)` to seconds in the view range.
         """
     def __repr__(self) -> builtins.str: ...
 

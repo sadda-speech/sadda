@@ -136,7 +136,14 @@ def _decorate_class(
     @functools.wraps(original_init)
     def wrapped_init(self: Any, *args: Any, **kwargs: Any) -> None:
         _warn_once(key, category, message)
-        original_init(self, *args, **kwargs)
+        if original_init is object.__init__:
+            # PyO3 `#[new]` types construct via `__new__`, leaving `__init__` as
+            # `object.__init__`. Forwarding the constructor args to it would
+            # raise ("object.__init__() takes exactly one argument"), so call it
+            # bare — the instance is already initialised by `__new__`.
+            original_init(self)
+        else:
+            original_init(self, *args, **kwargs)
 
     try:
         target.__init__ = wrapped_init  # type: ignore[method-assign]

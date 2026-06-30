@@ -402,6 +402,91 @@ green (228 passed, 6 skipped).
 
 ---
 
+## 2026-06-20 — Pane focus + annotation navigation (keymap, round 2)
+
+Follow-up to the home-row keymap (merged the same day), adding keyboard
+annotation work and console focus — still aimed at mouse-free scanning.
+
+**Annotation navigation (its own keys, deliberately separate from the timeline
+selection keys so the two don't fight).** The upper-right row drives a
+*current-annotation* highlight: `u`/`i` = previous/next annotation on the
+current tier, `o`/`p` = previous/next tier. It reuses the existing
+`selected_annotation` highlight as the "current" annotation (so a click and the
+keys share one concept) and only pans the view to keep it visible — it does
+**not** move the timeline cursor/selection. `y` ("grab") is the deliberate
+bridge: it pulls the current annotation into the timeline selection + cursor
+(via the new `Timeline::set_selection_range`), so playback (`d`/`s`/`f`) then
+acts on it. `Enter` edits the current annotation's label when one is
+highlighted, else falls back to committing the timeline selection; `Esc` (or any
+home-row cursor move) clears the highlight, back to commit-mode.
+
+**Console focus (`Shift+↓` / `Shift+↑`).** We collapsed the originally-planned
+three-pane focus stack to what actually changes behavior: the Python console vs.
+everything else. `Shift+↓` opens + focuses the console; `Shift+↑` leaves it. The
+"all keys pass through to the console" requirement falls out of the existing
+text-edit guard (every shortcut already skips while a text field is focused), so
+the console is a clean slate for a future Vim/Emacs mode. `Shift+↑/↓` are
+reserved globally — consumed before the panels render — so they move focus even
+from inside the console editor (which would otherwise eat them for line-select).
+A ring marks the focused console.
+
+**Why hybrid, not modal.** Playback, view scroll/zoom, and bundle nav stay
+global; only annotation nav got new dedicated keys. Dedicated keys (vs. routing
+the home row by focus) mean annotation nav and cursor movement are live at once
+with no mode-switching — the smoother flow for actual annotating.
+
+Also carried `Timeline::set_selection_range(start, end)` (the selection analogue
+of `set_view_range`) onto this branch. Engine `step_id` helper unit-tested;
+cheatsheet updated.
+
+---
+
+## 2026-06-20 — Two-handed, layout-independent keyboard navigation
+
+Reworked the desktop transport/navigation keymap into a mouse-free, two-handed
+home-row scheme, driven by real dogfooding (an L2 sound-file audio survey). Goal:
+audition and scan a recording without touching the mouse.
+
+**The keymap.** Left hand = playback, right hand = move, lower-right = view.
+
+- **Left hand (playback):** `a` stop, `s` play-left-of-focus, `d` play/pause
+  (selection-or-view), `f` play-right-of-focus; `Shift`+`s`/`d`/`f` loops. "Focus"
+  resolves to the selection if a real span is selected, else the cursor. `Space`
+  aliases `d`, `Esc` aliases `a`. The loop modifier moved from Ctrl → **Shift**.
+  The old `,`/`.`/`[`/`]` directional keys are gone (subsumed by `s`/`f`).
+- **Right hand (cursor/selection):** `h` rec-start, `j` view-start, `k`/`l`
+  smooth glide left/right (frame-driven while held, with a speed ramp), `;`
+  view-end, `'` rec-end. The **modifier picks the target**: bare = cursor,
+  `Shift` = selection start, `Alt` = selection end (seeded at the cursor when no
+  selection exists). The view follows the moved point off-screen.
+- **Lower-right (view):** `n`/`m`/`,`/`.` scroll (view→start, pan-left, pan-right,
+  view→end); `Shift` over the same keys zooms (fit-all, out, in, zoom-to-selection),
+  reusing the wheel's 1.2 factor and the arrows' quarter-window pan step.
+- **Bundles:** `q`/`w`/`e`/`r` = first/previous/next/last.
+
+**Layout independence.** Every positional binding matches on egui's
+`Event::Key.physical_key` (US-QWERTY position), not the logical key. A Dvorak/
+AZERTY typist gets the same hand *shape* — the action follows where the key sits,
+not the character their layout types. A small `consume_physical_key` helper
+mirrors egui's `consume_key` but matches the physical key (falling back to the
+logical key when the backend reports none, e.g. web) with exact modifier matching
+(so bare / `Shift` / `Alt` drive three different actions on the same key). The
+held `k`/`l` glide is tracked from raw key events because egui's `keys_down` is
+logical-only.
+
+**Three surfaces.** Per the project norm, the navigation primitives became a
+real API, not just keybindings. The pure state moved out of the app into the
+engine as `sadda_engine::Timeline` (cursor + view + selection), with a
+**move-to (absolute) / move-by (relative)** pair for each action
+(`set_cursor`/`move_cursor_by`, `set_selection_start`/`move_selection_start_by`,
+`set_view_start`/`scroll_by`, `set_view_range` for fit/zoom-to-selection, …).
+The app re-exports it as `TimelineState` (zero churn at call sites); Python gets
+`sadda.Timeline` (provisional). Unit tests live with the engine type; a pytest
+suite covers the Python surface. New docs page: [Keyboard cheatsheet](cheatsheet.md)
+(all navigation + annotation hotkeys).
+
+---
+
 ## 2026-06-19 — PipeWire audio playback fix (retry + device fallback)
 
 Audio playback failed on first attempt with "device is no longer available" on
