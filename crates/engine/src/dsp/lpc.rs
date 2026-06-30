@@ -31,11 +31,14 @@
 //! `a_1, ..., a_p` that minimize the residual energy when predicting
 //! `x[n]` from a linear combination of `x[n-1], ..., x[n-p]`.
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{EngineError, Result};
 
 /// One of the two LPC estimation methods exposed here. See module-level
 /// docs for the trade-offs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LpcMethod {
     /// Autocorrelation method via Levinson-Durbin recursion. Always produces
     /// a stable predictor.

@@ -6,6 +6,365 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-29 — Preset registry polish: GUI save/delete, uniform param shapes, generalized schema
+
+Three loose ends from the preset work, after an honest audit found them:
+
+- **GUI save/delete user presets.** The GUI exposed only the registry *read*
+  side (pickers + param editors); creating a named user preset was Python-only.
+  Added a shared "Save current as preset…" dialog (id + title, surfaces
+  invalid-id / built-in-collision errors) and a "Delete \"<id>\"" affordance —
+  shown only for user presets (built-in ids gated in-memory) — wired into all
+  three lane submenus (MFCC / f0 / Formants) via one `PresetTarget`-dispatched
+  handler. Saving records `based_on` = the preset it was derived from and
+  `faithful = false`; deleting resets the lane to that family's first built-in.
+  Now all three surfaces (engine / Python / GUI) can both read and write presets.
+
+- **Uniform Python param shapes.** `PitchParams` / `FormantsParams` only had a
+  generic `for_method(...)`, while `MfccParams` had named per-reference
+  constructors. Parallelized them: added `PitchParams.boersma/yin/pyin/swipe`
+  and `FormantsParams.burg/autocorrelation` (taking each family's common
+  analysis args with defaults, parallel to `MfccParams.librosa/kaldi/praat`),
+  and gave `MfccParams` a matching `for_method`. All three now expose the
+  identical surface — `for_method` + named constructors + `.replace(...)` +
+  getters + `to_toml` — verified equivalent by test.
+
+- **Generalized `preset-registry/SCHEMA.md`** from MFCC-only to all three
+  domains: a shared top-level-fields section + per-domain `[params]` sections
+  (MFCC / pitch `method`+`[params.config]` / formant) + a domain table.
+
+Validation: engine 230 + app 116 tests, Python 31 preset tests green; no stub
+drift; `fmt`/`clippy` clean; app boots cleanly. Remaining preset items are the
+intentional backlog (f64 pipeline → faithful Praat preset; `htk()` preset;
+real-Kaldi golden; the DSP-parameter-effects design session).
+
+---
+
+## 2026-06-29 — Formant presets (three surfaces) — item 6 complete
+
+Closed out roadmap item 6 by adding **formant** presets, the lightest domain:
+`FormantsConfig` already bundles the LPC method, so it *is* the preset payload
+(no `PitchParams`-style wrapper needed). The generic `crate::preset` core +
+the pitch template made this fast.
+
+- **Engine:** serde + `PartialEq` + `Copy` on `FormantsConfig` / `LpcMethod`;
+  `dsp/formant_preset.rs` with `impl PresetDomain for FormantsConfig` (subdir
+  `formant`) + two built-ins at reference defaults (`praat-burg` /
+  `autocorrelation`), both faithful. 4 tests.
+- **Python:** `sadda._native.formant_preset` submodule — `FormantsParams`
+  pyclass (`for_method` + getters + `.replace` + `to_toml`; `lpc_order`'s
+  nested-`Option` left out of `replace` as a rare advanced knob), `FormantPreset`,
+  store fns, `compute` (returns the same `FormantFrame` list as `formants`).
+  `sadda.dsp.formants(audio, params=…)` dispatches; PROVISIONAL. (Made
+  `PyFormantFrame` `pub(crate)` so the submodule can construct it.) 8 tests.
+- **GUI:** unified the formant lane onto `tracks.formant_params: FormantsConfig`
+  (`Copy`, so `MeasureTrackConfig` stays `Copy`), replacing the
+  `formant_lpc_method` mirror + the `formant_count` field (values identical to
+  `FormantsConfig::default()`; `formant_max_hz` stays separate as the
+  display-only y-axis bound). Removed the `LpcMethodChoice` mirror. View ▸ DSP
+  methods ▸ Formants is now a preset picker + Edit-parameters modal +
+  "(modified)" flag — mirroring the f0 work.
+
+**Item 6 done across pitch + formants + the generic core.** Validation: engine
+230 lib tests, app 115 tests, Python 50 dsp-preset tests green; no stub drift;
+`fmt`/`clippy` clean workspace-wide; app boots cleanly (old persisted state
+migrates via `#[serde(default)]`). The whole MFCC→pitch→formants arc now shares
+one `Preset<P>` / `PresetStore<P>` / `PresetDomain` core.
+
+---
+
+## 2026-06-29 — Generic preset core + pitch presets (three surfaces); item 6 pitch done
+
+Extended the preset pattern from MFCC to **pitch** (roadmap item 6), first
+**generalizing the registry** so the third/fourth domains don't duplicate it.
+Decisions taken with the user: *pitch first, full stack*; *generic `Preset<P>`
+core*.
+
+### Generic core (`crate::preset`)
+
+Extracted the MFCC store into a payload-generic registry: `Preset<P>` (id /
+version / title / description / `based_on` / `faithful` / `reference` /
+`params: P`), a `PresetStore<P>`, and a `PresetDomain` trait each param type
+implements to declare its on-disk `subdir()` + code-sourced `builtins()`. MFCC
+became `type MfccPreset = Preset<MfccParams>` / `MfccPresetStore =
+PresetStore<MfccParams>` via `impl PresetDomain for MfccParams` — ~250 lines of
+store code deleted, MFCC tests still green. The MFCC-specific `PresetLineage`
+enum collapsed into a free-text `based_on: String` (lineage vocabularies differ
+per domain: librosa/kaldi/praat vs praat/yin/pyin/swipe); the Python `based_on`
+getter/ctor simplified accordingly (no stub drift).
+
+### Pitch (engine + Python + GUI)
+
+- **Engine:** serde + `PartialEq` + `Copy` on `PitchConfig` / `PitchMethod`;
+  new `PitchParams { method, config }` (the pitch analogue of `MfccParams` —
+  the tracker API takes method *separately*, so the preset payload bundles
+  both) + `pitch_with_params`. `pitch_preset.rs`: `impl PresetDomain for
+  PitchParams` (subdir `pitch`) + four built-ins at their reference defaults
+  (`praat-ac` Boersma / `yin` / `pyin` / `swipe`), all `faithful` since
+  `PitchConfig::default()` already matches the Praat/paper defaults. Pinned
+  `PYin`'s serde name to `"pyin"` (not snake_case `p_yin`) to match the
+  `voiced_pitch(method=…)` vocabulary. 4 tests.
+- **Python:** `sadda._native.pitch_preset` submodule mirroring `mfcc_preset` —
+  `PitchParams` pyclass (`for_method` + getters + `.replace(**kwargs)` over all
+  16 knobs + `to_toml`), `PitchPreset`, store fns, `compute` (returns the same
+  `(times, freqs, voicing)` as `voiced_pitch`). `sadda.dsp.voiced_pitch(audio,
+  params=…)` now dispatches; preset surface PROVISIONAL. **`voiced_pitch(
+  params=preset)` is bit-equal to `voiced_pitch(method=…)`.** 9 tests.
+- **GUI:** unified the f0 lane onto a single `tracks.pitch_params: PitchParams`
+  (engine type, now `Copy` so `MeasureTrackConfig` stays `Copy`), *replacing*
+  the old `pitch_method` mirror + the three separate `f0_min/max/voicing`
+  fields (their values were identical to `PitchConfig::default()`, so behaviour
+  is preserved; y-axis bounds now read from the params). Removed the
+  `PitchMethodChoice` mirror. View ▸ DSP methods ▸ f0 is now a **preset
+  picker** + **Edit-parameters modal** (method ComboBox + min/max/voicing/
+  frame/hop, plus method-specific advanced sliders shown for the active
+  method); `pitch_preset_id` on `PersistedState` drives the menu label + a
+  "(modified)" flag.
+
+**Validation:** engine 226 lib tests, app 115 tests, Python 20 dsp-preset tests
+green; no stub drift; `fmt`/`clippy` clean workspace-wide; app boots cleanly
+(old persisted state without the removed `f0_*` fields migrates via
+`#[serde(default)]`). *Remaining:* item 6 **formants** (the generic core + this
+pattern make it a fast follow), and the live GUI-interaction check (boot- and
+pattern-validated only).
+
+---
+
+## 2026-06-29 — MFCC preset registry: three surfaces (engine on-disk store + Python + GUI lane)
+
+Branch `feat/dsp-method-diversity`. Built roadmap items **3–5** in one slice
+(scope chosen with the user: all three surfaces). The earlier `MfccParams` /
+`mfcc_with_params` unification (item 2) made presets *expressible*; this makes
+them **persistable, named, user-extensible, and visible in the GUI**.
+
+### Engine — on-disk preset registry (`crates/engine/src/dsp/preset.rs`)
+
+- **serde on the param space.** Added `Serialize`/`Deserialize` to every
+  `Mfcc*` enum + `MfccParams`. Unit enums → `rename_all = "snake_case"`; the two
+  **data** enums (`MfccFilters`, `MfccLog`) → internally tagged (`tag = "kind"`).
+  That required converting `MfccFilters::NMels(usize)` from a tuple to a struct
+  variant `NMels { n_mels }` (breaking change to a public enum; rode the
+  in-flight 0.4.0-follow-up window). Verified the `toml` 0.8 crate round-trips
+  internally-tagged enums — it does (was the main technical risk).
+- **`MfccPreset`** = `MfccParams` + provenance (`based_on` lineage, `faithful`,
+  `reference`, id/version/title/description). One self-contained `<id>.toml`
+  per preset — *no* directory-per-entry, because a preset has no data payload
+  (the contrast with `refdist`/`model` registries, which bundle Parquet/weights).
+- **`MfccPresetStore`** mirrors `RefdistStore`: `new`/`user_default`
+  (`~/.local/share/sadda/presets/mfcc/`) + `list`/`list_user`/`get`/`save`/
+  `delete`. Built-ins (`builtin_presets()`) are **code** (golden-tested), never
+  written to disk; their ids are reserved (save rejects them) so the
+  authoritative presets can't drift. `is_valid_id` guards against path
+  traversal. New `EngineError::Preset`. 8 unit tests (round-trip incl. the
+  mel-spacing arm, builtin-params-match-constructors, store CRUD, id validation).
+- **Honesty (the DSP-diversity discipline):** `faithful` means "reproduces
+  `based_on`'s golden *through `mfcc_with_params`* to tolerance" → librosa/kaldi
+  `true`, **praat `false`** (its pipeline path is f32-approximate; faithful
+  Praat still needs `mfcc(method=Praat)`, the dedicated f64 path).
+
+### Python (`crates/python/src/mfcc_preset.rs`, `sadda.dsp`)
+
+- `sadda._native.mfcc_preset` submodule (unstubbed, per the refdist/ml
+  convention). `MfccParams` pyclass (`PyCalibration` template: `frozen` +
+  `from_py_object` + `Clone`) with `librosa/kaldi/praat` constructors, getters,
+  a `.replace(**kwargs)` override path (scalars/bools + enum strings; `n_mels`
+  only on the n-mels bank), and `to_toml`. `MfccPreset` pyclass (`#[new]` +
+  getters + `to_toml`). Store fns: `list_all`/`list_user`/`builtin`/`get`/
+  `save`/`delete`/`store_root`/`compute`.
+- `sadda.dsp.mfcc(audio, params=…)` now dispatches to the params pipeline (the
+  wrapper is pure-Python so the flat native `mfcc` stub is untouched → **no
+  stub drift**). Preset surface re-exported PROVISIONAL: `mfcc_presets`,
+  `mfcc_user_presets`, `builtin_mfcc_presets`, `mfcc_preset`, `save_mfcc_preset`,
+  `delete_mfcc_preset`, `mfcc_preset_store`, `MfccParams`, `MfccPreset`. (Classes
+  re-exported raw — `@provisional` wraps `__init__`, which breaks PyO3
+  construction, same as `sadda.refdist`.) 11 tests; **`mfcc(params=preset)` is
+  bit-equal to `mfcc(method=…)`**.
+
+### GUI — togglable MFCC heatmap lane + preset picker + param editor
+
+Prompted by the user ("why can't we create a togglable display for MFCCs?") —
+a fair challenge: I'd over-scoped it out. An MFCC result is a `(frames ×
+coeffs)` matrix, structurally identical to the **embedding heatmap** lane the
+app already renders, so it reuses that whole path (`normalize_embedding` /
+`colormap_bake` / texture upload / cache-by-`==`). What's actually backlogged
+is the deeper "*communicating parameter effects*" design, not a basic display.
+
+- `MfccLaneConfig` in `state.rs` persists the active preset id + the engine
+  `MfccParams` **directly** (now that it's serde+PartialEq+Clone — a 21-field
+  mirror would be pure drift-prone duplication; documented the departure from
+  the `*MethodChoice`-mirror convention) + colormap/normalization/c0-display.
+- `build_mfcc_heatmap_texture` + `rebuild_mfcc_if_stale` + `mfcc_lane_pane`
+  mirror the embedding-heatmap trio (synchronous; MFCC is cheap). c0 (energy)
+  is orders larger than c1+, so it gets a 3-way display (`MfccC0Display`):
+  **Separate** (default — on its own per-coeff scale, set apart by a small
+  transparent gap), **Inline** (shared scale), **Hidden**; combined with
+  per-coefficient z-score normalization this keeps the heatmap legible. Lane
+  caption flags "(modified)" when params ≠ the named preset, and the c0 mode.
+- **View ▸ MFCC** submenu: show toggle, preset picker (built-in + on-disk),
+  colormap/normalization/c0 knobs, and **Edit parameters…** → a modal
+  (`rubric_editor_window` pattern) editing all scalar/bool/enum knobs with
+  DragValue/ComboBox; Apply writes back (invalidates cache), with an explicit
+  "editing voids faithfulness" note.
+
+`+ preset-registry/` (README + SCHEMA) alongside `refdist-registry`/
+`model-registry` — leaner (local config, no tiered-governance CI; presets are
+user-owned scalars, not redistributed corpora/weights).
+
+**Validation:** engine 223 lib tests + 8 preset tests green; Python 33 dsp
+tests green; stubs no-drift; `cargo fmt`/`clippy` clean across engine/python/
+app; app compiles. *Not yet done:* live GUI run (compile- + pattern-validated
+only — the lane copies a working lane verbatim, but I haven't launched it under
+WSLg); migrate the pipeline to f64 so the Praat *preset* is faithful (item 2
+backlog); item 6 (extend to pitch/formants).
+
+---
+
+## 2026-06-29 — DSP method diversity: named MFCC methods + GUI method pickers; unification design (in progress)
+
+Branch `feat/dsp-method-diversity` (3 commits, gate green). Started from the
+2026-06-27 DSP review, which found the MFCC code claimed to "match librosa
+exactly" while actually using natural-log (not librosa's `10·log10`) and
+symmetric-Hann/leading-edge framing — a chimera matching **no** published
+definition. Fixing that honestly turned into a method-diversity build, then a
+parameterized-pipeline + presets design.
+
+### Shipped (committed, `just gate` green: 229 passed / 6 skipped)
+
+**Named MFCC methods** (`engine/src/dsp/mfcc.rs`, `MfccMethod` enum). "MFCC"
+is a family, not one algorithm; each variant is faithful to one reference,
+validated against that reference's *own* output. Goldens + generator committed
+under `crates/engine/tests/dsp/mfcc/` (CI needs no librosa/torch/parselmouth).
+
+- **Librosa** (default) — `librosa.feature.mfcc` 0.11: Slaney mel + area norm,
+  power, `10·log10` + 80 dB global floor, periodic Hann, `center=True` framing,
+  ortho DCT-II. Validated max ≈5e-4.
+- **Kaldi** — `compute-mfcc-feats`: DC removal, pre-emph 0.97, Povey window,
+  pow2 FFT, HTK mel, unit-peak filters, natural-log, ortho DCT-II, cepstral
+  lifter 22, snip-edges. Validated vs **torchaudio kaldi-compliance** (PyTorch's
+  faithful Kaldi reproduction — *not* Kaldi-proper; real `compute-mfcc-feats`
+  golden backlogged). Max ≈3e-3.
+- **Praat** — `Sound: To MFCC…`: Gaussian window (`2×` analysis width), HTK mel,
+  unit-peak filters, **un-normalised** DCT, c0 in column 0. **Approximate** —
+  see below.
+
+Three surfaces: engine + Python (`sadda.dsp.mfcc(method=…)`, default librosa) +
+tests. The dropped chimera was a `stable`-tier behaviour change; rode the
+in-flight `0.4.0`-follow-up breaking window.
+
+**GUI DSP method selection** (`crates/app`): View ▸ DSP methods submenu —
+f0 tracker (Boersma/AC/windowed-AC/YIN/pYIN/SWIPE′) and formant LPC
+(Burg/AC); both were hardcoded before. Persisted, cache-invalidating,
+default-preserving. New `PitchMethodChoice`/`LpcMethodChoice` in `state.rs`.
+
+### Praat: confirmed-correct vs. residual (key reference for resuming)
+
+Reverse-engineered from Praat source (`NUMhertzToMel2`, `Sound_to_MelSpectrogram`,
+`MelSpectrogram_to_MFCC`, `NUMtriangularfilter_amplitude`):
+- **Confirmed**: `NUMhertzToMel2 = 2595·log10(1+f/700)` = the HTK / O'Shaughnessy–
+  Makhoul constant (same curve Kaldi uses, `1127·ln`). Unit-peak triangles
+  (area-norm is commented out in Praat). Filter count `N = round((mel(Nyq)−100)/100)
+  = 27` (swept: 26/28 far worse). Un-normalised DCT `c_m = Σ_j P_j·cos(πm(j+0.5)/N)`,
+  `c0 = Σ_j P_j`. Framing `floor((dur−2·win)/hop)+1 = 46` frames. dB ref `4e-10`.
+  **No pre-emphasis**.
+- **Residual — RESOLVED to tolerance (see roadmap 1).** The c1/c2 error was
+  *not* the window (Gaussian-2 confirmed via parselmouth bisection; window-count
+  swept) — it was (a) missing `_Spectrogram_windowCorrection` (÷ window
+  mean-square → c0) and (b) f32 underflow on near-empty high filters in Praat's
+  un-normalised dB DCT. Fixed by adding windowCorrection and computing in f64.
+  Remaining ~10/~20 is irreducible FFT-library noise (realfft vs NUMrealft on
+  ~1e-30 filter powers), now documented; `MfccMethod::Praat` = faithful-to-
+  tolerance, test runs.
+
+### Design: one parameterized pipeline + presets (feasibility CONFIRMED; engine BUILT additively)
+
+**UPDATE (same session):** the engine half is now **built and committed**
+(`feat(dsp): unified MfccParams pipeline + reference presets`). `MfccParams`
+exposes every knob; `MfccParams::librosa/kaldi/praat` are presets; one
+`mfcc_with_params()` pipeline runs them. Proven: `mfcc_with_params(preset)`
+reproduces the librosa + Kaldi goldens to tolerance *and* agrees bit-for-bit
+with `mfcc(method)` (agreement test). The unification is real, not just
+designed. (Found en route: Kaldi triangulates filters linearly in *mel*,
+librosa/Praat in *Hz* — the `triangle_in_mel` knob.) Additive: the enum
+dispatch still calls the dedicated fns; collapsing it is mechanical (step 2
+below, now mostly done).
+
+
+User goal: *set the parameters that can vary, offer presets by authoritative
+reference (Praat/librosa/Kaldi/HTK) or user-defined, and "select a preset then
+modify individual parameters."* Distinguish "the algorithm" from "the reference's
+default options."
+
+**Feasibility analysis (the key result): yes, it unifies cleanly.** All
+references share one skeleton — `frame → window → (pre-emph/DC) → FFT → power →
+mel filterbank → log → DCT → lifter` — and differ only by a per-stage scalar or
+enum, never an incompatible structure:
+
+| stage | librosa | Kaldi | Praat | HTK | knob |
+|---|---|---|---|---|---|
+| window length | 25 ms | 25 ms | 2× | 25 ms | scalar |
+| window fn | periodic Hann | Povey | Gaussian | Hamming | enum |
+| DC / pre-emph | no/0 | yes/0.97 | no/0 | no/0.97 | bool+scalar |
+| framing | center zero-pad | snip-edges | snip-edges(2×win) | snip-edges | enum |
+| FFT size | =win | next pow2 | next pow2 | next pow2 | enum |
+| mel scale | Slaney | HTK | HTK | HTK | enum |
+| filter spec | n_mels/[fmin,fmax] | n_mels | first/step mel→derived N | n_mels | enum (2 modes) |
+| filter norm | area (Slaney) | unit-peak | unit-peak | unit-peak | enum |
+| log | 10log10+80dB floor | natural ln | 10log10 / 4e-10 | natural ln | enum+scalars |
+| DCT norm | ortho | ortho | none | sqrt(2/N) | enum |
+| lifter | 0 | 22 | 0 | 22 | scalar |
+| power scale | raw | raw | 2/(nfft·n) | raw | enum |
+| exclude Nyquist bin | no | yes | no | — | bool |
+
+(Note: librosa "framing=center" is the only non-snip-edges; Kaldi vs Praat
+differ by window fn + 2× length, not framing.) The faithful reproductions
+already built *become* the validated authoritative presets + regression tests.
+Caveats: a few knobs are enums not sliders; filter-spec has two modes; any combo
+*computes* but only reference-matching ones are golden-validated — editing a
+reference preset honestly makes it "custom (based on X)", voiding faithfulness.
+
+**Decisions locked**: user-defined presets → **on-disk registry** (TOML + schema,
+alongside `model-registry`/`refdist-registry`). Preset-then-edit is the core
+interaction (requires `MfccParams`, not the opaque enum). Same pattern then
+extends to pitch/formants.
+
+### Roadmap (resume here)
+1. ✅ **Praat** — now validated to tolerance (was approximate). Added Praat's
+   `_Spectrogram_windowCorrection` (÷ window mean-square, fixes c0) and moved
+   the whole path to **f64** (FFT included), cutting the residual from
+   (c0 165, c1+ 54) to (c0 ~20, c1+ ~10, ~0.3% typical). The remaining gap is
+   *irreducible* FFT-library noise — Praat's un-normalised dB DCT sums
+   `10·log10` of every filter, so near-empty high filters (~1e-30) amplify
+   sub-1e-15 realfft-vs-NUMrealft differences. Bit-exact would need Praat's FFT.
+   Bisected via parselmouth (`mel(100)`→27 filters, Gaussian-2 confirmed,
+   triangle-in-Hz). Test un-ignored (c1+ < 15, c0 < 25).
+2. ✅ **`MfccParams` + `mfcc_with_params`** general pipeline + presets — built,
+   golden-validated, agrees with the enum. Dispatch **collapsed** for Librosa +
+   Kaldi (now route through `mfcc_with_params`; dedicated fns deleted). *Still
+   pending (backlogged):* migrate the pipeline to **f64** so the Praat *preset*
+   matches the dedicated f64 `mfcc(Praat)` path, then route Praat through it too;
+   and an `htk()` preset (blocked on a power/magnitude knob + an HTK golden).
+3. ✅ **On-disk preset registry** — built (`dsp/preset.rs`); serde on all
+   `Mfcc*` enums + `MfccParams` (incl. the `NMels` tuple→struct refactor for
+   internal tagging); `MfccPresetStore` + built-in/user split + `<id>.toml`
+   format + `preset-registry/` schema. See the 2026-06-29 top entry.
+4. ✅ **Python** — `MfccParams`/`MfccPreset` pyclasses + preset store fns +
+   `mfcc(audio, params=…)` dispatch + `.replace()` override; 11 tests; no stub
+   drift.
+5. ✅ **GUI** — togglable MFCC heatmap lane (reuses the embedding-heatmap path)
+   + View ▸ MFCC preset picker + modal per-parameter editor. The backlogged
+   piece remains the deeper *communicating parameter effects* visualization.
+6. ✅ **Extend** the params+presets pattern to pitch + formants — DONE.
+   - ✅ **Generic core** (`crate::preset`: `Preset<P>` / `PresetStore<P>` /
+     `PresetDomain`) — MFCC refactored onto it; `based_on` now free-text.
+   - ✅ **Pitch** — `PitchParams` (method+config) + `pitch_preset.rs` builtins +
+     Python + GUI (f0 lane unified onto `pitch_params`; preset picker + editor).
+   - ✅ **Formants** — `impl PresetDomain for FormantsConfig` + `formant_preset.rs`
+     builtins + Python + GUI (formant lane unified onto `formant_params`; preset
+     picker + editor). All three DSP families now share the generic core.
+
+Backlog updated with: real-Kaldi golden, MFCC-in-GUI, DSP-parameter-communication
+design, GUI in-line help, plus the 2026-06-27 review items.
+
 ## 2026-06-21 — Python API ergonomics: three papercuts from a live-API probe
 
 A test run of the live Python API surfaced three discoverability footguns,
