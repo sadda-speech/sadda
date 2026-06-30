@@ -48,6 +48,13 @@ def test_selection_edges_seed_at_cursor_and_clamp() -> None:
     t2.clear_selection()
     assert t2.selection is None
 
+    # set_selection_range sets both edges at once, sorted + clamped, no seed.
+    t3 = sadda.Timeline(10.0)
+    t3.set_selection_range(7.0, 3.0)
+    assert t3.selection == (3.0, 7.0)
+    t3.set_selection_range(-5.0, 99.0)
+    assert t3.selection == (0.0, 10.0)
+
 
 def test_view_scroll_and_zoom() -> None:
     t = sadda.Timeline(10.0)

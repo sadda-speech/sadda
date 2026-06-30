@@ -75,13 +75,31 @@ to the file ends.
 
 ## Annotation
 
+**Navigation** — moves the *current-annotation* highlight independently of the timeline selection, so you can step through annotations without disturbing the cursor/selection you set for playback:
+
+| Key | Action |
+| --- | --- |
+| ++u++ / ++i++ | Previous / next annotation on the current tier |
+| ++o++ / ++p++ | Previous / next tier (up / down) |
+| ++y++ | **Grab** the current annotation into the timeline selection + cursor (so playback acts on it) |
+
+**Editing:**
+
 | Key | Action |
 | --- | --- |
 | ++1++ … ++9++ | Activate the tier at that lane position (top = 1) |
 | ++shift+1++ … ++shift+9++ | Toggle that tier in / out of the active set (several at once) |
 | ++0++ | Clear all active tiers |
-| ++enter++ | Commit the current selection to the active tiers (span → intervals, point → points) |
+| ++enter++ | Edit the current annotation's label if one is highlighted; otherwise commit the selection to the active tiers (span → intervals, point → points) |
+| ++esc++ | Cancel a label edit / clear the current-annotation highlight |
 | ++backspace++ / ++delete++ | Delete the selected annotation |
+
+## Panes & focus
+
+| Key | Action |
+| --- | --- |
+| ++shift+down++ | Focus the Python console — every key then types into it (a clean slate for a future Vim/Emacs mode); a ring marks it |
+| ++shift+up++ | Leave the console, back to the main view (shortcuts resume) |
 
 ## Global
 
