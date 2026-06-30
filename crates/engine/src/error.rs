@@ -37,6 +37,12 @@ pub enum EngineError {
     #[error("reference-distribution error: {0}")]
     RefDist(String),
 
+    /// A DSP preset failed to parse, or a preset-registry store operation
+    /// failed (malformed `*.toml`, unknown preset id, unwritable store
+    /// directory, …). Surfaced by the on-disk MFCC preset registry.
+    #[error("preset error: {0}")]
+    Preset(String),
+
     /// An ML-inference operation failed (E11): ONNX Runtime not loadable
     /// (`ORT_DYLIB_PATH` unset / wrong version), a model failed to load,
     /// or inference errored. Surfaced only with the `ml` feature.

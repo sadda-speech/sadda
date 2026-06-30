@@ -6,21 +6,28 @@
 //!
 //! Design: see the 2026-05-21 DEVLOG entry "Foundational DSP (C1)".
 
+pub mod formant_preset;
 pub mod formants;
 pub mod intensity;
 pub mod lpc;
 pub mod ltas;
 pub mod mfcc;
+pub mod preset;
 pub mod roots;
 pub mod spectrogram;
 pub mod stft;
 pub mod windowing;
 
+pub use formant_preset::{FormantPreset, FormantPresetStore, formant_builtin_presets};
 pub use formants::{FormantFrame, FormantsConfig, formants};
 pub use intensity::{IntensityFrame, intensity};
 pub use lpc::{LpcMethod, LpcResult, autocorr_lpc, burg_lpc, lpc};
 pub use ltas::{Ltas, ltas};
-pub use mfcc::{log_mel, log_mel_whisper, mfcc};
+pub use mfcc::{
+    MelScaleKind, MfccDct, MfccFft, MfccFilterNorm, MfccFilters, MfccFraming, MfccLog, MfccMethod,
+    MfccParams, MfccPowerNorm, MfccWindow, log_mel, log_mel_whisper, mfcc, mfcc_with_params,
+};
+pub use preset::{MfccPreset, MfccPresetStore, builtin_presets};
 pub use roots::polynomial_roots;
 pub use spectrogram::power_spectrogram;
 pub use stft::{Shape, stft};

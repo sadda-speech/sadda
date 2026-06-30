@@ -21,9 +21,32 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sorted alphabetically so bundle order is predictable) as a bundle, each going
   through the same large-file probe/split guard as a single Add Bundle…. Reports
   how many were added, or an error if the folder has no WAV files.
+- **DSP method diversity — reference-faithful methods.** "MFCC" is now a family
+  of named methods, each a faithful reproduction of one reference
+  (`librosa` (default) / `kaldi` / `praat`), validated against that reference's
+  own output — alongside the existing pitch (Boersma / YIN / pYIN / SWIPE′) and
+  formant (Burg / autocorrelation) method families.
+- **On-disk DSP preset registries (MFCC / pitch / formants).** Named, reusable
+  parameter sets with provenance, stored as TOML under
+  `~/.local/share/sadda/presets/<domain>/`, on a generic `Preset<P>` core.
+  Reference-faithful built-ins ship in code; users can save / edit / delete
+  their own. On the engine, in Python (`sadda.dsp.{mfcc,voiced_pitch,formants}(
+  audio, params=…)`; `MfccParams` / `PitchParams` / `FormantsParams` with named
+  constructors, `.replace(...)`, and `*_presets()` / `save_*_preset()` /
+  `delete_*_preset()`), and in the desktop app.
+- **Desktop app: MFCC heatmap lane + DSP preset pickers/editors.** A togglable
+  MFCC lane (separate-scale c0 display), and View ▸ MFCC / DSP-methods preset
+  pickers, per-parameter editor modals, and save / delete of user presets for
+  MFCC, f0, and formants. Plus a **"Hot"** colormap (matplotlib / MATLAB `hot`:
+  black → red → orange → yellow → white).
 
 ### Changed
 
+- **BREAKING: "MFCC" replaced by named, reference-faithful methods** (default
+  `librosa`). The previous single implementation matched no published
+  definition (a natural-log + symmetric-Hann chimera); the default output now
+  matches `librosa.feature.mfcc`. The engine `MfccFilters::NMels` also changed
+  from a tuple to a struct variant to support serialization.
 - **Releases are now hard-gated on CI.** The full test gate is a reusable
   workflow that CI *and* both release workflows share; the PyPI and desktop-app
   publish jobs `needs:` it, so a broken commit can't publish even if it's

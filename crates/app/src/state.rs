@@ -88,6 +88,27 @@ pub struct PersistedState {
     /// lane hidden (no selected tier).
     #[serde(default)]
     pub embedding: EmbeddingHeatmapConfig,
+    /// MFCC lane state: active preset + parameters + colormap/normalization.
+    /// Default leaves the lane hidden.
+    #[serde(default)]
+    pub mfcc: MfccLaneConfig,
+    /// Id of the f0 preset currently selected in View ▸ DSP methods (display
+    /// only — the actual params live in `tracks.pitch_params`). Lets the menu
+    /// show the active preset and flag edits as "(modified)".
+    #[serde(default = "default_pitch_preset_id")]
+    pub pitch_preset_id: String,
+    /// Id of the formant preset selected in View ▸ DSP methods (display only —
+    /// the actual params live in `tracks.formant_params`).
+    #[serde(default = "default_formant_preset_id")]
+    pub formant_preset_id: String,
+}
+
+fn default_pitch_preset_id() -> String {
+    "praat-ac".to_string()
+}
+
+fn default_formant_preset_id() -> String {
+    "praat-burg".to_string()
 }
 
 /// Default UI zoom factor (native size). A free fn because `serde`'s
@@ -115,6 +136,9 @@ impl Default for PersistedState {
             palette: PlotPalette::default(),
             ui_scale: default_ui_scale(), // 1.0, not 0.0
             embedding: EmbeddingHeatmapConfig::default(),
+            mfcc: MfccLaneConfig::default(),
+            pitch_preset_id: default_pitch_preset_id(),
+            formant_preset_id: default_formant_preset_id(),
         }
     }
 }
@@ -163,6 +187,42 @@ mod tests {
             ..MeasureTrackConfig::default()
         };
         assert!(!cfg.any_visible());
+    }
+
+    #[test]
+    fn dsp_method_defaults_match_engine_defaults() {
+        // The GUI defaults must mirror the engine's chosen defaults so an
+        // untouched install behaves identically to the API's `*::default()`.
+        let cfg = MeasureTrackConfig::default();
+        assert_eq!(
+            cfg.pitch_params,
+            sadda_engine::pitch::PitchParams::default()
+        );
+        assert_eq!(
+            cfg.pitch_params.method,
+            sadda_engine::pitch::PitchMethod::Boersma
+        );
+        assert_eq!(
+            cfg.formant_params,
+            sadda_engine::dsp::FormantsConfig::default()
+        );
+        assert_eq!(
+            cfg.formant_params.lpc_method,
+            sadda_engine::dsp::lpc::LpcMethod::Burg
+        );
+    }
+
+    #[test]
+    fn dsp_method_changes_invalidate_cache() {
+        // Changing the f0 or formant method must change config equality
+        // (that's how the track cache detects staleness).
+        let a = MeasureTrackConfig::default();
+        let mut b = MeasureTrackConfig::default();
+        b.pitch_params.method = sadda_engine::pitch::PitchMethod::Yin;
+        assert_ne!(a, b);
+        let mut c = MeasureTrackConfig::default();
+        c.formant_params.lpc_method = sadda_engine::dsp::lpc::LpcMethod::Autocorrelation;
+        assert_ne!(a, c);
     }
 
     #[test]
@@ -362,6 +422,10 @@ pub enum ColormapKind {
     Viridis,
     /// Dark-mode-friendly perceptually-uniform alternate; black → purple → red → yellow.
     Magma,
+    /// matplotlib / MATLAB `hot`: black → red → orange → yellow → white — a
+    /// piecewise-linear RGB ramp (red fills first, then green, then blue).
+    /// Not perceptually uniform, unlike Viridis / Magma / Cividis.
+    Hot,
     /// Perceptually-uniform map optimised for colour-vision deficiency
     /// (dark blue → grey → yellow). The accessibility pick — it stays
     /// monotonic in luminance for all common forms of CVD.
@@ -376,6 +440,7 @@ impl ColormapKind {
         match self {
             ColormapKind::Viridis => "Viridis",
             ColormapKind::Magma => "Magma",
+            ColormapKind::Hot => "Hot",
             ColormapKind::Cividis => "Cividis (CVD-safe)",
             ColormapKind::Greyscale => "Greyscale",
         }
@@ -439,8 +504,6 @@ impl Default for SpectrogramConfig {
     }
 }
 
-/// D10: configuration for the stacked measure-track lanes (f0,
-/// formants, intensity) drawn below the spectrogram. Lives in
 /// [`PersistedState`] so the user's lane visibility + analysis
 /// parameters survive a relaunch. Changing any field invalidates the
 /// app's track cache (see `MeasureTrackCache`), so this derives
@@ -458,24 +521,26 @@ pub struct MeasureTrackConfig {
     /// Runtime at runtime; the lane shows a hint if it isn't available.
     #[serde(default)]
     pub vad_visible: bool,
-    /// f0 search floor (Hz). Doubles as the f0 lane's y-axis minimum.
-    pub f0_min_hz: f32,
-    /// f0 search ceiling (Hz). Doubles as the f0 lane's y-axis maximum.
-    pub f0_max_hz: f32,
-    /// Drop f0 estimates whose voicing strength is below this; unvoiced
-    /// frames leave a gap rather than a spurious pitch point.
-    pub f0_voicing_threshold: f32,
-    /// Number of formants to track (and plot, ascending: F1..Fn).
-    pub formant_count: usize,
     /// Formant lane y-axis maximum (Hz). Formants above this aren't
     /// plotted; the lane scales to a fixed range so vowels are
-    /// comparable across bundles.
+    /// comparable across bundles. (Display only — not part of the analysis
+    /// config, hence kept separate from `formant_params`.)
     pub formant_max_hz: f32,
     /// Intensity lane y-axis floor (dB-FS). The ceiling is fixed at 0.
     pub intensity_floor_db: f32,
     /// VAD speech-probability threshold, drawn as a line on the VAD lane.
     #[serde(default = "default_vad_threshold")]
     pub vad_threshold: f32,
+    /// Full f0-tracking spec for the pitch lane (method + config: search
+    /// floor/ceiling, voicing threshold, and method-specific knobs). Doubles
+    /// as the f0 lane's y-axis bounds (`min_freq_hz`..`max_freq_hz`). Persists
+    /// across launches; changing any field invalidates the track cache.
+    #[serde(default)]
+    pub pitch_params: sadda_engine::pitch::PitchParams,
+    /// Full formant spec for the formant lane (LPC method + count + analysis
+    /// knobs). Changing any field invalidates the track cache.
+    #[serde(default)]
+    pub formant_params: sadda_engine::dsp::FormantsConfig,
 }
 
 fn default_vad_threshold() -> f32 {
@@ -532,13 +597,14 @@ impl Default for MeasureTrackConfig {
             formants_visible: false,
             intensity_visible: false,
             vad_visible: false,
-            f0_min_hz: 75.0,
-            f0_max_hz: 500.0,
-            f0_voicing_threshold: 0.45,
-            formant_count: 5,
             formant_max_hz: 5500.0,
             intensity_floor_db: -80.0,
             vad_threshold: 0.5,
+            // Default: Boersma + Praat-default config (75–500 Hz, voicing 0.45)
+            // — same numbers the old f0_min/max/voicing fields carried.
+            pitch_params: sadda_engine::pitch::PitchParams::default(),
+            // Burg + 5 formants — same as the old formant_count/lpc_method.
+            formant_params: sadda_engine::dsp::FormantsConfig::default(),
         }
     }
 }
@@ -699,6 +765,102 @@ pub fn normalize_embedding(
     }
 }
 
+/// MFCC heatmap-lane state: which preset is active, the full parameter set it
+/// resolves to (possibly edited away from the preset), and the display knobs
+/// (colormap / normalization / whether to drop c0). Default leaves the lane
+/// hidden with the librosa preset loaded.
+///
+/// Unlike the sibling `*MethodChoice` mirrors, this stores the engine
+/// [`sadda_engine::dsp::MfccParams`] directly: that type is now
+/// `Serialize`/`Deserialize`/`Clone`/`PartialEq`, so a hand-written mirror of
+/// its ~21 fields (plus the data enums) would be pure, drift-prone
+/// duplication. `PartialEq` is load-bearing — the lane cache invalidates by
+/// `==` on this whole struct (see `rebuild_mfcc_if_stale`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MfccLaneConfig {
+    /// Whether the MFCC lane is shown.
+    #[serde(default)]
+    pub show: bool,
+    /// Id of the active preset (the menu's current selection). When `params`
+    /// has been edited away from this preset, the lane caption flags it.
+    #[serde(default = "default_mfcc_preset_id")]
+    pub preset_id: String,
+    /// The resolved parameter set actually used to compute the lane.
+    #[serde(default = "default_mfcc_params")]
+    pub params: sadda_engine::dsp::MfccParams,
+    /// Colormap applied to the normalized coefficients.
+    #[serde(default = "default_mfcc_colormap")]
+    pub colormap: ColormapKind,
+    /// Normalization applied before the colormap. Per-coefficient z-score by
+    /// default, which keeps c0 (overall log-energy, orders larger than c1+)
+    /// from washing out the rest of the heatmap.
+    #[serde(default)]
+    pub normalization: EmbeddingNormalization,
+    /// How c0 (the overall log-energy coefficient) is shown. Defaults to
+    /// `Separate` — visible but on its own scale, set apart by a small gap.
+    #[serde(default)]
+    pub c0: MfccC0Display,
+}
+
+fn default_mfcc_preset_id() -> String {
+    "librosa-default".to_string()
+}
+
+fn default_mfcc_params() -> sadda_engine::dsp::MfccParams {
+    sadda_engine::dsp::MfccParams::librosa(0.025, 0.010, 40, 13, 0.0, 8000.0)
+}
+
+fn default_mfcc_colormap() -> ColormapKind {
+    ColormapKind::Cividis
+}
+
+impl Default for MfccLaneConfig {
+    fn default() -> Self {
+        Self {
+            show: false,
+            preset_id: default_mfcc_preset_id(),
+            params: default_mfcc_params(),
+            colormap: default_mfcc_colormap(),
+            normalization: EmbeddingNormalization::default(),
+            c0: MfccC0Display::default(),
+        }
+    }
+}
+
+/// How the MFCC lane displays c0 (overall log-energy). c0 is orders larger
+/// than the spectral-shape coefficients c1+, so mixing it in is misleading
+/// (and, under a shared-scale normalization, washes the rest out).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MfccC0Display {
+    /// Show c0 on its own normalization scale, separated from c1+ by a small
+    /// gap. The default — keeps the energy visible without it dominating or
+    /// being mistaken for a shape coefficient.
+    #[default]
+    Separate,
+    /// Show c0 in the matrix on the same scale as the other coefficients.
+    Inline,
+    /// Omit c0 entirely; show only c1+.
+    Hidden,
+}
+
+impl MfccC0Display {
+    pub fn label(self) -> &'static str {
+        match self {
+            MfccC0Display::Separate => "Separate scale + gap",
+            MfccC0Display::Inline => "Inline (shared scale)",
+            MfccC0Display::Hidden => "Hidden",
+        }
+    }
+
+    pub fn all() -> [MfccC0Display; 3] {
+        [
+            MfccC0Display::Separate,
+            MfccC0Display::Inline,
+            MfccC0Display::Hidden,
+        ]
+    }
+}
+
 /// Floor for converting linear power to dB-FS without blowing up on
 /// silent frames. Matches the floor [`crate::state::power_to_db_normalized`]
 /// applies when `power == 0`.
@@ -790,6 +952,19 @@ fn sample_colormap(kind: ColormapKind, t: f32) -> (u8, u8, u8) {
             let c = colorous::MAGMA.eval_continuous(t);
             (c.r, c.g, c.b)
         }
+        ColormapKind::Hot => {
+            // matplotlib / MATLAB `hot`: black → red → orange → yellow → white.
+            // Red fills over the first 3/8, green over the next 3/8, blue over
+            // the last 2/8.
+            let r = (8.0 / 3.0 * t).clamp(0.0, 1.0);
+            let g = ((8.0 * t - 3.0) / 3.0).clamp(0.0, 1.0);
+            let b = (4.0 * t - 3.0).clamp(0.0, 1.0);
+            (
+                (r * 255.0).round() as u8,
+                (g * 255.0).round() as u8,
+                (b * 255.0).round() as u8,
+            )
+        }
         ColormapKind::Cividis => {
             let c = colorous::CIVIDIS.eval_continuous(t);
             (c.r, c.g, c.b)
@@ -876,6 +1051,20 @@ mod spectrogram_tests {
         assert_ne!(
             sample_colormap(ColormapKind::Cividis, 0.5),
             sample_colormap(ColormapKind::Viridis, 0.5),
+        );
+    }
+
+    #[test]
+    fn hot_colormap_ramps_black_to_white_and_is_not_magma() {
+        // black → red → orange → yellow → white (matplotlib/MATLAB `hot`).
+        assert_eq!(sample_colormap(ColormapKind::Hot, 0.0), (0, 0, 0));
+        assert_eq!(sample_colormap(ColormapKind::Hot, 0.375), (255, 0, 0)); // red
+        assert_eq!(sample_colormap(ColormapKind::Hot, 0.75), (255, 255, 0)); // yellow
+        assert_eq!(sample_colormap(ColormapKind::Hot, 1.0), (255, 255, 255));
+        // Magma is preserved as its own (distinct) perceptually-uniform map.
+        assert_ne!(
+            sample_colormap(ColormapKind::Hot, 0.5),
+            sample_colormap(ColormapKind::Magma, 0.5),
         );
     }
 

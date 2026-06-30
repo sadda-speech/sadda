@@ -344,6 +344,22 @@ def test_mfcc_custom_n_mfcc_param() -> None:
         assert m.shape[1] == 20
 
 
+def test_mfcc_method_selection_and_default() -> None:
+    """`method` selects the reference; default is librosa. Unknown -> ValueError."""
+    with tempfile.TemporaryDirectory() as td:
+        wav = Path(td) / "sine.wav"
+        _write_sine_wav(wav, freq=440.0, sample_rate=16_000, duration_s=0.5)
+        audio = sadda.load_wav(str(wav))
+        assert np.array_equal(sadda.dsp.mfcc(audio), sadda.dsp.mfcc(audio, method="librosa"))
+        # Kaldi is a distinct method: different framing (snip_edges) and pipeline,
+        # so it produces a different array from librosa.
+        kaldi = sadda.dsp.mfcc(audio, method="kaldi")
+        assert kaldi.shape[1] == 13
+        assert not np.array_equal(kaldi, sadda.dsp.mfcc(audio, method="librosa"))
+        with pytest.raises(ValueError):
+            sadda.dsp.mfcc(audio, method="not-a-method")
+
+
 # ---------------------------------------------------------------------------
 # stability tier
 # ---------------------------------------------------------------------------

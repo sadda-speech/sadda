@@ -72,11 +72,14 @@
 
 use std::f32::consts::PI as PI_F32;
 
+use serde::{Deserialize, Serialize};
+
 use crate::Audio;
 use crate::dsp::windowing::hann;
 
 /// One of the supported pitch-estimation methods.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PitchMethod {
     /// Naive time-domain autocorrelation (Phase-0 method). See
     /// [`autocorrelation`].
@@ -92,7 +95,7 @@ pub enum PitchMethod {
     WindowedAutocorrelation,
     /// Faithful Boersma 1993 / Praat `Sound: To Pitch (ac)…` with
     /// `very_accurate = false`. Multi-candidate per-frame detection +
-    /// Viterbi path-finding. See [`boersma`].
+    /// Viterbi path-finding. See [`boersma`]. The default tracker.
     Boersma,
     /// de Cheveigné & Kawahara 2002 YIN — cumulative-mean-normalized-
     /// difference-function pitch tracker. Different algorithmic family
@@ -103,6 +106,9 @@ pub enum PitchMethod {
     /// distribution over thresholds plus an HMM smoothing pass over
     /// per-frame candidates. librosa's default; closest to the
     /// modern Python-DSP audience expectation. See [`pyin`].
+    // `pyin`, not the snake_case default `p_yin`, to match the method-string
+    // vocabulary used by `sadda.dsp.voiced_pitch(method=…)`.
+    #[serde(rename = "pyin")]
     PYin,
     /// Camacho & Harris 2008 SWIPE' — Sawtooth Waveform Inspired Pitch
     /// Estimator (prime variant). Spectral method: matches the
@@ -117,7 +123,7 @@ pub enum PitchMethod {
 /// The `boersma_*` fields are only read by [`PitchMethod::Boersma`]; the
 /// other methods ignore them. Defaults match Praat 6.x's
 /// `Sound: To Pitch (ac)…` parameters.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PitchConfig {
     /// Analysis frame length in seconds.
     pub frame_size_seconds: f32,
@@ -240,6 +246,25 @@ pub fn pitch(audio: &Audio, config: &PitchConfig, method: PitchMethod) -> Vec<Pi
         PitchMethod::PYin => pyin(audio, config),
         PitchMethod::Swipe => swipe(audio, config),
     }
+}
+
+/// A complete, serializable pitch-tracking specification: a [`PitchMethod`]
+/// plus its [`PitchConfig`]. The pitch analogue of `MfccParams` — the unit a
+/// preset stores, so a named pitch preset carries both "which algorithm" and
+/// "with what knobs". Run via [`pitch_with_params`].
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct PitchParams {
+    /// The tracking algorithm.
+    #[serde(default)]
+    pub method: PitchMethod,
+    /// The tracker configuration (analysis + method-specific knobs).
+    pub config: PitchConfig,
+}
+
+/// Runs the pitch tracker named by a [`PitchParams`] — `pitch(audio,
+/// &p.config, p.method)`. The symmetric counterpart of `mfcc_with_params`.
+pub fn pitch_with_params(audio: &Audio, params: &PitchParams) -> Vec<PitchFrame> {
+    pitch(audio, &params.config, params.method)
 }
 
 // [docs-impl:sadda.dsp.f0]  — engine algorithm behind the `sadda.dsp.f0`

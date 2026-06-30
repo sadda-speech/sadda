@@ -19,6 +19,8 @@
 
 use std::f32::consts::PI as PI_F32;
 
+use serde::{Deserialize, Serialize};
+
 use crate::dsp::lpc::{LpcMethod, lpc};
 use crate::dsp::roots::polynomial_roots;
 use crate::dsp::windowing::hann;
@@ -39,7 +41,7 @@ pub struct FormantFrame {
 }
 
 /// Configuration for [`formants`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FormantsConfig {
     /// Analysis frame length in seconds.
     pub frame_size_seconds: f32,
