@@ -46,6 +46,32 @@ pub(crate) struct PyFormantsParams {
     pub(crate) inner: FormantsConfig,
 }
 
+/// Builds a `FormantsConfig` for `lpc_method` with the common analysis
+/// settings (`lpc_order` left auto). Backs the named constructors below.
+#[allow(clippy::too_many_arguments)]
+fn formants_config_with(
+    lpc_method: LpcMethod,
+    frame_size_seconds: f32,
+    hop_seconds: f32,
+    n_formants: usize,
+    pre_emphasis: f32,
+    max_bandwidth_hz: f32,
+    min_frequency_hz: f32,
+) -> PyFormantsParams {
+    PyFormantsParams {
+        inner: FormantsConfig {
+            frame_size_seconds,
+            hop_seconds,
+            n_formants,
+            pre_emphasis,
+            lpc_order: None,
+            lpc_method,
+            max_bandwidth_hz,
+            min_frequency_hz,
+        },
+    }
+}
+
 #[pymethods]
 impl PyFormantsParams {
     /// Params for a named LPC method at the default config. `method` is
@@ -59,6 +85,51 @@ impl PyFormantsParams {
                 ..FormantsConfig::default()
             },
         })
+    }
+
+    /// Praat `Sound.to_formant_burg` — Burg LPC, the default. (Named
+    /// constructor parallel to `MfccParams.librosa`; `lpc_order` stays auto.)
+    #[staticmethod]
+    #[pyo3(signature = (frame_size_seconds=0.025, hop_seconds=0.010, n_formants=5, pre_emphasis=0.97, max_bandwidth_hz=1000.0, min_frequency_hz=50.0))]
+    fn burg(
+        frame_size_seconds: f32,
+        hop_seconds: f32,
+        n_formants: usize,
+        pre_emphasis: f32,
+        max_bandwidth_hz: f32,
+        min_frequency_hz: f32,
+    ) -> Self {
+        formants_config_with(
+            LpcMethod::Burg,
+            frame_size_seconds,
+            hop_seconds,
+            n_formants,
+            pre_emphasis,
+            max_bandwidth_hz,
+            min_frequency_hz,
+        )
+    }
+
+    /// Autocorrelation-method LPC (Levinson–Durbin).
+    #[staticmethod]
+    #[pyo3(signature = (frame_size_seconds=0.025, hop_seconds=0.010, n_formants=5, pre_emphasis=0.97, max_bandwidth_hz=1000.0, min_frequency_hz=50.0))]
+    fn autocorrelation(
+        frame_size_seconds: f32,
+        hop_seconds: f32,
+        n_formants: usize,
+        pre_emphasis: f32,
+        max_bandwidth_hz: f32,
+        min_frequency_hz: f32,
+    ) -> Self {
+        formants_config_with(
+            LpcMethod::Autocorrelation,
+            frame_size_seconds,
+            hop_seconds,
+            n_formants,
+            pre_emphasis,
+            max_bandwidth_hz,
+            min_frequency_hz,
+        )
     }
 
     /// Returns a copy with the given fields overridden. `method` takes its

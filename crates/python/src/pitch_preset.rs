@@ -54,6 +54,32 @@ pub(crate) struct PyPitchParams {
     pub(crate) inner: PitchParams,
 }
 
+/// Builds pitch params for `method` with the common analysis settings;
+/// method-specific knobs (`boersma_*` / `yin_*` / `pyin_*`) keep their
+/// defaults. Backs the named constructors below.
+fn pitch_params_with(
+    method: PitchMethod,
+    frame_size_seconds: f32,
+    hop_size_seconds: f32,
+    min_freq_hz: f32,
+    max_freq_hz: f32,
+    voicing_threshold: f32,
+) -> PyPitchParams {
+    PyPitchParams {
+        inner: PitchParams {
+            method,
+            config: PitchConfig {
+                frame_size_seconds,
+                hop_size_seconds,
+                min_freq_hz,
+                max_freq_hz,
+                voicing_threshold,
+                ..PitchConfig::default()
+            },
+        },
+    }
+}
+
 #[pymethods]
 impl PyPitchParams {
     /// Params for a named tracking method at its default (Praat/paper)
@@ -68,6 +94,88 @@ impl PyPitchParams {
                 config: PitchConfig::default(),
             },
         })
+    }
+
+    /// Faithful Boersma 1993 / Praat `Sound: To Pitch (ac)…` — the default,
+    /// octave-robust tracker. (Named constructor parallel to
+    /// `MfccParams.librosa`; method-specific knobs keep Praat's defaults.)
+    #[staticmethod]
+    #[pyo3(signature = (frame_size_seconds=0.030, hop_size_seconds=0.010, min_freq_hz=75.0, max_freq_hz=500.0, voicing_threshold=0.45))]
+    fn boersma(
+        frame_size_seconds: f32,
+        hop_size_seconds: f32,
+        min_freq_hz: f32,
+        max_freq_hz: f32,
+        voicing_threshold: f32,
+    ) -> Self {
+        pitch_params_with(
+            PitchMethod::Boersma,
+            frame_size_seconds,
+            hop_size_seconds,
+            min_freq_hz,
+            max_freq_hz,
+            voicing_threshold,
+        )
+    }
+
+    /// de Cheveigné & Kawahara 2002 YIN.
+    #[staticmethod]
+    #[pyo3(signature = (frame_size_seconds=0.030, hop_size_seconds=0.010, min_freq_hz=75.0, max_freq_hz=500.0, voicing_threshold=0.45))]
+    fn yin(
+        frame_size_seconds: f32,
+        hop_size_seconds: f32,
+        min_freq_hz: f32,
+        max_freq_hz: f32,
+        voicing_threshold: f32,
+    ) -> Self {
+        pitch_params_with(
+            PitchMethod::Yin,
+            frame_size_seconds,
+            hop_size_seconds,
+            min_freq_hz,
+            max_freq_hz,
+            voicing_threshold,
+        )
+    }
+
+    /// Mauch & Dixon 2014 pYIN (librosa's default).
+    #[staticmethod]
+    #[pyo3(signature = (frame_size_seconds=0.030, hop_size_seconds=0.010, min_freq_hz=75.0, max_freq_hz=500.0, voicing_threshold=0.45))]
+    fn pyin(
+        frame_size_seconds: f32,
+        hop_size_seconds: f32,
+        min_freq_hz: f32,
+        max_freq_hz: f32,
+        voicing_threshold: f32,
+    ) -> Self {
+        pitch_params_with(
+            PitchMethod::PYin,
+            frame_size_seconds,
+            hop_size_seconds,
+            min_freq_hz,
+            max_freq_hz,
+            voicing_threshold,
+        )
+    }
+
+    /// Camacho & Harris 2008 SWIPE′.
+    #[staticmethod]
+    #[pyo3(signature = (frame_size_seconds=0.030, hop_size_seconds=0.010, min_freq_hz=75.0, max_freq_hz=500.0, voicing_threshold=0.45))]
+    fn swipe(
+        frame_size_seconds: f32,
+        hop_size_seconds: f32,
+        min_freq_hz: f32,
+        max_freq_hz: f32,
+        voicing_threshold: f32,
+    ) -> Self {
+        pitch_params_with(
+            PitchMethod::Swipe,
+            frame_size_seconds,
+            hop_size_seconds,
+            min_freq_hz,
+            max_freq_hz,
+            voicing_threshold,
+        )
     }
 
     /// Returns a copy with the given fields overridden. `method` takes its

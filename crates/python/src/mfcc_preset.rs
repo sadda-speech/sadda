@@ -217,6 +217,22 @@ impl PyMfccParams {
         }
     }
 
+    /// Params for a named reference at its default analysis settings — the
+    /// generic counterpart of `PitchParams.for_method` / `FormantsParams.
+    /// for_method`. `method` is `librosa` (default) | `kaldi` | `praat`.
+    #[staticmethod]
+    #[pyo3(signature = (method="librosa"))]
+    fn for_method(method: &str) -> PyResult<Self> {
+        match method {
+            "librosa" => Ok(Self::librosa(0.025, 0.010, 40, 13, 0.0, 8000.0)),
+            "kaldi" => Ok(Self::kaldi(0.025, 0.010, 23, 13, 20.0, 8000.0)),
+            "praat" => Ok(Self::praat(0.025, 0.010, 13, 8000.0)),
+            other => Err(PyValueError::new_err(format!(
+                "unknown MFCC reference {other:?}; expected librosa | kaldi | praat"
+            ))),
+        }
+    }
+
     /// Returns a copy with the given fields overridden (the "pick a preset,
     /// then modify individual parameters" path). Enum fields take their
     /// snake_case names (e.g. `window="hamming"`, `mel_scale="htk"`).

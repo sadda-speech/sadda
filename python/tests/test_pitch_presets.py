@@ -67,6 +67,20 @@ def test_default_preset_is_octave_robust(tone) -> None:
     assert abs(float(np.median(voiced)) - 150.0) < 3.0
 
 
+def test_named_constructors_parallel_mfcc_shape() -> None:
+    # Named per-method constructors (like MfccParams.librosa/.kaldi/.praat),
+    # taking the common analysis args; equivalent to for_method at defaults.
+    assert dsp.PitchParams.boersma().method == "boersma"
+    assert dsp.PitchParams.yin().method == "yin"
+    assert dsp.PitchParams.pyin().method == "pyin"
+    assert dsp.PitchParams.swipe().method == "swipe"
+    assert dsp.PitchParams.boersma(max_freq_hz=400.0).max_freq_hz == pytest.approx(400.0)
+    # Named constructor == for_method at the same (default) settings.
+    a = dsp.PitchParams.boersma()
+    b = dsp.PitchParams.for_method("boersma")
+    assert a.to_toml() == b.to_toml()
+
+
 def test_for_method_and_replace() -> None:
     p = dsp.PitchParams.for_method("yin")
     assert p.method == "yin"

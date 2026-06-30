@@ -102,6 +102,16 @@ def test_params_constructors() -> None:
     assert dsp.MfccParams.kaldi().mel_scale == "htk"
 
 
+def test_for_method_parallels_named_constructors() -> None:
+    # for_method (the generic form shared with PitchParams/FormantsParams)
+    # matches the named per-reference constructors at default settings.
+    assert dsp.MfccParams.for_method("librosa").to_toml() == dsp.MfccParams.librosa().to_toml()
+    assert dsp.MfccParams.for_method("kaldi").to_toml() == dsp.MfccParams.kaldi().to_toml()
+    assert dsp.MfccParams.for_method("praat").to_toml() == dsp.MfccParams.praat().to_toml()
+    with pytest.raises(ValueError):
+        dsp.MfccParams.for_method("not-a-reference")
+
+
 # ---- on-disk store ---------------------------------------------------------
 
 def test_save_reload_delete_user_preset(tmp_path: Path) -> None:

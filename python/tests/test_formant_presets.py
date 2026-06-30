@@ -76,6 +76,14 @@ def test_params_path_matches_method_path(vowel) -> None:
         assert len(a.frequencies) == len(b.frequencies)
 
 
+def test_named_constructors_parallel_mfcc_shape() -> None:
+    assert dsp.FormantsParams.burg().method == "burg"
+    assert dsp.FormantsParams.autocorrelation().method == "autocorrelation"
+    assert dsp.FormantsParams.burg(n_formants=4).n_formants == 4
+    # Named constructor == for_method at the same (default) settings.
+    assert dsp.FormantsParams.burg().to_toml() == dsp.FormantsParams.for_method("burg").to_toml()
+
+
 def test_for_method_and_replace() -> None:
     p = dsp.FormantsParams.for_method("burg")
     assert p.method == "burg"
