@@ -88,7 +88,7 @@ jobs:
           # Smoke-test: import the built wheel and check the version
           # looks well-formed. Tracking the 0.x line broadly so the test
           # doesn't break on every release bump (was 0.1, then 0.2 …).
-          CIBW_TEST_COMMAND: 'python -c "import sadda; assert sadda.version().startswith(''0.''), sadda.version()"'
+          CIBW_TEST_COMMAND: 'python -c "import sadda; assert sadda.__version__.startswith(''0.''), sadda.__version__"'
 
       - name: Upload wheel artifacts
         uses: actions/upload-artifact@v5

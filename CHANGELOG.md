@@ -28,6 +28,16 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   workflow that CI *and* both release workflows share; the PyPI and desktop-app
   publish jobs `needs:` it, so a broken commit can't publish even if it's
   tagged. Closes the gap that let `v0.4.0-app` ship a release-only build break.
+- **BREAKING: `Audio.mono()` now returns an `Audio`**, not a raw NumPy array, so
+  the mono downmix can be passed straight back into `dsp.*` functions. Reach the
+  samples via `audio.mono().samples`. (Most `dsp.*` / `clinical.*` functions
+  already mono-mix internally, so you rarely need to call this first.)
+
+### Removed
+
+- **BREAKING: `sadda.version()` and `sadda.schema_version()` functions**, replaced
+  by the module constants **`sadda.__version__`** (str) and
+  **`sadda.SCHEMA_VERSION`** (int) — they're values, not operations.
 
 ### Fixed
 

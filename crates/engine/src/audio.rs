@@ -80,6 +80,18 @@ impl Audio {
             .map(move |chunk| chunk.iter().sum::<f32>() / channels as f32)
     }
 
+    /// Returns a new single-channel `Audio` whose samples are the mono mixdown
+    /// (multi-channel frames averaged). Already-mono audio is copied unchanged.
+    /// Unlike [`mono_samples`](Self::mono_samples), this yields a full `Audio`
+    /// so the result can flow back into functions that take an `Audio`.
+    pub fn to_mono(&self) -> Audio {
+        Audio {
+            samples: self.mono_samples().collect(),
+            sample_rate: self.sample_rate,
+            channels: 1,
+        }
+    }
+
     /// Reads only a WAV file's header to learn its size without decoding any
     /// samples — cheap regardless of file length. Used to decide, *before*
     /// committing to a full in-memory load, whether a file is large enough to
@@ -197,6 +209,12 @@ mod tests {
 
         let mono: Vec<f32> = audio.mono_samples().collect();
         assert_eq!(mono.len(), audio.frame_count());
+
+        let down = audio.to_mono();
+        assert_eq!(down.channels, 1);
+        assert_eq!(down.sample_rate, audio.sample_rate);
+        assert_eq!(down.frame_count(), audio.frame_count());
+        assert_eq!(down.samples, mono);
 
         let _ = std::fs::remove_file(&path);
     }
