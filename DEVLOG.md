@@ -6,6 +6,40 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-06-29 — Preset registry polish: GUI save/delete, uniform param shapes, generalized schema
+
+Three loose ends from the preset work, after an honest audit found them:
+
+- **GUI save/delete user presets.** The GUI exposed only the registry *read*
+  side (pickers + param editors); creating a named user preset was Python-only.
+  Added a shared "Save current as preset…" dialog (id + title, surfaces
+  invalid-id / built-in-collision errors) and a "Delete \"<id>\"" affordance —
+  shown only for user presets (built-in ids gated in-memory) — wired into all
+  three lane submenus (MFCC / f0 / Formants) via one `PresetTarget`-dispatched
+  handler. Saving records `based_on` = the preset it was derived from and
+  `faithful = false`; deleting resets the lane to that family's first built-in.
+  Now all three surfaces (engine / Python / GUI) can both read and write presets.
+
+- **Uniform Python param shapes.** `PitchParams` / `FormantsParams` only had a
+  generic `for_method(...)`, while `MfccParams` had named per-reference
+  constructors. Parallelized them: added `PitchParams.boersma/yin/pyin/swipe`
+  and `FormantsParams.burg/autocorrelation` (taking each family's common
+  analysis args with defaults, parallel to `MfccParams.librosa/kaldi/praat`),
+  and gave `MfccParams` a matching `for_method`. All three now expose the
+  identical surface — `for_method` + named constructors + `.replace(...)` +
+  getters + `to_toml` — verified equivalent by test.
+
+- **Generalized `preset-registry/SCHEMA.md`** from MFCC-only to all three
+  domains: a shared top-level-fields section + per-domain `[params]` sections
+  (MFCC / pitch `method`+`[params.config]` / formant) + a domain table.
+
+Validation: engine 230 + app 116 tests, Python 31 preset tests green; no stub
+drift; `fmt`/`clippy` clean; app boots cleanly. Remaining preset items are the
+intentional backlog (f64 pipeline → faithful Praat preset; `htk()` preset;
+real-Kaldi golden; the DSP-parameter-effects design session).
+
+---
+
 ## 2026-06-29 — Formant presets (three surfaces) — item 6 complete
 
 Closed out roadmap item 6 by adding **formant** presets, the lightest domain:
