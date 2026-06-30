@@ -16,7 +16,9 @@ Status: `[ ]` open · `[~]` in progress · `[x]` done (move to DEVLOG when shipp
 
 _Raw captures land here; groomed into the sections below on request._
 
-- [ ] **Keyboard focus-shifting between panes** (deferred from home-row keymap PR) — `Shift+↑/↓` cycle a 3-layer stack: Signal window → Annotation tiers → Python console. Needs a custom `active_pane` + focus ring (egui focus is per-widget; only the console has a real text widget). Open Qs: how to leave the console (reserve `Shift+↑/↓` globally vs Esc) and scope (light = ring + console focus vs full = route shortcuts per pane). — _added 2026-06-20_
+- [ ] **UI miscellany (next round)** — aggregator for small UI tweaks to batch together; add sub-bullets as they come up — _added 2026-06-20_
+  <!-- pane focus-shifting + annotation navigation promoted to active work (feat/pane-focus-nav); cursor-at-window-center dropped (start time is fine) -->
+
 - [ ] **Rhythm metrics** — speech rhythm/timing measures (e.g. %V, ΔC/ΔV, VarcoV/VarcoC, nPVI/rPVI) computed over interval tiers — _added 2026-06-05_
 - [ ] Fix table alignment in docs Quickstart → "Query annotations" → `print(df.head())` output — _added 2026-06-04_
 
