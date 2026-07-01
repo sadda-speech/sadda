@@ -74,6 +74,18 @@ alternatives over a single house method where the literature genuinely disagrees
 clean-room reproductions from published descriptions — never ports of proprietary
 scripts. This is for both scientific and licensing clarity.
 
+### 5. Experimental / holdout code never ships
+
+Perf spikes and throwaway experiments are welcome in-tree — but they must not
+compile into the app or wheel. Gate them behind an **off-by-default Cargo
+feature** (we use `spike`) and/or keep them in `benches/` (compiled only by
+`cargo bench`, never linked into the library). A feature-gated module can still
+reach engine internals; a plain default build won't see it. Keep the code green
+"when run" — `just bench` enables `--features spike` and verifies any spike that
+mirrors a production path still matches it. Don't leave experimental code in a
+default-compiled path "temporarily"; if it's worth keeping, gate it, and if it's
+not, delete it (git history is the archive).
+
 ## Filing a good issue
 
 Many contributions start as an issue. A well formed issue lets

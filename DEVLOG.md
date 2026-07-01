@@ -44,6 +44,80 @@ git checkout main && git reset --hard origin/main
 
 If in doubt, the cleanest fix is a fresh `git clone`.
 
+## 2026-07-01 — Compositional-DSP perf spike: what composition actually costs
+
+Follow-on to the in-app-help / signal-flow-explorer design. The open question
+was whether a **unified compositional DSP path** (every lane a chain of
+composable stage elements — enabling break-out of any intermediate for
+annotation, chain editing, custom user functions, and the viz for free) is
+performant enough to be the *production* whole-file path, not just an
+interactive toy. Decided to measure before committing.
+
+**Benchmark infra (new, kept).** Added `divan` (dev-dep) with its
+`AllocProfiler` so benches report bytes-allocated alongside wall time — the
+memory story matters as much as CPU here. `just bench` runs it. The throwaway
+spike code lives behind an **off-by-default `spike` Cargo feature** so it is
+never compiled into the app or wheel (holdout-code convention — see CONTRIBUTING);
+`just bench` passes `--features spike` and verifies compositional == production
+first. Each compositional variant is pinned output-equal to production by a test,
+so every comparison is like-for-like (fast-correct vs fast-correct).
+
+**Method.** Three MFCC implementations (production fused / naive whole-signal
+materialisation / streaming per-frame boxed stages), plus streaming mirrors of
+formants (LPC + root-solving) and pitch autocorrelation. Synthetic harmonic
+signal, 10 / 60 / 300 s @ 16 kHz, release build, 100 samples each.
+
+**Results (median time; peak = `max alloc`):**
+
+| pipeline @300s | production | streaming-comp | naive-comp |
+|---|---|---|---|
+| MFCC time | 191 ms | 188 ms (1.00×) | 265 ms (1.39×) |
+| MFCC peak mem | 25.6 MB | 25.6 MB (1.00×) | 115 MB (4.5×) |
+| formants time | 1.482 s | 1.478 s (1.00×) | — |
+| pitch time (fine-split) | 1.241 s | **4.80 s (3.9×)** | — |
+| pitch time (fused stage) | 1.241 s | 1.249 s (1.00×) | — |
+
+**The refined conclusion — composition's cost is not dispatch.** Dynamic
+dispatch at frame granularity is free: 4 vtable calls per frame are nothing next
+to the per-frame numeric work. The pitch autocorrelation profile *looked* like a
+3.9× counterexample, but isolating it showed the penalty was entirely the
+**decomposition**, not the boundary: a **fused** boxed stage (one `dyn` call per
+frame around the intact hot loop, slice in, no copy) matched production to 1%.
+What cost 3.9× was (a) per-frame heap allocation and (b) **splitting a
+compiler-optimizable hot loop across a stage boundary and materialising its
+intermediate** (the autocorrelation curve), which defeats register/SIMD reuse and
+adds memory traffic.
+
+So the rule:
+
+- Wrap an **opaque heavy kernel** (FFT, LPC, root-solving) in stages → free
+  (MFCC, formants).
+- Wrap a **simple hot numeric loop coarsely** (one dispatch, buffers reused) →
+  free (pitch-fused).
+- **Finely split** that hot loop + **materialise** its intermediate → multiples
+  slower (pitch fine-split 3.9×; the naive whole-signal MFCC's 4.5× memory is the
+  same disease at the whole-signal scale).
+
+**Decision-relevant upshot.** A unified compositional path *is* perf-viable —
+conditional on three concrete constraints, not just "use streaming":
+
+1. Stage boundaries go **around** expensive/opaque kernels, **never through**
+   tight inner loops.
+2. **Reuse buffers** — no per-frame allocation.
+3. Whole-file production must **not materialise per-stage intermediates**.
+
+Note (3) means the "break out every intermediate" desire — the viz/annotation
+dream — *is* the expensive pattern (it's exactly what naive-comp does). Empirical
+case confirmed for keeping break-out / viz on a **short window**, while whole-file
+production fuses. This grounds the earlier two-level granularity idea: fine
+primitives for reuse are fine, but *execution* must keep hot loops fused.
+
+**Still not measured / open:** the streaming-state engineering for globally
+non-streamable stages (Boersma Viterbi, pYIN HMM — the top_db floor was a trivial
+O(N) instance) and the parity re-work of re-establishing librosa/kaldi/praat
+goldens through composed structure (the passing equality tests show the
+decomposition *can* be bit-faithful).
+
 ## 2026-06-30 — Design: in-app help + DSP signal-flow explorer
 
 Design session unifying two backlog items — the general **GUI in-line
