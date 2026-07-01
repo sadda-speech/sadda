@@ -66,6 +66,14 @@ build-release:
 test:
     cargo test --workspace
 
+# Micro-benchmarks (divan), behind the off-by-default `spike` feature so the
+# throwaway spike code never ships. Verifies compositional==production first,
+# then runs the perf bench (fused vs naive-materialised vs streaming), with
+# per-run allocation stats. See DEVLOG.
+bench:
+    cargo test -p sadda-engine --features spike compositional_variants_match_production
+    cargo bench -p sadda-engine --features spike
+
 # The `download` feature (E12, network model fetch) is enabled by no workspace
 # member, so the default --workspace passes don't compile it. Network/ORT-gated
 # tests skip without SADDA_NET_TESTS / ORT_DYLIB_PATH.
