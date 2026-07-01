@@ -1,0 +1,95 @@
+[
+  {
+    "name": "RustFFT",
+    "url": "https://github.com/ejmahler/RustFFT",
+    "used_for": "the fast Fourier transforms behind every spectrogram and MFCC",
+    "license": "MIT OR Apache-2.0",
+    "kind": "cargo",
+    "crate": "rustfft"
+  },
+  {
+    "name": "RealFFT",
+    "url": "https://github.com/HEnquist/realfft",
+    "used_for": "real-valued FFTs, the common case for audio signals",
+    "license": "MIT",
+    "kind": "cargo",
+    "crate": "realfft"
+  },
+  {
+    "name": "ndarray",
+    "url": "https://github.com/rust-ndarray/ndarray",
+    "used_for": "the n-dimensional arrays the DSP runs on",
+    "license": "MIT OR Apache-2.0",
+    "kind": "cargo",
+    "crate": "ndarray"
+  },
+  {
+    "name": "egui",
+    "url": "https://github.com/emilk/egui",
+    "used_for": "the immediate-mode GUI toolkit the desktop app is built with",
+    "license": "MIT OR Apache-2.0",
+    "kind": "cargo",
+    "crate": "egui"
+  },
+  {
+    "name": "PyO3",
+    "url": "https://github.com/PyO3/pyo3",
+    "used_for": "the Rust-to-Python bridge behind the sadda package",
+    "license": "MIT OR Apache-2.0",
+    "kind": "cargo",
+    "crate": "pyo3"
+  },
+  {
+    "name": "hound",
+    "url": "https://github.com/ruuda/hound",
+    "used_for": "reading and writing WAV files",
+    "license": "Apache-2.0",
+    "kind": "cargo",
+    "crate": "hound"
+  },
+  {
+    "name": "Apache Arrow",
+    "url": "https://github.com/apache/arrow-rs",
+    "used_for": "the columnar data behind annotation import and export",
+    "license": "Apache-2.0",
+    "kind": "cargo",
+    "crate": "arrow"
+  },
+  {
+    "name": "rusqlite",
+    "url": "https://github.com/rusqlite/rusqlite",
+    "used_for": "the on-disk annotation corpus (SQLite)",
+    "license": "MIT",
+    "kind": "cargo",
+    "crate": "rusqlite"
+  },
+  {
+    "name": "CPAL",
+    "url": "https://github.com/RustAudio/cpal",
+    "used_for": "cross-platform audio capture and playback",
+    "license": "Apache-2.0",
+    "kind": "cargo",
+    "crate": "cpal"
+  },
+  {
+    "name": "ONNX Runtime",
+    "url": "https://github.com/microsoft/onnxruntime",
+    "used_for": "on-device ML inference for the VAD and embedding lanes",
+    "license": "MIT",
+    "kind": "bundled"
+  },
+  {
+    "name": "Silero VAD",
+    "url": "https://github.com/snakers4/silero-vad",
+    "used_for": "the voice-activity-detection model",
+    "license": "MIT",
+    "kind": "bundled"
+  },
+  {
+    "name": "Material for MkDocs",
+    "url": "https://github.com/squidfunk/mkdocs-material",
+    "used_for": "the theme this documentation site is built with",
+    "license": "MIT",
+    "kind": "tool"
+  }
+]
