@@ -44,6 +44,94 @@ git checkout main && git reset --hard origin/main
 
 If in doubt, the cleanest fix is a fresh `git clone`.
 
+## 2026-06-30 — Design: in-app help + DSP signal-flow explorer
+
+Design session unifying two backlog items — the general **GUI in-line
+help/information system** (2026-06-28) and **communicating DSP parameter/method
+choices** (2026-06-29). Decision: unify them at the *delivery* and *content-model*
+layers, but not force a single content shape; the DSP tier gets a bespoke,
+richer affordance on top.
+
+**Standard problem.** This is *embedded / contextual in-product help* (tooltips,
+info affordances, a contextual help panel, progressive disclosure). The DSP case
+adds *scientific parameter documentation* (the numpydoc "Parameters + References
++ Notes" tradition) plus, in its ambitious form, an *explorable explanation* /
+*signal-flow visualization*.
+
+**Prior art surveyed.** Ableton Live's "Info View" (a fixed panel describing
+whatever the cursor is over — zero-click, always-on) and jamovi / JASP
+(contextual help panels in a scientific GUI) for the general layer; Praat's
+per-dialog "Help → manual page" as the cautionary heavyweight (help as a
+*destination*, not inline); numpydoc / scikit-learn as the gold standard for
+*content* of scientific param docs; Bret-Victor-style reactive documents and the
+interactive-FFT explainer genre for the visualizer. No production audio tool ships
+an interactive stage-by-stage DSP explorer — this would be a genuine
+differentiator, but built not borrowed.
+
+**Decisions (four forks):**
+
+1. **Two-tier content, unified only at delivery.** *Tier A (DSP params/methods):*
+   engine-owned **structured descriptors** (label, units, valid range, default,
+   effect-text, citation, and an `affects: [stages]` field) as the single source
+   of truth, generated into Python docstrings + GUI tooltips/Info + a docs table.
+   This satisfies the *three-surface* and *methods-cite-their-sources* house rules
+   structurally rather than by discipline. *Tier B (general UI):* a lightweight
+   GUI-side help-string catalog keyed by widget — freeform prose, no registry
+   machinery (which would be over-engineering for one-liners). Rejected a single
+   unified registry for everything as premature convergence; the honest shared
+   thing is the delivery surface, not the content shape.
+2. **DSP delivery = a staged signal-flow explorer.** A "visualize" toggle in the
+   parameter window reveals the DSP chain as a **column of stages**, each showing
+   its intermediate representation; changing a parameter re-renders **only the
+   stages downstream of where it acts**. (User's concept; it fits Tier A exactly —
+   see synergy below.)
+3. **Full staged column, committed, phased** (not the cheaper final-output-only
+   preview — see path-not-taken).
+4. **MFCC first** — the longest, most linear, most teachable chain, and its
+   stages are already factored in the engine.
+
+**Architecture / key points:**
+
+- **The param→stage map *is* the content model.** "Only affected stages update"
+  requires each parameter to declare which stage(s) it drives — that's the
+  descriptor's `affects` field. The reactive behavior falls out of Tier A; the
+  two decisions reinforce.
+- **Engine needs a "traced" compute path** emitting intermediates, not just the
+  final matrix. `mfcc_with_params` (`crates/engine/src/dsp/mfcc.rs:1015`) is
+  currently monolithic, but the stages are already factored into `stft.rs`,
+  `windowing.rs`, `spectrogram.rs`, `mel_filterbank_general`, `build_dct` — so
+  this is bounded plumbing to capture intermediates, not a math rewrite.
+- **Three-surface, not GUI-only.** Once the engine emits `{framed, windowed,
+  power_spectrum, mel, log_mel, cepstrum}`, Python/notebook users get the same
+  staged arrays — real value lands in Phase 2, before any GUI visualizer exists.
+- **Perf (house rule #2).** Visualize a **short window** (a few frames around the
+  playhead/selection), not the whole file, and recompute only downstream of the
+  changed stage. Live-running the full pipeline on a multi-hour file per slider
+  tick would violate our own latency rule.
+
+**Phasing (each phase stands alone and ships):**
+
+- **P1 — descriptors (content).** Engine-owned structured descriptors →
+  generated Python docstrings + GUI tooltips/Info text + docs table, plus the
+  Tier-B UI catalog. Ships help *everywhere*, cheaply.
+- **P2 — traced engine compute.** Intermediates API, exposed engine + Python
+  (notebook value lands here).
+- **P3 — GUI signal-flow column.** The "visualize" toggle, per-stage rendering,
+  reactive downstream-only updates driven by P1's `affects` map, short-window,
+  MFCC first.
+
+**Path not taken / disconfirmer.** A live **final-output preview** (drag a param,
+watch the final MFCC/pitch/formant plot re-render, no intermediate stages) would
+give most of the "what does this do" value for a fraction of the work. We chose
+the staged depth as the scientific-instrument differentiator and because the
+primary user is deepening method understanding (dogfooding). Disconfirmer: if in
+practice users only want "is my output better," the stage column is teaching
+luxury and P3 should collapse back to a final-output preview.
+
+*Open for the next session:* the exact descriptor schema (fields + Rust type),
+the canonical MFCC stage list and how each stage renders, and the reactive
+recompute structure. Backlog items 2026-06-28 / 2026-06-29 remain the trackers.
+
 ## 2026-06-29 — Preset registry polish: GUI save/delete, uniform param shapes, generalized schema
 
 Three loose ends from the preset work, after an honest audit found them:
