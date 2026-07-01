@@ -18,10 +18,14 @@ the tool's role; only the authorship credit was removed.
 
 **Scope / consequences:**
 
-- Every commit hash on `main` changed. All 9 tags — including the published
-  releases `v0.3.0` … `v0.5.0-app` — were force-moved to their rewritten commits.
-  GitHub Release artifacts and the PyPI wheels are unaffected in content (PyPI is
-  not git-linked); only the tag→commit hashes changed.
+- Every commit hash on `main` (and the active feature branches) changed. The 9
+  tags — the published releases `v0.3.0` … `v0.5.0-app` and earlier — were **left
+  pointing at their original, pre-rewrite commits**: those tags are protected from
+  updates, and moving them isn't necessary anyway, because GitHub's Contributors
+  graph is computed from the **default branch** — trailers on commits that are no
+  longer on `main` don't count. Consequence: each release tag references a commit
+  that is off `main`'s new line but byte-identical in content. GitHub Releases and
+  the PyPI wheels are unaffected.
 - The rewrite was content-preserving: every rewritten tree is byte-identical to
   its original (only commit messages changed), verified before pushing.
 - Open PR branches were rewritten in the same pass so they stayed valid.
