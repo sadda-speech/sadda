@@ -6,6 +6,40 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-01 — Git history rewrite: removed AI co-author trailers
+
+Rewrote the **entire commit history** to strip the `Co-Authored-By: Claude …`
+trailers that had been appended to commits (181 of 187). Rationale: Claude Code
+is a development *tool*, not a project contributor — like Vim, a compiler, or a
+browser, tools aren't credited as authors. The trailers had surfaced Claude in
+GitHub's Contributors list (~183 commits). The README **"AI and human
+acknowledgement"** section remains the appropriate, deliberate acknowledgement of
+the tool's role; only the authorship credit was removed.
+
+**Scope / consequences:**
+
+- Every commit hash on `main` changed. All 9 tags — including the published
+  releases `v0.3.0` … `v0.5.0-app` — were force-moved to their rewritten commits.
+  GitHub Release artifacts and the PyPI wheels are unaffected in content (PyPI is
+  not git-linked); only the tag→commit hashes changed.
+- The rewrite was content-preserving: every rewritten tree is byte-identical to
+  its original (only commit messages changed), verified before pushing.
+- Open PR branches were rewritten in the same pass so they stayed valid.
+- Going forward, commits in this repo do **not** carry AI co-author trailers.
+
+**⚠️ If you have an existing clone (another machine, a fork, an old checkout):**
+the old and new histories cannot be reconciled by a normal `pull` (it will try to
+merge two unrelated lines). Reset each checkout to the rewritten history:
+
+```sh
+git fetch origin
+git checkout main && git reset --hard origin/main
+# repeat the reset for any feature branch you had checked out,
+# or simply delete local branches and re-create them from origin.
+```
+
+If in doubt, the cleanest fix is a fresh `git clone`.
+
 ## 2026-06-29 — Preset registry polish: GUI save/delete, uniform param shapes, generalized schema
 
 Three loose ends from the preset work, after an honest audit found them:
