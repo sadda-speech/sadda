@@ -1,0 +1,40 @@
+/*
+ * Open-source thank-you strip (overrides/main.html + assets/js/oss-thanks.js).
+ * Uses Material's CSS custom properties so it tracks the light/dark palette.
+ */
+.oss-thanks {
+  border-top: 1px solid var(--md-default-fg-color--lightest);
+  background-color: var(--md-footer-bg-color--dark, var(--md-footer-bg-color));
+  color: var(--md-footer-fg-color--light);
+  font-size: 0.66rem;
+  line-height: 1.5;
+}
+
+.oss-thanks__inner {
+  margin: 0 auto;
+  max-width: 61rem;
+  padding: 0.6rem 0.8rem;
+  text-align: center;
+}
+
+.oss-thanks__lead {
+  font-weight: 700;
+  margin-right: 0.3em;
+}
+
+.oss-thanks__tail {
+  display: block;
+  margin-top: 0.15rem;
+  opacity: 0.75;
+}
+
+.oss-thanks a {
+  color: var(--md-footer-fg-color);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+.oss-thanks a:hover,
+.oss-thanks a:focus {
+  color: var(--md-accent-fg-color);
+}

@@ -8,6 +8,9 @@ copyright: Copyright &copy; Daniel Brenner. Dual-licensed under Apache 2.0 OR MI
 
 theme:
   name: material
+  # Theme overrides (relative to this config file). overrides/main.html appends
+  # the rotating open-source thank-you strip below the standard footer.
+  custom_dir: overrides
   logo: assets/logo.png
   favicon: assets/favicon.png
   features:
@@ -41,6 +44,14 @@ theme:
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
+
+# Rotating open-source thank-you strip in the footer. The JS picks one project
+# from assets/credits.json per page load; assets/css styles the strip. See the
+# 2026-06-30 banner design in BACKLOG / DEVLOG.
+extra_css:
+  - assets/css/oss-thanks.css
+extra_javascript:
+  - assets/js/oss-thanks.js
 
 plugins:
   - search
