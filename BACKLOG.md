@@ -25,6 +25,7 @@ _Raw captures land here; groomed into the sections below on request._
 - [ ] **Live display mode (no recording)** — monitor/demo a running signal live without creating bundles or writing files (transient scope/spectrogram/lane view). — _added 2026-06-29_
 - [ ] **UI miscellany (next round)** — aggregator for small UI tweaks to batch together; add sub-bullets as they come up — _added 2026-06-20_
   <!-- pane focus-shifting + annotation navigation promoted to active work (feat/pane-focus-nav); cursor-at-window-center dropped (start time is fine) -->
+- [ ] **Docs site: rotating "thank-you" banner for upstream OSS** — on home (or any) page load, spotlight one open-source project sadda draws from, celebrating OSS generosity + noting sadda pays it forward with equally open licensing; careful not to imply those projects endorse/agree with sadda. — _added 2026-06-30_
 
 - [ ] **Rhythm metrics** — speech rhythm/timing measures (e.g. %V, ΔC/ΔV, VarcoV/VarcoC, nPVI/rPVI) computed over interval tiers — _added 2026-06-05_
 - [ ] Fix table alignment in docs Quickstart → "Query annotations" → `print(df.head())` output — _added 2026-06-04_

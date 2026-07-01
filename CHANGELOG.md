@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-30
+
 ### Added
 
 - **Export / import annotations as CSV or JSON.** A bundle's sparse annotations
