@@ -125,6 +125,14 @@ up.
    broken commit can't reach `main`, which is exactly the point.
 6. A maintainer reviews, you iterate if needed, and in it goes. 🎉
 
+**Keep your branch merge-commit-free.** `main` enforces a linear history, so PRs
+land by squash or rebase, not a merge commit. When your branch falls behind,
+**rebase it onto `main`** (`git rebase main`) rather than merging `main` into it
+(`git merge main`). Merging `main` in bakes a merge commit into your branch,
+which then blocks GitHub's rebase-merge option — leaving squash as the only way
+in, so a branch with a carefully staged commit series gets flattened to one.
+Rebasing keeps that history landable and `main` clean.
+
 ## Recognition
 
 If you land significant contributions, we'd love to register you with the team
