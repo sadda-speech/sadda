@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{#-
+  Open-source thank-you strip. Appends a small credit line below the standard
+  Material footer. `assets/js/oss-thanks.js` replaces the body text with one
+  randomly-chosen project from `assets/credits.json` per page load; the static
+  text below is the no-JS fallback, so the strip degrades gracefully.
+
+  Tone: this is *sadda's* gratitude, not an endorsement by the named project.
+  Names + links only (no logos), each with its license, and a note that sadda
+  is open-source in turn.
+-#}
+{% block footer %}
+  {{ super() }}
+  <aside class="oss-thanks" aria-label="Open-source acknowledgement">
+    <div class="oss-thanks__inner">
+      <span class="oss-thanks__lead">Built with open source.</span>
+      <span class="oss-thanks__body" id="oss-thanks-body">
+        sadda stands on the work of many open-source projects — thank you to
+        their maintainers and communities.
+      </span>
+      <span class="oss-thanks__tail">
+        sadda pays it forward: open-source under Apache-2.0 or MIT.
+      </span>
+    </div>
+  </aside>
+{% endblock %}
