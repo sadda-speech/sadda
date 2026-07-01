@@ -1154,6 +1154,414 @@ pub fn mfcc_with_params(samples: &[f32], sample_rate: u32, p: &MfccParams) -> Ar
     out
 }
 
+/// **Spike scaffolding (throwaway — not public API).** Compositional
+/// re-implementations of [`mfcc_with_params`], used only to benchmark the perf
+/// cost of a composable DSP pipeline against the hand-fused production loop.
+/// Output-equality with production is pinned by the tests below so the
+/// comparison stays honest. See the compositional-DSP design + benchmark thread
+/// in DEVLOG. Gated behind the off-by-default `spike` feature, so it is never
+/// compiled into the app or wheel — only `just bench` turns it on.
+#[cfg(feature = "spike")]
+#[doc(hidden)]
+pub mod spike {
+    use super::*;
+    use std::f32::consts::TAU;
+
+    /// Shared per-call setup — identical to `mfcc_with_params`' preamble.
+    struct Prep<'a> {
+        src: std::borrow::Cow<'a, [f32]>,
+        n_frames: usize,
+        win: usize,
+        hop: usize,
+        nfft: usize,
+        n_freq: usize,
+        window: Vec<f32>,
+        mel_fb: Vec<f32>,
+        num_filters: usize,
+        n_out: usize,
+        dct: Vec<f32>,
+        lifter: Vec<f32>,
+        power_scale: f32,
+    }
+
+    fn prep<'a>(samples: &'a [f32], sample_rate: u32, p: &MfccParams) -> Option<Prep<'a>> {
+        assert!(sample_rate > 0 && p.n_mfcc > 0 && p.f_max > p.f_min);
+        let sr = sample_rate as f32;
+        let win = (p.frame_size_seconds * p.window_duration_factor * sr).round() as usize;
+        let hop = (p.hop_seconds * sr).round() as usize;
+        if win == 0 || hop == 0 || samples.is_empty() {
+            return None;
+        }
+        let nfft = match p.fft {
+            MfccFft::WindowLength => win,
+            MfccFft::NextPow2 => win.next_power_of_two(),
+        };
+        let n_freq = nfft / 2 + 1;
+        let window = match p.window {
+            MfccWindow::PeriodicHann => hann_periodic(win),
+            MfccWindow::Povey => povey_window(win),
+            MfccWindow::PraatGaussian => praat_gaussian_window(win),
+            MfccWindow::Hamming => crate::dsp::windowing::hamming(win),
+        };
+        let (mel_fb, num_filters) = mel_filterbank_general(p, n_freq, nfft, sr);
+        if num_filters == 0 {
+            return None;
+        }
+        let n_out = p.n_mfcc.min(num_filters);
+        let dct = build_dct(p.dct, num_filters, n_out);
+        let lifter: Vec<f32> = (0..n_out)
+            .map(|i| {
+                if p.lifter > 0.0 {
+                    1.0 + (p.lifter / 2.0) * (std::f32::consts::PI * i as f32 / p.lifter).sin()
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        let power_scale = match p.power_norm {
+            MfccPowerNorm::Raw => 1.0,
+            MfccPowerNorm::PraatDuration => 2.0 / (nfft as f32 * win as f32),
+        };
+        let (src, n_frames): (std::borrow::Cow<[f32]>, usize) = match p.framing {
+            MfccFraming::Centered => {
+                let pad = win / 2;
+                let nf = 1 + samples.len() / hop;
+                let padded_len = ((nf - 1) * hop + win).max(samples.len() + 2 * pad);
+                let mut padded = vec![0.0_f32; padded_len];
+                padded[pad..pad + samples.len()].copy_from_slice(samples);
+                (std::borrow::Cow::Owned(padded), nf)
+            }
+            MfccFraming::SnipEdges => {
+                if samples.len() < win {
+                    return None;
+                }
+                (
+                    std::borrow::Cow::Borrowed(samples),
+                    1 + (samples.len() - win) / hop,
+                )
+            }
+        };
+        Some(Prep {
+            src,
+            n_frames,
+            win,
+            hop,
+            nfft,
+            n_freq,
+            window,
+            mel_fb,
+            num_filters,
+            n_out,
+            dct,
+            lifter,
+            power_scale,
+        })
+    }
+
+    fn preprocess_frame(frame: &mut [f32], p: &MfccParams) {
+        let win = frame.len();
+        if p.remove_dc {
+            let mean = frame.iter().sum::<f32>() / win as f32;
+            for s in frame.iter_mut() {
+                *s -= mean;
+            }
+        }
+        if p.pre_emphasis > 0.0 {
+            let a = p.pre_emphasis;
+            for i in (1..win).rev() {
+                frame[i] -= a * frame[i - 1];
+            }
+            frame[0] -= a * frame[0];
+        }
+    }
+
+    fn log_of(e: f32, p: &MfccParams) -> f32 {
+        match p.log {
+            MfccLog::Db {
+                reference, amin, ..
+            } => 10.0 * (e.max(amin) / reference).log10(),
+            MfccLog::NaturalLn { floor } => e.max(floor).ln(),
+        }
+    }
+
+    fn apply_top_db(grid: &mut [f32], gmax: f32, p: &MfccParams) {
+        if let MfccLog::Db {
+            top_db: Some(td), ..
+        } = p.log
+        {
+            let floor = gmax - td;
+            for v in grid.iter_mut() {
+                if *v < floor {
+                    *v = floor;
+                }
+            }
+        }
+    }
+
+    /// DCT + lifter over the finished log-mel grid — identical across variants
+    /// (production has this loop too), so it's the fair shared tail.
+    fn finish_grid_to_out(grid: &[f32], pr: &Prep, p: &MfccParams) -> Array2<f32> {
+        let (n_frames, num_filters, n_out) = (pr.n_frames, pr.num_filters, pr.n_out);
+        let mut out = Array2::<f32>::zeros((n_frames, p.n_mfcc));
+        for f in 0..n_frames {
+            for c in 0..n_out {
+                let mut acc = 0.0_f32;
+                for m in 0..num_filters {
+                    acc += grid[f * num_filters + m] * pr.dct[c * num_filters + m];
+                }
+                out[[f, c]] = acc * pr.lifter[c];
+            }
+        }
+        out
+    }
+
+    /// **Variant 1 — naive whole-signal composition.** Each stage runs over the
+    /// *entire* signal and materialises its full intermediate before the next
+    /// begins. Charitable: each intermediate is dropped once consumed (best-case
+    /// naive — keeping them live for break-out/annotation costs strictly more).
+    /// This is the "materialise everything" model the production per-frame loop
+    /// avoids.
+    pub fn naive_compositional(samples: &[f32], sample_rate: u32, p: &MfccParams) -> Array2<f32> {
+        let Some(pr) = prep(samples, sample_rate, p) else {
+            return Array2::zeros((0, p.n_mfcc));
+        };
+        let (win, hop, n_frames, n_freq, num_filters) =
+            (pr.win, pr.hop, pr.n_frames, pr.n_freq, pr.num_filters);
+
+        // Stage 1: framing → full N×win matrix.
+        let mut frames = vec![0.0_f32; n_frames * win];
+        for f in 0..n_frames {
+            let start = f * hop;
+            frames[f * win..f * win + win].copy_from_slice(&pr.src[start..start + win]);
+        }
+        // Stage 2: per-frame preprocess, in place on the full matrix.
+        for f in 0..n_frames {
+            preprocess_frame(&mut frames[f * win..f * win + win], p);
+        }
+        // Stage 3: windowing → full N×win matrix.
+        let mut windowed = vec![0.0_f32; n_frames * win];
+        for f in 0..n_frames {
+            for i in 0..win {
+                windowed[f * win + i] = frames[f * win + i] * pr.window[i];
+            }
+        }
+        drop(frames);
+        // Stage 4: power spectrum → full N×n_freq matrix.
+        let mut planner = RealFftPlanner::<f32>::new();
+        let plan = planner.plan_fft_forward(pr.nfft);
+        let mut fft_in = plan.make_input_vec();
+        let mut fft_out = plan.make_output_vec();
+        let mut powers = vec![0.0_f32; n_frames * n_freq];
+        for f in 0..n_frames {
+            for d in fft_in[win..].iter_mut() {
+                *d = 0.0;
+            }
+            fft_in[..win].copy_from_slice(&windowed[f * win..f * win + win]);
+            plan.process(&mut fft_in, &mut fft_out)
+                .expect("realfft buffers sized via make_*_vec");
+            for (i, c) in fft_out.iter().enumerate() {
+                powers[f * n_freq + i] = (c.re * c.re + c.im * c.im) * pr.power_scale;
+            }
+        }
+        drop(windowed);
+        // Stage 5: mel filterbank + log → full N×num_filters grid.
+        let mut grid = vec![0.0_f32; n_frames * num_filters];
+        let mut gmax = f32::NEG_INFINITY;
+        for f in 0..n_frames {
+            for m in 0..num_filters {
+                let mut e = 0.0_f32;
+                for b in 0..n_freq {
+                    e += powers[f * n_freq + b] * pr.mel_fb[m * n_freq + b];
+                }
+                let v = log_of(e, p);
+                grid[f * num_filters + m] = v;
+                if v > gmax {
+                    gmax = v;
+                }
+            }
+        }
+        drop(powers);
+        // Stage 6: global top_db floor. Stage 7: DCT + lifter.
+        apply_top_db(&mut grid, gmax, p);
+        finish_grid_to_out(&grid, &pr, p)
+    }
+
+    /// A per-frame stage in the streaming pipeline. Boxed as `dyn` so the bench
+    /// pays the real dynamic-dispatch + no-cross-stage-inlining cost a composable
+    /// engine would.
+    trait FrameStage {
+        fn run(&mut self, input: &[f32], output: &mut Vec<f32>);
+    }
+    struct Preprocess {
+        p: MfccParams,
+    }
+    impl FrameStage for Preprocess {
+        fn run(&mut self, input: &[f32], output: &mut Vec<f32>) {
+            output.clear();
+            output.extend_from_slice(input);
+            preprocess_frame(output, &self.p);
+        }
+    }
+    struct Windowing {
+        w: Vec<f32>,
+    }
+    impl FrameStage for Windowing {
+        fn run(&mut self, input: &[f32], output: &mut Vec<f32>) {
+            output.clear();
+            output.extend(input.iter().zip(&self.w).map(|(&s, &w)| s * w));
+        }
+    }
+    struct PowerSpectrum {
+        plan: std::sync::Arc<dyn realfft::RealToComplex<f32>>,
+        fin: Vec<f32>,
+        fout: Vec<realfft::num_complex::Complex<f32>>,
+        power_scale: f32,
+        win: usize,
+    }
+    impl FrameStage for PowerSpectrum {
+        fn run(&mut self, input: &[f32], output: &mut Vec<f32>) {
+            for d in self.fin[self.win..].iter_mut() {
+                *d = 0.0;
+            }
+            self.fin[..self.win].copy_from_slice(input);
+            self.plan
+                .process(&mut self.fin, &mut self.fout)
+                .expect("realfft buffers sized via make_*_vec");
+            output.clear();
+            output.extend(
+                self.fout
+                    .iter()
+                    .map(|c| (c.re * c.re + c.im * c.im) * self.power_scale),
+            );
+        }
+    }
+    struct MelLog {
+        mel_fb: Vec<f32>,
+        num_filters: usize,
+        n_freq: usize,
+        p: MfccParams,
+    }
+    impl FrameStage for MelLog {
+        fn run(&mut self, input: &[f32], output: &mut Vec<f32>) {
+            output.clear();
+            for m in 0..self.num_filters {
+                let mut e = 0.0_f32;
+                for (b, &pw) in input.iter().enumerate() {
+                    e += pw * self.mel_fb[m * self.n_freq + b];
+                }
+                output.push(log_of(e, &self.p));
+            }
+        }
+    }
+
+    /// **Variant 2 — chunked/streaming composition.** One frame at a time
+    /// through a chain of boxed stages (production-like memory: only per-frame
+    /// scratch + the log-mel grid). The `top_db` floor is global, so it forces a
+    /// barrier: collect the grid, floor it, then DCT — the "globally
+    /// non-streamable stage" made concrete.
+    pub fn streaming_compositional(
+        samples: &[f32],
+        sample_rate: u32,
+        p: &MfccParams,
+    ) -> Array2<f32> {
+        let Some(pr) = prep(samples, sample_rate, p) else {
+            return Array2::zeros((0, p.n_mfcc));
+        };
+        let (win, hop, n_frames, num_filters) = (pr.win, pr.hop, pr.n_frames, pr.num_filters);
+
+        let mut planner = RealFftPlanner::<f32>::new();
+        let plan = planner.plan_fft_forward(pr.nfft);
+        let fin = plan.make_input_vec();
+        let fout = plan.make_output_vec();
+        let mut stages: Vec<Box<dyn FrameStage>> = vec![
+            Box::new(Preprocess { p: p.clone() }),
+            Box::new(Windowing {
+                w: pr.window.clone(),
+            }),
+            Box::new(PowerSpectrum {
+                plan,
+                fin,
+                fout,
+                power_scale: pr.power_scale,
+                win,
+            }),
+            Box::new(MelLog {
+                mel_fb: pr.mel_fb.clone(),
+                num_filters,
+                n_freq: pr.n_freq,
+                p: p.clone(),
+            }),
+        ];
+
+        let mut grid = vec![0.0_f32; n_frames * num_filters];
+        let mut gmax = f32::NEG_INFINITY;
+        let mut input: Vec<f32> = vec![0.0; win];
+        let mut output: Vec<f32> = Vec::new();
+        for f in 0..n_frames {
+            let start = f * hop;
+            input.clear();
+            input.extend_from_slice(&pr.src[start..start + win]);
+            for stage in stages.iter_mut() {
+                stage.run(&input, &mut output);
+                std::mem::swap(&mut input, &mut output);
+            }
+            // After an even number of stages the result is back in `input`.
+            for m in 0..num_filters {
+                let v = input[m];
+                grid[f * num_filters + m] = v;
+                if v > gmax {
+                    gmax = v;
+                }
+            }
+        }
+        apply_top_db(&mut grid, gmax, p);
+        finish_grid_to_out(&grid, &pr, p)
+    }
+
+    /// Deterministic synthetic signal (voiced-ish harmonic mix) for benchmarks
+    /// — no RNG, so runs are reproducible.
+    pub fn synth_signal(n: usize, sample_rate: u32) -> Vec<f32> {
+        let sr = sample_rate as f32;
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / sr;
+                0.6 * (TAU * 220.0 * t).sin()
+                    + 0.3 * (TAU * 440.0 * t).sin()
+                    + 0.1 * (TAU * 3000.0 * t).sin()
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn max_abs_diff(a: &Array2<f32>, b: &Array2<f32>) -> f32 {
+            assert_eq!(a.dim(), b.dim());
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0, f32::max)
+        }
+
+        #[test]
+        fn compositional_variants_match_production() {
+            let p = MfccParams::librosa(0.025, 0.010, 40, 13, 0.0, 8000.0);
+            let sig = synth_signal(16_000, 16_000); // 1 s @ 16 kHz
+            let prod = mfcc_with_params(&sig, 16_000, &p);
+            let naive = naive_compositional(&sig, 16_000, &p);
+            let stream = streaming_compositional(&sig, 16_000, &p);
+            let dn = max_abs_diff(&prod, &naive);
+            let ds = max_abs_diff(&prod, &stream);
+            assert!(dn < 1e-3, "naive diverges from production: max|Δ| = {dn}");
+            assert!(
+                ds < 1e-3,
+                "streaming diverges from production: max|Δ| = {ds}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
