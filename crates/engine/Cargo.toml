@@ -22,6 +22,10 @@ ml = ["dep:ort", "dep:libloading"]
 # models to run them) and pulls `ureq` (rustls TLS, fully sync, no async
 # runtime). See the 2026-05-27 E12 network-spike DEVLOG entry.
 download = ["ml", "dep:ureq"]
+# Throwaway perf-spike code (compositional-DSP benchmark in dsp::mfcc::spike +
+# benches/). OFF by default so it is NEVER compiled into the app or wheel;
+# enabled only by `just bench`. Holdout-code convention — see DEVLOG / CONTRIBUTING.
+spike = []
 
 [dependencies]
 # E12 on-demand download (feature = "download"). rustls (ring) TLS, no gzip
@@ -68,3 +72,24 @@ uuid = { version = "1", features = ["v4"] }
 # Windows uses a direct FFI shim inline in corpus.rs (no extra dep).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+# Compositional-DSP perf spike (see DEVLOG). Statistical bench harness with an
+# allocation profiler, so the bench reports bytes-allocated alongside time —
+# which is the whole point (the naive variant's blow-up is a memory story).
+divan = "0.1.21"
+
+[[bench]]
+name = "mfcc_compositional"
+harness = false
+required-features = ["spike"]
+
+[[bench]]
+name = "formants_compositional"
+harness = false
+required-features = ["spike"]
+
+[[bench]]
+name = "pitch_compositional"
+harness = false
+required-features = ["spike"]

@@ -210,6 +210,214 @@ pub fn formants(samples: &[f32], sample_rate: u32, config: &FormantsConfig) -> V
 #[allow(dead_code)]
 const _PI_F32_TOUCH: f32 = PI_F32; // silence unused-import lint without an explicit unused
 
+/// **Spike scaffolding (throwaway — `spike` feature only).** A streaming/boxed
+/// compositional mirror of [`formants`], to check whether the "streaming
+/// composition is free" result from the MFCC spike generalises to an
+/// LPC + root-solving per-frame profile (no FFT). Output-equality with
+/// production is pinned by the test below. See the compositional-DSP thread in
+/// DEVLOG.
+#[cfg(feature = "spike")]
+#[doc(hidden)]
+pub mod spike {
+    use super::*;
+
+    struct Prep {
+        frame_size: usize,
+        hop_size: usize,
+        lpc_order: usize,
+        window: Vec<f32>,
+        half_frame_seconds: f64,
+        max_frequency: f32,
+        n_frames: usize,
+    }
+
+    fn prep(samples: &[f32], sample_rate: u32, config: &FormantsConfig) -> Option<Prep> {
+        let frame_size = (config.frame_size_seconds * sample_rate as f32).round() as usize;
+        let hop_size = (config.hop_seconds * sample_rate as f32).round() as usize;
+        let lpc_order = config.lpc_order.unwrap_or(2 * config.n_formants + 2);
+        if frame_size == 0 || hop_size == 0 || samples.len() < frame_size || lpc_order >= frame_size
+        {
+            return None;
+        }
+        let window = hann(frame_size);
+        let half_frame_seconds = frame_size as f64 / (2.0 * sample_rate as f64);
+        let max_frequency = sample_rate as f32 / 2.0 - 50.0;
+        let n_frames = (samples.len() - frame_size) / hop_size + 1;
+        Some(Prep {
+            frame_size,
+            hop_size,
+            lpc_order,
+            window,
+            half_frame_seconds,
+            max_frequency,
+            n_frames,
+        })
+    }
+
+    /// Tagged intermediate representation — the heterogeneous carrier a real
+    /// compositional engine needs (samples → complex roots → …). Modelling it
+    /// as an enum is the honest cost of a composable DSP boundary.
+    enum FVal {
+        Samples(Vec<f32>),
+        Roots(Vec<(f64, f64)>),
+    }
+    trait Stage {
+        fn run(&mut self, v: FVal) -> FVal;
+    }
+
+    struct PreEmphWindow {
+        pre: f32,
+        window: Vec<f32>,
+    }
+    impl Stage for PreEmphWindow {
+        fn run(&mut self, v: FVal) -> FVal {
+            let FVal::Samples(raw) = v else {
+                return v;
+            };
+            let n = raw.len();
+            let mut b = vec![0.0f32; n];
+            if self.pre != 0.0 {
+                b[0] = raw[0];
+                for i in 1..n {
+                    b[i] = raw[i] - self.pre * raw[i - 1];
+                }
+            } else {
+                b.copy_from_slice(&raw);
+            }
+            for (x, w) in b.iter_mut().zip(self.window.iter()) {
+                *x *= *w;
+            }
+            FVal::Samples(b)
+        }
+    }
+
+    struct LpcRoots {
+        order: usize,
+        method: LpcMethod,
+    }
+    impl Stage for LpcRoots {
+        fn run(&mut self, v: FVal) -> FVal {
+            let FVal::Samples(frame) = v else {
+                return v;
+            };
+            let Ok(res) = lpc(&frame, self.order, self.method) else {
+                return FVal::Roots(Vec::new());
+            };
+            let mut ascending = Vec::with_capacity(self.order + 1);
+            for &a in res.coeffs.iter().rev() {
+                ascending.push(a as f64);
+            }
+            ascending.push(1.0);
+            match polynomial_roots(&ascending) {
+                Ok(r) => FVal::Roots(r.iter().map(|z| (z.re, z.im)).collect()),
+                Err(_) => FVal::Roots(Vec::new()),
+            }
+        }
+    }
+
+    /// **Streaming composition** of the formant tracker: one frame at a time
+    /// through boxed `dyn Stage`s (window+pre-emphasis, then LPC→roots), with the
+    /// cheap root→formant pick left inline — exactly as `formants` picks inline,
+    /// so the comparison is fair. Heavy per-frame work (LPC, root-solving) sits
+    /// behind the dynamic-dispatch boundary.
+    pub fn streaming_compositional(
+        samples: &[f32],
+        sample_rate: u32,
+        config: &FormantsConfig,
+    ) -> Vec<FormantFrame> {
+        let Some(pr) = prep(samples, sample_rate, config) else {
+            return Vec::new();
+        };
+        let mut stages: Vec<Box<dyn Stage>> = vec![
+            Box::new(PreEmphWindow {
+                pre: config.pre_emphasis,
+                window: pr.window.clone(),
+            }),
+            Box::new(LpcRoots {
+                order: pr.lpc_order,
+                method: config.lpc_method,
+            }),
+        ];
+        let sr_f64 = sample_rate as f64;
+        let mut out = Vec::with_capacity(pr.n_frames);
+        for f in 0..pr.n_frames {
+            let start = f * pr.hop_size;
+            let mut v = FVal::Samples(samples[start..start + pr.frame_size].to_vec());
+            for s in stages.iter_mut() {
+                v = s.run(v);
+            }
+            let time_seconds = start as f64 / sr_f64 + pr.half_frame_seconds;
+            let FVal::Roots(pairs) = v else {
+                out.push(FormantFrame {
+                    time_seconds,
+                    frequencies: Vec::new(),
+                    bandwidths: Vec::new(),
+                });
+                continue;
+            };
+            let mut candidates: Vec<(f32, f32)> = Vec::new();
+            for (re, im) in &pairs {
+                let r = (re * re + im * im).sqrt();
+                if r >= 1.0 - 1e-9 {
+                    continue;
+                }
+                let theta = im.atan2(*re);
+                if theta <= 0.0 {
+                    continue;
+                }
+                let freq = (theta * sr_f64 / (2.0 * std::f64::consts::PI)) as f32;
+                let bw = (-r.ln() * sr_f64 / std::f64::consts::PI) as f32;
+                if freq < config.min_frequency_hz
+                    || freq > pr.max_frequency
+                    || bw > config.max_bandwidth_hz
+                {
+                    continue;
+                }
+                candidates.push((freq, bw));
+            }
+            candidates.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            candidates.truncate(config.n_formants);
+            out.push(FormantFrame {
+                time_seconds,
+                frequencies: candidates
+                    .iter()
+                    .map(|(f, _)| crate::units::Hertz::new(*f))
+                    .collect(),
+                bandwidths: candidates
+                    .iter()
+                    .map(|(_, b)| crate::units::Hertz::new(*b))
+                    .collect(),
+            });
+        }
+        out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::dsp::mfcc::spike::synth_signal;
+
+        #[test]
+        fn streaming_matches_production() {
+            let config = FormantsConfig::default();
+            let sig = synth_signal(16_000, 16_000); // 1 s @ 16 kHz
+            let prod = formants(&sig, 16_000, &config);
+            let stream = streaming_compositional(&sig, 16_000, &config);
+            assert_eq!(prod.len(), stream.len(), "frame count differs");
+            for (a, b) in prod.iter().zip(&stream) {
+                assert!((a.time_seconds - b.time_seconds).abs() < 1e-9);
+                assert_eq!(a.frequencies.len(), b.frequencies.len(), "formant count");
+                for (x, y) in a.frequencies.iter().zip(&b.frequencies) {
+                    assert!((x.value() - y.value()).abs() < 1e-3, "freq {x:?} vs {y:?}");
+                }
+                for (x, y) in a.bandwidths.iter().zip(&b.bandwidths) {
+                    assert!((x.value() - y.value()).abs() < 1e-3, "bw {x:?} vs {y:?}");
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
