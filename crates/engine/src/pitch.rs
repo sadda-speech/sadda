@@ -326,6 +326,223 @@ fn best_lag(frame: &[f32], min_lag: usize, max_lag: usize) -> (usize, f32) {
     (best, best_value.max(0.0))
 }
 
+/// **Spike scaffolding (throwaway — `spike` feature only).** A streaming/boxed
+/// compositional mirror of [`autocorrelation`], to check whether "streaming
+/// composition is free" holds for an autocorrelation inner-loop profile
+/// (memory-access-bound `O(frame·lag)`, no FFT, no root-solving). Output-equality
+/// with production is pinned by the test below. See the compositional-DSP thread
+/// in DEVLOG.
+#[cfg(feature = "spike")]
+#[doc(hidden)]
+pub mod spike {
+    use super::*;
+
+    /// Tagged intermediate carrier (samples → autocorrelation curve → detection).
+    enum FVal {
+        Samples(Vec<f32>),
+        Curve { vals: Vec<f32>, r0: f32 },
+        Detected { lag: usize, peak: f32, r0: f32 },
+    }
+    trait Stage {
+        fn run(&mut self, v: FVal) -> FVal;
+    }
+
+    /// Materialise the autocorrelation curve `r(τ)` over `[min_lag, max_lag]`
+    /// (production tracks the max inline; the compositional split produces the
+    /// full curve as an intermediate, then picks).
+    struct Autocorrelate {
+        min_lag: usize,
+        max_lag: usize,
+    }
+    impl Stage for Autocorrelate {
+        fn run(&mut self, v: FVal) -> FVal {
+            let FVal::Samples(frame) = v else {
+                return v;
+            };
+            let max_lag = self.max_lag.min(frame.len().saturating_sub(1));
+            let r0: f32 = frame.iter().map(|x| x * x).sum();
+            let mut vals = Vec::with_capacity((max_lag + 1).saturating_sub(self.min_lag));
+            for lag in self.min_lag..=max_lag {
+                let mut sum = 0.0f32;
+                for i in 0..(frame.len() - lag) {
+                    sum += frame[i] * frame[i + lag];
+                }
+                vals.push(sum);
+            }
+            FVal::Curve { vals, r0 }
+        }
+    }
+    struct PeakPick {
+        min_lag: usize,
+    }
+    impl Stage for PeakPick {
+        fn run(&mut self, v: FVal) -> FVal {
+            let FVal::Curve { vals, r0 } = v else {
+                return v;
+            };
+            // First-wins on ties, mirroring `best_lag`'s `sum > best_value`.
+            let mut best = self.min_lag;
+            let mut best_value = f32::MIN;
+            for (k, &sum) in vals.iter().enumerate() {
+                if sum > best_value {
+                    best_value = sum;
+                    best = self.min_lag + k;
+                }
+            }
+            FVal::Detected {
+                lag: best,
+                peak: best_value.max(0.0),
+                r0,
+            }
+        }
+    }
+
+    /// **Streaming composition** of the naive autocorrelation pitch tracker:
+    /// one frame at a time through boxed `dyn Stage`s (autocorrelate → peak-pick),
+    /// with the cheap frequency/voicing conversion inline.
+    pub fn streaming_compositional(
+        samples: &[f32],
+        sample_rate: u32,
+        config: &PitchConfig,
+    ) -> Vec<PitchFrame> {
+        let sr = sample_rate as f32;
+        let frame_size = (config.frame_size_seconds * sr).round() as usize;
+        let hop_size = (config.hop_size_seconds * sr).round() as usize;
+        let min_lag = (sr / config.max_freq_hz).round() as usize;
+        let max_lag = (sr / config.min_freq_hz).round() as usize;
+        if samples.len() < frame_size || hop_size == 0 || min_lag >= max_lag {
+            return Vec::new();
+        }
+        let mut stages: Vec<Box<dyn Stage>> = vec![
+            Box::new(Autocorrelate { min_lag, max_lag }),
+            Box::new(PeakPick { min_lag }),
+        ];
+        let mut out = Vec::new();
+        let mut start = 0;
+        while start + frame_size <= samples.len() {
+            let mut v = FVal::Samples(samples[start..start + frame_size].to_vec());
+            for s in stages.iter_mut() {
+                v = s.run(v);
+            }
+            let FVal::Detected { lag, peak, r0 } = v else {
+                unreachable!("pipeline ends in Detected")
+            };
+            let voicing = if r0 > 0.0 { peak / r0 } else { 0.0 };
+            let frequency_hz = sr / lag as f32;
+            let time_seconds = (start + frame_size / 2) as f64 / sample_rate as f64;
+            out.push(PitchFrame {
+                time_seconds,
+                frequency_hz: crate::units::Hertz::new(frequency_hz),
+                voicing: voicing.clamp(0.0, 1.0),
+            });
+            start += hop_size;
+        }
+        out
+    }
+
+    /// A coarser boxed stage: the *whole* per-frame detection (autocorrelation +
+    /// peak-pick, the intact hot loop) behind a single `dyn` call, fed a frame
+    /// slice with no per-frame copy and no curve materialisation. Isolates *pure
+    /// dispatch* cost from the decomposition overhead of [`streaming_compositional`].
+    trait FramePitchStage {
+        fn detect(&self, frame: &[f32]) -> (usize, f32, f32);
+    }
+    struct AutocorrPeak {
+        min_lag: usize,
+        max_lag: usize,
+    }
+    impl FramePitchStage for AutocorrPeak {
+        fn detect(&self, frame: &[f32]) -> (usize, f32, f32) {
+            // Byte-for-byte the production `best_lag` + r0, kept fused.
+            let max_lag = self.max_lag.min(frame.len().saturating_sub(1));
+            let r0: f32 = frame.iter().map(|x| x * x).sum();
+            let mut best = self.min_lag;
+            let mut best_value = f32::MIN;
+            for lag in self.min_lag..=max_lag {
+                let mut sum = 0.0f32;
+                for i in 0..(frame.len() - lag) {
+                    sum += frame[i] * frame[i + lag];
+                }
+                if sum > best_value {
+                    best_value = sum;
+                    best = lag;
+                }
+            }
+            (best, best_value.max(0.0), r0)
+        }
+    }
+
+    /// **Fused streaming composition** — one `dyn` call per frame around the
+    /// intact detection loop, no per-frame allocation, no intermediate
+    /// materialisation. The fair "composition done carefully" comparison.
+    pub fn streaming_fused(
+        samples: &[f32],
+        sample_rate: u32,
+        config: &PitchConfig,
+    ) -> Vec<PitchFrame> {
+        let sr = sample_rate as f32;
+        let frame_size = (config.frame_size_seconds * sr).round() as usize;
+        let hop_size = (config.hop_size_seconds * sr).round() as usize;
+        let min_lag = (sr / config.max_freq_hz).round() as usize;
+        let max_lag = (sr / config.min_freq_hz).round() as usize;
+        if samples.len() < frame_size || hop_size == 0 || min_lag >= max_lag {
+            return Vec::new();
+        }
+        let stage: Box<dyn FramePitchStage> = Box::new(AutocorrPeak { min_lag, max_lag });
+        let mut out = Vec::new();
+        let mut start = 0;
+        while start + frame_size <= samples.len() {
+            let (lag, peak, r0) = stage.detect(&samples[start..start + frame_size]);
+            let voicing = if r0 > 0.0 { peak / r0 } else { 0.0 };
+            let frequency_hz = sr / lag as f32;
+            let time_seconds = (start + frame_size / 2) as f64 / sample_rate as f64;
+            out.push(PitchFrame {
+                time_seconds,
+                frequency_hz: crate::units::Hertz::new(frequency_hz),
+                voicing: voicing.clamp(0.0, 1.0),
+            });
+            start += hop_size;
+        }
+        out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::audio::Audio;
+        use crate::dsp::mfcc::spike::synth_signal;
+
+        #[test]
+        fn streaming_matches_production() {
+            let config = PitchConfig::default();
+            let sig = synth_signal(16_000, 16_000); // 1 s @ 16 kHz
+            let audio = Audio {
+                samples: sig.clone(),
+                sample_rate: 16_000,
+                channels: 1,
+            };
+            let prod = autocorrelation(&audio, &config);
+            let stream = streaming_compositional(&sig, 16_000, &config);
+            let fused = streaming_fused(&sig, 16_000, &config);
+            assert_eq!(prod.len(), stream.len(), "frame count differs");
+            assert_eq!(prod.len(), fused.len(), "fused frame count differs");
+            for ((a, b), c) in prod.iter().zip(&stream).zip(&fused) {
+                assert!((a.time_seconds - b.time_seconds).abs() < 1e-9);
+                assert!(
+                    (a.frequency_hz.value() - b.frequency_hz.value()).abs() < 1e-3,
+                    "f0 {:?} vs {:?}",
+                    a.frequency_hz,
+                    b.frequency_hz
+                );
+                assert!((a.voicing - b.voicing).abs() < 1e-6, "voicing");
+                // fused must match production exactly (same fused math).
+                assert!((a.frequency_hz.value() - c.frequency_hz.value()).abs() < 1e-3);
+                assert!((a.voicing - c.voicing).abs() < 1e-6);
+            }
+        }
+    }
+}
+
 /// Estimates f0 by dividing the autocorrelation of the windowed signal by
 /// the autocorrelation of the window itself — the central insight of
 /// Boersma (1993) — and locating the highest peak in the resulting
