@@ -22,6 +22,20 @@ pub enum ThemePref {
     Dark,
 }
 
+impl ThemePref {
+    /// Maps a normalized theme name (`"light"` / `"dark"` / `"system"`) to a
+    /// preference. Used by the `sadda.app.set_theme` / `sadda.doc` scripting
+    /// surface; returns `None` for anything else.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            "system" => Some(Self::System),
+            _ => None,
+        }
+    }
+}
+
 /// State that survives across launches. Eframe's `Storage` hook
 /// serializes this via serde; window size + position are persisted
 /// separately by eframe itself.
@@ -101,6 +115,16 @@ pub struct PersistedState {
     /// the actual params live in `tracks.formant_params`).
     #[serde(default = "default_formant_preset_id")]
     pub formant_preset_id: String,
+    /// S3: visibility of the structural signal subpanes (waveform, spectrogram,
+    /// tier strip), which had no toggle before. Complements the measure-lane
+    /// toggles in `tracks` / `mfcc` / `embedding`. Default: all shown.
+    #[serde(default)]
+    pub panes: SignalPaneVisibility,
+    /// S3: annotation tiers explicitly hidden from the tier strip, by tier id
+    /// (per-tier in/out selection). Stale ids — deleted tiers, or ids from
+    /// another project — are harmless no-ops. Default: empty (all tiers shown).
+    #[serde(default)]
+    pub hidden_tier_ids: std::collections::HashSet<i64>,
 }
 
 fn default_pitch_preset_id() -> String {
@@ -139,6 +163,8 @@ impl Default for PersistedState {
             mfcc: MfccLaneConfig::default(),
             pitch_preset_id: default_pitch_preset_id(),
             formant_preset_id: default_formant_preset_id(),
+            panes: SignalPaneVisibility::default(),
+            hidden_tier_ids: std::collections::HashSet::new(),
         }
     }
 }
@@ -234,6 +260,36 @@ mod tests {
             ..MeasureTrackConfig::default()
         };
         assert!(cfg.any_visible());
+    }
+
+    #[test]
+    fn signal_panes_default_to_all_shown() {
+        let p = SignalPaneVisibility::default();
+        assert!(p.waveform && p.spectrogram && p.tier_strip);
+    }
+
+    #[test]
+    fn persisted_state_without_pane_fields_restores_all_shown() {
+        // Older persisted state predates `panes` / `hidden_tier_ids`. Missing
+        // fields must restore to "everything visible", preserving the old
+        // always-on behaviour rather than blanking the signal column.
+        let s: PersistedState = serde_json::from_str("{}").expect("empty object is valid");
+        assert!(s.panes.waveform && s.panes.spectrogram && s.panes.tier_strip);
+        assert!(s.hidden_tier_ids.is_empty());
+    }
+
+    #[test]
+    fn signal_pane_visibility_survives_a_round_trip() {
+        let p = SignalPaneVisibility {
+            waveform: true,
+            spectrogram: false,
+            tier_strip: true,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SignalPaneVisibility>(&json).unwrap(),
+            p
+        );
     }
 
     #[test]
@@ -552,6 +608,40 @@ impl MeasureTrackConfig {
     /// analysis recompute entirely when every lane is hidden.
     pub fn any_visible(&self) -> bool {
         self.f0_visible || self.formants_visible || self.intensity_visible || self.vad_visible
+    }
+}
+
+/// S3: show/hide state for the three *structural* signal subpanes — waveform,
+/// spectrogram, and the tier strip — which were previously always drawn. The
+/// measure lanes (f0 / formants / intensity / VAD / MFCC / embedding) carry
+/// their own visibility in [`MeasureTrackConfig`] / [`MfccLaneConfig`] /
+/// [`EmbeddingHeatmapConfig`]; this fills the gap so *every* subpane is
+/// togglable — the foundation for named/scripted documentation capture.
+///
+/// Each field defaults to `true` (shown) so existing persisted state that
+/// predates this struct restores with everything visible, matching the old
+/// always-on behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SignalPaneVisibility {
+    #[serde(default = "shown")]
+    pub waveform: bool,
+    #[serde(default = "shown")]
+    pub spectrogram: bool,
+    #[serde(default = "shown")]
+    pub tier_strip: bool,
+}
+
+fn shown() -> bool {
+    true
+}
+
+impl Default for SignalPaneVisibility {
+    fn default() -> Self {
+        Self {
+            waveform: true,
+            spectrogram: true,
+            tier_strip: true,
+        }
     }
 }
 

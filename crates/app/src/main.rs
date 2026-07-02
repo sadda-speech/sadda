@@ -7,7 +7,10 @@
 //! (A1)" for the design rationale and the cut-list for what
 //! deliberately doesn't ship at A1.
 
+mod capture;
 mod debug;
+#[cfg(test)]
+mod doc_render;
 mod playback;
 mod sadda_app;
 mod state;
@@ -34,8 +37,8 @@ use sadda_engine::{VadFrame, vad_bundled};
 
 use crate::playback::{LoopMode, Playback};
 use crate::sadda_app::{
-    AppSnapshot, BundleInfo, ScriptSessionExtras, SelectionInfo, SelectionKind,
-    with_snapshot_active,
+    AppSnapshot, BundleInfo, GuiColumn, ScriptSessionExtras, SelectionInfo, SelectionKind,
+    SignalPaneId, VisibilityAction, with_snapshot_active,
 };
 use crate::state::{
     ColormapKind, EmbeddingHeatmapConfig, EnvelopeCache, MeasureTrackConfig, MfccLaneConfig,
@@ -234,6 +237,127 @@ enum AppState {
     },
 }
 
+/// A named region a documentation capture can target (S4), instead of
+/// hand-drawing a rectangle. Recorded per-frame in `SaddaApp::capture_rects` as
+/// each pane draws, so the "Capture ▸ region" menu lists exactly what's
+/// currently on screen. Composites (`WholeWindow`, `SignalColumn`) span
+/// several panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureTarget {
+    WholeWindow,
+    SignalColumn,
+    Waveform,
+    Spectrogram,
+    F0Lane,
+    FormantLane,
+    IntensityLane,
+    VadLane,
+    MfccLane,
+    EmbeddingLane,
+    TierStrip,
+    BundleSidebar,
+    AnnotationPanel,
+    ReferencePanel,
+}
+
+impl CaptureTarget {
+    /// Menu label / scriptable name for each target.
+    fn label(self) -> &'static str {
+        match self {
+            Self::WholeWindow => "Whole window",
+            Self::SignalColumn => "Signal column",
+            Self::Waveform => "Waveform",
+            Self::Spectrogram => "Spectrogram",
+            Self::F0Lane => "f0 lane",
+            Self::FormantLane => "Formant lane",
+            Self::IntensityLane => "Intensity lane",
+            Self::VadLane => "VAD lane",
+            Self::MfccLane => "MFCC lane",
+            Self::EmbeddingLane => "Embedding lane",
+            Self::TierStrip => "Tier strip",
+            Self::BundleSidebar => "Bundle sidebar",
+            Self::AnnotationPanel => "Annotation panel",
+            Self::ReferencePanel => "Reference panel",
+        }
+    }
+
+    /// Parses a capture-target name (for recipes), case-insensitive with a few
+    /// natural aliases. Test-only: the headless recipe runner is the sole
+    /// consumer (the live named-capture menu uses the enum directly).
+    #[cfg(test)]
+    fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "whole-window" | "window" => Some(Self::WholeWindow),
+            "signal-column" | "signals" | "signal" => Some(Self::SignalColumn),
+            "waveform" | "wave" => Some(Self::Waveform),
+            "spectrogram" | "spec" => Some(Self::Spectrogram),
+            "f0" | "f0-lane" | "pitch" => Some(Self::F0Lane),
+            "formant" | "formants" | "formant-lane" => Some(Self::FormantLane),
+            "intensity" | "intensity-lane" => Some(Self::IntensityLane),
+            "vad" | "vad-lane" => Some(Self::VadLane),
+            "mfcc" | "mfcc-lane" => Some(Self::MfccLane),
+            "embedding" | "embedding-lane" => Some(Self::EmbeddingLane),
+            "tier-strip" | "tiers" | "tier" => Some(Self::TierStrip),
+            "bundle-sidebar" | "bundles" | "sidebar" => Some(Self::BundleSidebar),
+            "annotation" | "annotation-panel" => Some(Self::AnnotationPanel),
+            "reference" | "reference-panel" => Some(Self::ReferencePanel),
+            _ => None,
+        }
+    }
+
+    /// Fixed display order for the capture menu: composites, then top-to-bottom
+    /// down the signal column, then the side columns.
+    const ORDER: [Self; 14] = [
+        Self::WholeWindow,
+        Self::SignalColumn,
+        Self::Waveform,
+        Self::Spectrogram,
+        Self::F0Lane,
+        Self::FormantLane,
+        Self::IntensityLane,
+        Self::VadLane,
+        Self::MfccLane,
+        Self::EmbeddingLane,
+        Self::TierStrip,
+        Self::BundleSidebar,
+        Self::AnnotationPanel,
+        Self::ReferencePanel,
+    ];
+}
+
+/// State of the "capture region → PNG" interaction (strand 2 + S4). A small
+/// state machine driven each frame by [`SaddaApp::handle_region_capture`]: the
+/// user either drags a rectangle (`Selecting` → `AwaitingShot`) or picks a
+/// named region from the menu (`PendingNamed` → `AwaitingShot`). All variants
+/// are cheap `Copy` so we can read the current state and reassign in one pass
+/// without borrow gymnastics.
+#[derive(Clone, Copy, Default)]
+enum RegionCapture {
+    /// Not capturing.
+    #[default]
+    Idle,
+    /// Overlay active. `drag_start` is `None` until the primary button goes
+    /// down; once set, the rubber-band runs from it to the pointer.
+    Selecting { drag_start: Option<egui::Pos2> },
+    /// A named region was picked from the menu. `armed` lets one frame pass
+    /// first so the just-closed menu dropdown stays out of the screenshot; on
+    /// the armed frame we resolve the region's rect and fire.
+    PendingNamed { target: CaptureTarget, armed: bool },
+    /// A region was selected and a screenshot requested; we're waiting for the
+    /// `Event::Screenshot` (delivered the following frame) to crop and save.
+    AwaitingShot { region: egui::Rect },
+}
+
+/// S5: standard window sizes for documentation screenshots (logical points), so
+/// shots share consistent proportions and look. Applied with UI zoom pinned to
+/// 100%; the headless pipeline (S6) additionally fixes the pixel density, making
+/// the output byte-reproducible there. `(width, height, menu label)`.
+const DOC_SIZE_PRESETS: [(f32, f32, &str); 3] = [
+    (1280.0, 800.0, "1280 × 800  (16:10)"),
+    (1600.0, 1000.0, "1600 × 1000  (16:10, large)"),
+    (1024.0, 768.0, "1024 × 768  (4:3)"),
+];
+
 struct SaddaApp {
     app_state: AppState,
     persisted: PersistedState,
@@ -415,6 +539,30 @@ struct SaddaApp {
     /// of the bundle's processing runs + citations, loaded once when
     /// the modal opens.
     provenance: Option<ProvenanceView>,
+    /// Strand 2: in-progress GUI-region screenshot. `Idle` almost always;
+    /// transient while the user is selecting a region to capture. See the
+    /// [`capture`] module and [`Self::handle_region_capture`].
+    region_capture: RegionCapture,
+    /// S4: named-region rect registry from the *last completed* frame, in
+    /// display order — what the "Capture ▸ region" menu lists and what a named
+    /// capture resolves against. Committed from `capture_rects_pending` at the
+    /// end of each `ui`, so the menu (drawn mid-frame) sees a stable snapshot.
+    capture_rects: Vec<(CaptureTarget, egui::Rect)>,
+    /// S4: rects being recorded during the current frame as panes draw. Moved
+    /// into `capture_rects` at the end of the frame.
+    capture_rects_pending: Vec<(CaptureTarget, egui::Rect)>,
+    /// S5: a window resize requested from a script (`sadda.app.set_window_size`)
+    /// that's waiting to be sent as a viewport command. Set when a run drains
+    /// its extras; consumed at the end of the next `ui` (where the egui
+    /// `Context` is in hand). `None` almost always.
+    pending_viewport_size: Option<egui::Vec2>,
+    /// S6.1: per-pane height changes requested from a script
+    /// (`sadda.app.set_pane_height`), waiting to be written into egui's panel
+    /// state at the end of the next `ui`. Empty almost always.
+    pending_pane_heights: Vec<(SignalPaneId, f32)>,
+    /// S6.2: GUI column width changes requested from a script
+    /// (`sadda.app.set_column_width`), applied like `pending_pane_heights`.
+    pending_column_widths: Vec<(GuiColumn, f32)>,
 }
 
 /// A1: a one-shot snapshot of a bundle's provenance timeline and the
@@ -2123,6 +2271,12 @@ impl SaddaApp {
             active_tier_ids: Vec::new(),
             lane_geom: None,
             provenance: None,
+            region_capture: RegionCapture::Idle,
+            capture_rects: Vec::new(),
+            capture_rects_pending: Vec::new(),
+            pending_viewport_size: None,
+            pending_pane_heights: Vec::new(),
+            pending_column_widths: Vec::new(),
         }
     }
 
@@ -5662,6 +5816,7 @@ impl SaddaApp {
     /// commit (Enter / focus loss / status pick / Apply). Reloads its working
     /// copy whenever the selection changes.
     fn annotation_panel(&mut self, ui: &mut egui::Ui) {
+        self.record_capture_rect(CaptureTarget::AnnotationPanel, ui.max_rect());
         ui.add_space(4.0);
         let Some(sel) = self.selected_annotation else {
             self.annotation_inspector.loaded_for = None;
@@ -8886,6 +9041,12 @@ impl eframe::App for SaddaApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // S4: start this frame's named-region rect registry. Panes push their
+        // rects as they draw; committed to `capture_rects` at the end of the
+        // frame. The whole content area is always available as a target.
+        self.capture_rects_pending.clear();
+        self.record_capture_rect(CaptureTarget::WholeWindow, ui.ctx().content_rect());
+
         // `SADDA_DEBUG` aids: egui's hover-debug overlays (widget rects on
         // hover) plus F12 screenshot capture to a PNG we can read back. All
         // no-ops when the env var is unset. See `debug.rs`.
@@ -9448,6 +9609,34 @@ impl eframe::App for SaddaApp {
                 egui::CentralPanel::default().show_inside(ui, |ui| self.bundle_content_pane(ui));
             }
         }
+
+        // S5: apply a script-requested window resize now that the `Context` is
+        // in hand (queued during the last script run).
+        if let Some(size) = self.pending_viewport_size.take() {
+            self.apply_doc_size(ui.ctx(), size);
+        }
+        // S6.1/S6.2: apply script-requested pane heights + column widths (both
+        // need the `Context`).
+        if !self.pending_pane_heights.is_empty() {
+            for (pane, height) in std::mem::take(&mut self.pending_pane_heights) {
+                Self::apply_pane_height(ui.ctx(), pane, height);
+            }
+        }
+        if !self.pending_column_widths.is_empty() {
+            for (col, width) in std::mem::take(&mut self.pending_column_widths) {
+                Self::apply_column_width(ui.ctx(), col, width);
+            }
+        }
+
+        // S4: commit this frame's named-region rects so the capture menu and a
+        // pending named capture (handled just below) resolve against a complete
+        // frame. Done after all panes have drawn, before the capture handler.
+        self.capture_rects = std::mem::take(&mut self.capture_rects_pending);
+
+        // Strand 2: region-capture overlay + screenshot delivery. Runs last so
+        // its foreground overlay sits above every panel and captures pointer
+        // input; a no-op in the common idle case.
+        self.handle_region_capture(ui.ctx());
     }
 }
 
@@ -9463,6 +9652,255 @@ impl SaddaApp {
             }
             ThemePref::Light => ctx.set_visuals(egui::Visuals::light()),
             ThemePref::Dark => ctx.set_visuals(egui::Visuals::dark()),
+        }
+    }
+
+    /// S4: record a named region's rect for this frame (upsert — last write
+    /// wins). Called from the pane draws; committed to `capture_rects` at the
+    /// end of `ui`.
+    fn record_capture_rect(&mut self, target: CaptureTarget, rect: egui::Rect) {
+        self.capture_rects_pending.retain(|(t, _)| *t != target);
+        self.capture_rects_pending.push((target, rect));
+    }
+
+    /// S4: rect for a named target from the last completed frame, if it was
+    /// drawn (a hidden lane / absent panel simply won't be present).
+    fn capture_rect_for(&self, target: CaptureTarget) -> Option<egui::Rect> {
+        self.capture_rects
+            .iter()
+            .find(|(t, _)| *t == target)
+            .map(|(_, r)| *r)
+    }
+
+    /// S5: resize the window to a standard documentation size and pin UI zoom to
+    /// 100%, so screenshots share consistent proportions and look. On the live
+    /// window the absolute pixel count still tracks the monitor's DPI; the
+    /// headless pipeline (S6) fixes the pixel density for byte-reproducible
+    /// output. Shared by the View ▸ Doc size menu and the scripting drain.
+    fn apply_doc_size(&mut self, ctx: &egui::Context, size: egui::Vec2) {
+        self.persisted.ui_scale = 1.0;
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        self.set_info(format!(
+            "Window set to {}×{} (UI zoom 100%) for documentation.",
+            size.x as i32, size.y as i32
+        ));
+    }
+
+    /// Drives the strand-2 region-capture state machine once per frame (called
+    /// at the tail of `ui`). Idle → paints nothing. While `Selecting`, a
+    /// full-screen foreground overlay dims the window, senses the rubber-band
+    /// drag (and blocks click-through), and on release fires a screenshot for
+    /// the chosen rectangle. `AwaitingShot` picks up the delivered framebuffer
+    /// the following frame, crops it, and prompts for a save path.
+    fn handle_region_capture(&mut self, ctx: &egui::Context) {
+        // A dimming veil over the parts of the screen *outside* the selection,
+        // so the region being captured shows through un-dimmed.
+        fn paint_hint(ui: &egui::Ui, screen: egui::Rect) {
+            let p = ui.painter();
+            p.rect_filled(screen, 0.0, egui::Color32::from_black_alpha(110));
+            p.text(
+                screen.center(),
+                egui::Align2::CENTER_CENTER,
+                "Drag to select a region to capture   ·   Esc to cancel",
+                egui::FontId::proportional(16.0),
+                egui::Color32::WHITE,
+            );
+        }
+        fn paint_band(ui: &egui::Ui, screen: egui::Rect, sel_raw: egui::Rect) {
+            let sel = sel_raw.intersect(screen);
+            let p = ui.painter();
+            let veil = egui::Color32::from_black_alpha(110);
+            // Four bands framing the selection (top / bottom / left / right).
+            let bands = [
+                egui::Rect::from_min_max(screen.left_top(), egui::pos2(screen.right(), sel.top())),
+                egui::Rect::from_min_max(
+                    egui::pos2(screen.left(), sel.bottom()),
+                    screen.right_bottom(),
+                ),
+                egui::Rect::from_min_max(
+                    egui::pos2(screen.left(), sel.top()),
+                    egui::pos2(sel.left(), sel.bottom()),
+                ),
+                egui::Rect::from_min_max(
+                    egui::pos2(sel.right(), sel.top()),
+                    egui::pos2(screen.right(), sel.bottom()),
+                ),
+            ];
+            for band in bands {
+                p.rect_filled(band, 0.0, veil);
+            }
+            p.rect_stroke(
+                sel,
+                0.0,
+                egui::Stroke::new(1.5, egui::Color32::WHITE),
+                egui::StrokeKind::Inside,
+            );
+            p.text(
+                egui::pos2(sel.left() + 3.0, sel.top() - 3.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!(
+                    "{} × {}",
+                    sel.width().round() as i32,
+                    sel.height().round() as i32
+                ),
+                egui::FontId::monospace(12.0),
+                egui::Color32::WHITE,
+            );
+        }
+
+        match self.region_capture {
+            RegionCapture::Idle => {}
+
+            RegionCapture::PendingNamed { target, armed } => {
+                if !armed {
+                    // Let this frame pass — the just-closed menu dropdown may
+                    // still be painting — so the captured frame is clean.
+                    self.region_capture = RegionCapture::PendingNamed {
+                        target,
+                        armed: true,
+                    };
+                    ctx.request_repaint();
+                    return;
+                }
+                // Menu is gone; resolve the region (from this frame's committed
+                // registry) and fire, or report if it's no longer on screen.
+                match self.capture_rect_for(target) {
+                    Some(region) => {
+                        self.region_capture = RegionCapture::AwaitingShot { region };
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                            egui::UserData::default(),
+                        ));
+                    }
+                    None => {
+                        self.region_capture = RegionCapture::Idle;
+                        self.set_error(format!(
+                            "Can't capture {:?}: that region isn't currently visible.",
+                            target.label()
+                        ));
+                    }
+                }
+            }
+
+            RegionCapture::AwaitingShot { region } => {
+                let shot = ctx.input(|i| {
+                    i.raw.events.iter().find_map(|e| match e {
+                        egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                        _ => None,
+                    })
+                });
+                match shot {
+                    Some(image) => {
+                        self.region_capture = RegionCapture::Idle;
+                        let ppp = ctx.pixels_per_point();
+                        match capture::crop_region(&image, region, ppp) {
+                            Some(img) => {
+                                // Physical-pixel origin, so the save can echo a
+                                // scriptable `capture(rect=(x,y,w,h))`.
+                                let origin = (
+                                    (region.min.x * ppp).round().max(0.0) as i32,
+                                    (region.min.y * ppp).round().max(0.0) as i32,
+                                );
+                                self.save_region_png(&img, origin);
+                            }
+                            None => self.set_error(
+                                "Capture cancelled: the selected region was empty.".to_string(),
+                            ),
+                        }
+                    }
+                    // Not delivered yet — keep the frames coming until it lands.
+                    None => ctx.request_repaint(),
+                }
+            }
+
+            RegionCapture::Selecting { drag_start } => {
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.region_capture = RegionCapture::Idle;
+                    return;
+                }
+                let screen = ctx.content_rect();
+                let mut fire: Option<egui::Rect> = None;
+                let mut next = RegionCapture::Selecting { drag_start };
+
+                egui::Area::new(egui::Id::new("region_capture_overlay"))
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(screen.left_top())
+                    .show(ctx, |ui| {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                        // Full-screen sensor: captures the drag and blocks
+                        // clicks from reaching the panels beneath.
+                        let resp = ui.allocate_rect(screen, egui::Sense::click_and_drag());
+                        let pointer = resp.interact_pointer_pos().or_else(|| resp.hover_pos());
+
+                        let mut start = drag_start;
+                        if resp.drag_started() {
+                            start = resp.interact_pointer_pos();
+                        }
+
+                        if resp.drag_stopped() {
+                            if let (Some(a), Some(b)) = (start, resp.interact_pointer_pos()) {
+                                let sel = egui::Rect::from_two_pos(a, b);
+                                // Ignore a click or a hair-thin drag.
+                                if sel.width() >= 4.0 && sel.height() >= 4.0 {
+                                    fire = Some(sel);
+                                }
+                            }
+                            next = RegionCapture::Idle;
+                            // If we're about to capture, paint nothing this frame
+                            // so the veil/rubber-band stay out of the screenshot.
+                            if fire.is_none() {
+                                paint_hint(ui, screen);
+                            }
+                        } else {
+                            next = RegionCapture::Selecting { drag_start: start };
+                            match (start, pointer) {
+                                (Some(a), Some(b)) => {
+                                    paint_band(ui, screen, egui::Rect::from_two_pos(a, b))
+                                }
+                                _ => paint_hint(ui, screen),
+                            }
+                        }
+                    });
+
+                if let Some(region) = fire {
+                    self.region_capture = RegionCapture::AwaitingShot { region };
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                        egui::UserData::default(),
+                    ));
+                } else {
+                    self.region_capture = next;
+                }
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// Prompts for a path and writes a captured region as a PNG. Defaults into
+    /// the project's `exports/` dir when a project is open. `origin_px` is the
+    /// crop's top-left in physical pixels, echoed on success so a hand-drawn
+    /// selection can be lifted into a scriptable `capture(rect=(x,y,w,h))`.
+    fn save_region_png(&mut self, img: &image::RgbaImage, origin_px: (i32, i32)) {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Save captured region")
+            .set_file_name("sadda-capture.png")
+            .add_filter("PNG image", &["png"]);
+        if let AppState::ProjectLoaded { root, .. } = &self.app_state {
+            let exports = root.join("exports");
+            let _ = std::fs::create_dir_all(&exports);
+            dialog = dialog.set_directory(&exports);
+        }
+        let Some(path) = dialog.save_file() else {
+            return; // user cancelled the save dialog
+        };
+        match img.save(&path) {
+            Ok(()) => {
+                let (w, h) = img.dimensions();
+                let (x, y) = origin_px;
+                self.set_info(format!(
+                    "Saved {w}×{h}px capture to {}  ·  reproduce with capture(rect=({x}, {y}, {w}, {h}))",
+                    path.display()
+                ));
+            }
+            Err(e) => self.set_error(format!("Failed to save capture: {e}")),
         }
     }
 
@@ -9769,8 +10207,92 @@ impl SaddaApp {
         }
     }
 
+    /// S3b: per-tier in/out checkboxes for the selected bundle. Checked = the
+    /// tier's lane is shown in the strip. This is the counterpart to the
+    /// strip's "Hide tier" context action — and the only place to bring a
+    /// hidden tier back. Visibility is stored per tier id in
+    /// `persisted.hidden_tier_ids`; stale ids from deleted tiers never surface
+    /// here because we only list the bundle's live tiers.
+    fn tiers_submenu(&mut self, ui: &mut egui::Ui) {
+        let (Some(env), AppState::ProjectLoaded { project, .. }) =
+            (&self.active_envelope, &self.app_state)
+        else {
+            ui.label(egui::RichText::new("(select a bundle first)").weak());
+            return;
+        };
+        let tiers = match project.tiers(Some(env.bundle_id)) {
+            Ok(t) => t,
+            Err(e) => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 80, 80),
+                    format!("Failed to list tiers: {e}"),
+                );
+                return;
+            }
+        };
+        if tiers.is_empty() {
+            ui.label(egui::RichText::new("(no tiers in this bundle yet)").weak());
+            return;
+        }
+        for t in &tiers {
+            let mut visible = !self.persisted.hidden_tier_ids.contains(&t.id);
+            if ui
+                .checkbox(&mut visible, truncate_label(&t.name, 24))
+                .changed()
+            {
+                if visible {
+                    self.persisted.hidden_tier_ids.remove(&t.id);
+                } else {
+                    self.persisted.hidden_tier_ids.insert(t.id);
+                }
+            }
+        }
+    }
+
     fn view_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("View", |ui| {
+            // Raster capture for docs/slides — a hand-drawn rectangle (strand 2)
+            // or a named region from the S4 registry.
+            ui.menu_button("Capture image → PNG", |ui| {
+                if ui
+                    .button("Hand-drawn region…")
+                    .on_hover_text("Drag a rectangle over the window")
+                    .clicked()
+                {
+                    ui.close();
+                    self.region_capture = RegionCapture::Selecting { drag_start: None };
+                }
+                ui.separator();
+                ui.label("Named region");
+                // The full catalogue, in display order; a target is enabled only
+                // if it was drawn last frame (hidden lanes / absent panels grey
+                // out). Picking one defers a frame (so the menu leaves the shot),
+                // then captures.
+                for target in CaptureTarget::ORDER {
+                    let present = self.capture_rects.iter().any(|(t, _)| *t == target);
+                    if ui
+                        .add_enabled(present, egui::Button::new(target.label()))
+                        .clicked()
+                    {
+                        ui.close();
+                        self.region_capture = RegionCapture::PendingNamed {
+                            target,
+                            armed: false,
+                        };
+                    }
+                }
+            });
+            // S5: standard window sizes for consistent documentation shots.
+            ui.menu_button("Doc size", |ui| {
+                ui.label("Standard window size");
+                for (w, h, label) in DOC_SIZE_PRESETS {
+                    if ui.button(label).clicked() {
+                        ui.close();
+                        self.apply_doc_size(ui.ctx(), egui::vec2(w, h));
+                    }
+                }
+            });
+            ui.separator();
             ui.label("Theme");
             ui.radio_value(&mut self.persisted.theme, ThemePref::System, "System");
             ui.radio_value(&mut self.persisted.theme, ThemePref::Light, "Light");
@@ -9799,6 +10321,19 @@ impl SaddaApp {
                         .suffix("×"),
                 );
             });
+            ui.separator();
+            // S3: structural signal-pane visibility. These three had no
+            // toggle before (always drawn); hiding them lets the user compose
+            // exactly the view they want to capture for documentation. Grouped
+            // with the measure tracks below so the whole signal column reads
+            // top-to-bottom. All persist across launches.
+            ui.label("Signal panes");
+            ui.checkbox(&mut self.persisted.panes.waveform, "Waveform");
+            ui.checkbox(&mut self.persisted.panes.spectrogram, "Spectrogram");
+            ui.checkbox(&mut self.persisted.panes.tier_strip, "Tier strip");
+            // S3b: per-tier in/out for the selected bundle (also where a tier
+            // hidden via the strip's context menu is brought back).
+            ui.menu_button("Tiers (in/out)…", |ui| self.tiers_submenu(ui));
             ui.separator();
             // D10: measure-track lane visibility. Each toggle persists
             // across launches; enabling a lane triggers the analysis
@@ -10798,6 +11333,7 @@ impl SaddaApp {
     }
 
     fn bundle_sidebar(&mut self, ui: &mut egui::Ui) {
+        self.record_capture_rect(CaptureTarget::BundleSidebar, ui.max_rect());
         ui.heading("Bundles");
         ui.add_space(4.0);
         let AppState::ProjectLoaded { project, .. } = &self.app_state else {
@@ -10896,30 +11432,94 @@ impl SaddaApp {
     /// Central content for a loaded project: waveform on top
     /// (resizable), tier strip on the bottom (resizable, sized by
     /// tier count), spectrogram filling the middle.
+    /// S3 reflow: which visible lane flexes to fill the leftover vertical space
+    /// (rendered on the central `ui`); every other lane is a fixed/resizable
+    /// panel. Choosing this dynamically is what makes hiding *any* lane —
+    /// including the spectrogram, which used to be the sole central pane —
+    /// reflow instead of leaving a hole. Preference runs top-to-bottom down the
+    /// column so the freed space is absorbed from the top: spectrogram →
+    /// waveform → the topmost visible measure lane → tier strip. `None` only
+    /// when the whole column is hidden. Conditions mirror the per-lane render
+    /// gates below exactly.
+    fn flex_signal_lane(&self) -> Option<CaptureTarget> {
+        use CaptureTarget::*;
+        if self.persisted.panes.spectrogram {
+            return Some(Spectrogram);
+        }
+        if self.persisted.panes.waveform {
+            return Some(Waveform);
+        }
+        if self.active_envelope.is_some() || self.live_view.is_some() {
+            let t = self.persisted.tracks;
+            let live = self.live_view.is_some();
+            if !live && (self.persisted.mfcc.show || self.mfcc_error.is_some()) {
+                return Some(MfccLane);
+            }
+            if !live
+                && (self.persisted.embedding.selected_tier_id.is_some()
+                    || self.embedding_heatmap_error.is_some())
+            {
+                return Some(EmbeddingLane);
+            }
+            if t.f0_visible {
+                return Some(F0Lane);
+            }
+            if t.formants_visible {
+                return Some(FormantLane);
+            }
+            if t.intensity_visible {
+                return Some(IntensityLane);
+            }
+            if t.vad_visible {
+                return Some(VadLane);
+            }
+        }
+        if self.persisted.panes.tier_strip {
+            return Some(TierStrip);
+        }
+        None
+    }
+
     fn bundle_content_pane(&mut self, ui: &mut egui::Ui) {
-        // Top sub-panel: waveform. Resizable; user can drag the
-        // divider to rebalance with the spectrogram.
-        egui::Panel::top("waveform_split")
-            .resizable(true)
-            .default_size(220.0)
-            .min_size(80.0)
-            // Frameless: no implicit panel margin. Horizontal
-            // alignment across all lanes is owned by the shared
-            // SIGNAL_LEFT_GUTTER / y-axis gutter, not panel frames.
-            .frame(egui::Frame::NONE)
-            .show_inside(ui, |ui| self.waveform_pane(ui));
+        // S4: the whole signal column (before the sub-panels carve it up) is a
+        // capture target — waveform + spectrogram + measure lanes + tier strip
+        // as one image.
+        self.record_capture_rect(CaptureTarget::SignalColumn, ui.max_rect());
+
+        // The one lane that flexes to fill leftover space is drawn on the
+        // central `ui` at the end; every other visible lane is a fixed panel.
+        let flex = self.flex_signal_lane();
+
+        // Top sub-panel: waveform. Resizable; user can drag the divider to
+        // rebalance. S3: hideable via View ▸ Signal panes; skipped here when
+        // it's the flex lane (then it's drawn centrally below).
+        if self.persisted.panes.waveform && flex != Some(CaptureTarget::Waveform) {
+            egui::Panel::top("waveform_split")
+                .resizable(true)
+                .default_size(220.0)
+                .min_size(80.0)
+                // Frameless: no implicit panel margin. Horizontal
+                // alignment across all lanes is owned by the shared
+                // SIGNAL_LEFT_GUTTER / y-axis gutter, not panel frames.
+                .frame(egui::Frame::NONE)
+                .show_inside(ui, |ui| self.waveform_pane(ui));
+        }
 
         // Bottom sub-panel: tier strip. Resizable; default height
-        // scales with the number of tiers up to a sensible cap.
-        let n_lanes = self.estimate_tier_lane_count();
-        let default_strip_height = ((n_lanes as f32).max(1.0) * TIER_LANE_HEIGHT + 8.0).min(220.0);
-        egui::Panel::bottom("tier_strip")
-            .resizable(true)
-            .default_size(default_strip_height)
-            .min_size(TIER_LANE_HEIGHT + 8.0)
-            // Frameless, like the waveform panel — see note there.
-            .frame(egui::Frame::NONE)
-            .show_inside(ui, |ui| self.tier_strip_pane(ui));
+        // scales with the number of tiers up to a sensible cap. S3:
+        // hideable via View ▸ Signal panes (default shown).
+        if self.persisted.panes.tier_strip && flex != Some(CaptureTarget::TierStrip) {
+            let n_lanes = self.estimate_tier_lane_count();
+            let default_strip_height =
+                ((n_lanes as f32).max(1.0) * TIER_LANE_HEIGHT + 8.0).min(220.0);
+            egui::Panel::bottom("tier_strip")
+                .resizable(true)
+                .default_size(default_strip_height)
+                .min_size(TIER_LANE_HEIGHT + 8.0)
+                // Frameless, like the waveform panel — see note there.
+                .frame(egui::Frame::NONE)
+                .show_inside(ui, |ui| self.tier_strip_pane(ui));
+        }
 
         // D10 measure-track lanes, stacked between the spectrogram and
         // the tier strip. Each is a frameless bottom panel so it shares
@@ -10929,7 +11529,7 @@ impl SaddaApp {
         // strip, then formants, then f0 just under the spectrogram —
         // because egui stacks the first-registered bottom panel
         // outermost. Only shown when a bundle is loaded and the lane is
-        // enabled in View → Measure Tracks.
+        // enabled in View → Measure Tracks (and it isn't the flex lane).
         // P2: install any completed async analysis first, then dispatch fresh
         // builds for whatever's still stale (so a just-arrived result is used
         // rather than re-dispatched).
@@ -10941,7 +11541,7 @@ impl SaddaApp {
         if self.active_envelope.is_some() || self.live_view.is_some() {
             let tracks = self.persisted.tracks;
             // Registered first → bottommost lane (just above the tiers).
-            if tracks.vad_visible {
+            if tracks.vad_visible && flex != Some(CaptureTarget::VadLane) {
                 egui::Panel::bottom("vad_lane")
                     .resizable(true)
                     .default_size(MEASURE_LANE_HEIGHT)
@@ -10949,7 +11549,7 @@ impl SaddaApp {
                     .frame(egui::Frame::NONE)
                     .show_inside(ui, |ui| self.vad_lane_pane(ui));
             }
-            if tracks.intensity_visible {
+            if tracks.intensity_visible && flex != Some(CaptureTarget::IntensityLane) {
                 egui::Panel::bottom("intensity_lane")
                     .resizable(true)
                     .default_size(MEASURE_LANE_HEIGHT)
@@ -10957,7 +11557,7 @@ impl SaddaApp {
                     .frame(egui::Frame::NONE)
                     .show_inside(ui, |ui| self.intensity_lane_pane(ui));
             }
-            if tracks.formants_visible {
+            if tracks.formants_visible && flex != Some(CaptureTarget::FormantLane) {
                 egui::Panel::bottom("formant_lane")
                     .resizable(true)
                     .default_size(MEASURE_LANE_HEIGHT)
@@ -10965,7 +11565,7 @@ impl SaddaApp {
                     .frame(egui::Frame::NONE)
                     .show_inside(ui, |ui| self.formant_lane_pane(ui));
             }
-            if tracks.f0_visible {
+            if tracks.f0_visible && flex != Some(CaptureTarget::F0Lane) {
                 egui::Panel::bottom("f0_lane")
                     .resizable(true)
                     .default_size(MEASURE_LANE_HEIGHT)
@@ -10981,6 +11581,7 @@ impl SaddaApp {
             if self.live_view.is_none()
                 && (self.persisted.embedding.selected_tier_id.is_some()
                     || self.embedding_heatmap_error.is_some())
+                && flex != Some(CaptureTarget::EmbeddingLane)
             {
                 egui::Panel::bottom("embedding_heatmap_lane")
                     .resizable(true)
@@ -10992,7 +11593,10 @@ impl SaddaApp {
             // MFCC heatmap lane — registered last so it sits at the top of the
             // lane stack (under the spectrogram). Like the embedding heatmap
             // it's a 2D coeff×time view, so it gets the taller default height.
-            if self.live_view.is_none() && (self.persisted.mfcc.show || self.mfcc_error.is_some()) {
+            if self.live_view.is_none()
+                && (self.persisted.mfcc.show || self.mfcc_error.is_some())
+                && flex != Some(CaptureTarget::MfccLane)
+            {
                 egui::Panel::bottom("mfcc_lane")
                     .resizable(true)
                     .default_size(MEASURE_LANE_HEIGHT * 2.0)
@@ -11002,14 +11606,36 @@ impl SaddaApp {
             }
         }
 
-        // Centre: spectrogram fills the remainder, drawn directly on
-        // the panel `ui`. With the waveform/tier panels now frameless,
-        // all three lanes share this `ui`'s content rect exactly, so
-        // their plot areas line up with no per-element margins to
-        // reconcile — alignment lives entirely in the 120px gutter.
-        self.rebuild_spectrogram_if_stale(ui.ctx());
-        self.rebuild_live_spectrogram_if_stale(ui.ctx());
-        self.spectrogram_pane(ui);
+        // Centre: the flex lane fills the remaining space, drawn directly on
+        // the panel `ui`. With the surrounding panels frameless, all lanes
+        // share this `ui`'s content rect exactly, so their plot areas line up
+        // with no per-element margins — alignment lives in the 120px gutter.
+        match flex {
+            Some(CaptureTarget::Spectrogram) => {
+                // Skip the texture rebuild unless the spectrogram is shown.
+                self.rebuild_spectrogram_if_stale(ui.ctx());
+                self.rebuild_live_spectrogram_if_stale(ui.ctx());
+                self.spectrogram_pane(ui);
+            }
+            Some(CaptureTarget::Waveform) => self.waveform_pane(ui),
+            Some(CaptureTarget::F0Lane) => self.f0_lane_pane(ui),
+            Some(CaptureTarget::FormantLane) => self.formant_lane_pane(ui),
+            Some(CaptureTarget::IntensityLane) => self.intensity_lane_pane(ui),
+            Some(CaptureTarget::VadLane) => self.vad_lane_pane(ui),
+            Some(CaptureTarget::MfccLane) => self.mfcc_lane_pane(ui),
+            Some(CaptureTarget::EmbeddingLane) => self.embedding_heatmap_lane_pane(ui),
+            Some(CaptureTarget::TierStrip) => self.tier_strip_pane(ui),
+            // Whole column hidden, or a target that's never a signal lane
+            // (composites / side columns): nothing to fill with.
+            Some(
+                CaptureTarget::WholeWindow
+                | CaptureTarget::SignalColumn
+                | CaptureTarget::BundleSidebar
+                | CaptureTarget::AnnotationPanel
+                | CaptureTarget::ReferencePanel,
+            )
+            | None => {}
+        }
     }
 
     /// How many lanes the tier strip will render for the current
@@ -11021,13 +11647,20 @@ impl SaddaApp {
         else {
             return 0;
         };
+        // S3b: only count tiers that will actually render (hidden ones are
+        // suppressed), so the strip's default height tracks what's shown.
         project
             .tiers(Some(env.bundle_id))
-            .map(|t| t.len())
+            .map(|t| {
+                t.iter()
+                    .filter(|t| !self.persisted.hidden_tier_ids.contains(&t.id))
+                    .count()
+            })
             .unwrap_or(0)
     }
 
     fn waveform_pane(&mut self, ui: &mut egui::Ui) {
+        self.record_capture_rect(CaptureTarget::Waveform, ui.max_rect());
         // While recording, the live mirror takes the pane in place of the
         // selected bundle, so the waveform populates as audio captures.
         let live_env = self.live_view.as_ref().map(|lv| lv.envelope());
@@ -11193,6 +11826,7 @@ impl SaddaApp {
     }
 
     fn spectrogram_pane(&mut self, ui: &mut egui::Ui) {
+        self.record_capture_rect(CaptureTarget::Spectrogram, ui.max_rect());
         // Toolbar row above the plot (window / hop / colormap).
         self.spectrogram_toolbar(ui);
 
@@ -11375,6 +12009,7 @@ impl SaddaApp {
     /// unvoiced gaps read as gaps). Frames below the voicing threshold
     /// are dropped at draw time.
     fn f0_lane_pane(&mut self, ui: &mut egui::Ui) {
+        self.record_capture_rect(CaptureTarget::F0Lane, ui.max_rect());
         let cfg = self.persisted.tracks;
         // Live accumulating tracks while recording, else the selected
         // bundle's. Inlined (not a `&self` helper) so the borrow is on the
@@ -11431,6 +12066,7 @@ impl SaddaApp {
     /// slot (F1..Fn), each its own colour, so vowel formant trajectories
     /// are separable by eye.
     fn formant_lane_pane(&mut self, ui: &mut egui::Ui) {
+        self.record_capture_rect(CaptureTarget::FormantLane, ui.max_rect());
         let cfg = self.persisted.tracks;
         // Live accumulating tracks while recording, else the selected
         // bundle's. Inlined (not a `&self` helper) so the borrow is on the
@@ -11480,6 +12116,7 @@ impl SaddaApp {
     /// D10: intensity measure-track lane. A connected dB-FS contour
     /// (intensity is continuous, so unlike f0 it reads best as a line).
     fn intensity_lane_pane(&mut self, ui: &mut egui::Ui) {
+        self.record_capture_rect(CaptureTarget::IntensityLane, ui.max_rect());
         let cfg = self.persisted.tracks;
         // Live accumulating tracks while recording, else the selected
         // bundle's. Inlined (not a `&self` helper) so the borrow is on the
@@ -11533,6 +12170,7 @@ impl SaddaApp {
     /// threshold are shaded as speech. If VAD couldn't run (e.g. ONNX
     /// Runtime not available) the lane shows the reason instead.
     fn vad_lane_pane(&mut self, ui: &mut egui::Ui) {
+        self.record_capture_rect(CaptureTarget::VadLane, ui.max_rect());
         let cfg = self.persisted.tracks;
         // Live accumulating tracks while recording, else the selected
         // bundle's. Inlined (not a `&self` helper) so the borrow is on the
@@ -11615,6 +12253,7 @@ impl SaddaApp {
     /// tier missing, sidecar unreadable) the error message renders
     /// centred in the lane rather than blanking it out.
     fn embedding_heatmap_lane_pane(&mut self, ui: &mut egui::Ui) {
+        self.record_capture_rect(CaptureTarget::EmbeddingLane, ui.max_rect());
         // Sticky build error → render as centred hint and bail. The lane
         // stays visible so the user sees the explanation without having
         // to chase a missing-tier message into the bottom banner.
@@ -11733,6 +12372,7 @@ impl SaddaApp {
     /// colormapped image over the shared timeline, mirroring the embedding
     /// heatmap. y-axis is the cepstral-coefficient index.
     fn mfcc_lane_pane(&mut self, ui: &mut egui::Ui) {
+        self.record_capture_rect(CaptureTarget::MfccLane, ui.max_rect());
         if let Some(msg) = self.mfcc_error.clone() {
             ui.centered_and_justified(|ui| {
                 ui.colored_label(egui::Color32::from_rgb(220, 80, 80), format!("MFCC: {msg}"));
@@ -11852,6 +12492,7 @@ impl SaddaApp {
     }
 
     fn tier_strip_pane(&mut self, ui: &mut egui::Ui) {
+        self.record_capture_rect(CaptureTarget::TierStrip, ui.max_rect());
         let (Some(env), AppState::ProjectLoaded { project, .. }) =
             (&self.active_envelope, &self.app_state)
         else {
@@ -11867,6 +12508,10 @@ impl SaddaApp {
         let selection = self.timeline.selection;
         let active_tier_ids = self.active_tier_ids.clone();
         let lane_geom = self.lane_geom;
+        // S3b: tiers the user has toggled out of the strip (per-tier in/out).
+        // Cloned up-front like the other snapshots so the render closure below
+        // doesn't need to borrow `self` while `&project` is live.
+        let hidden_tier_ids = self.persisted.hidden_tier_ids.clone();
         let tiers = match project.tiers(Some(bundle_id)) {
             Ok(t) => t,
             Err(e) => {
@@ -11882,6 +12527,9 @@ impl SaddaApp {
         // discipline as the selection state.
         let mut tier_op: Option<TierOp> = None;
         let mut clicked_active: Option<i64> = None;
+        // S3b: deferred "hide this tier" request from the gutter context menu,
+        // applied after the `&project` borrow ends (like the other tier ops).
+        let mut hide_tier: Option<i64> = None;
         let mut selection_commit: Vec<(i64, TierType, f64, f64)> = Vec::new();
         let mut clear_selection = false;
         // Active tiers (those in the set), in lane order, and the subset that can
@@ -11979,7 +12627,10 @@ impl SaddaApp {
             .unwrap_or_default();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for tier in &tiers {
+            // S3b: skip tiers toggled out of the strip. They stay in the
+            // project (and in View ▸ Tiers, where they're re-shown) — only
+            // their lane is suppressed here.
+            for tier in tiers.iter().filter(|t| !hidden_tier_ids.contains(&t.id)) {
                 ui.horizontal(|ui| {
                     // Drop the default inter-widget spacing so the
                     // lane's left edge sits at exactly
@@ -12017,6 +12668,13 @@ impl SaddaApp {
                         }
                         if ui.button("Delete tier").clicked() {
                             tier_op = Some(TierOp::Delete(tier.id, tier.name.clone()));
+                            ui.close();
+                        }
+                        ui.separator();
+                        // S3b: hide from the strip (non-destructive; re-show in
+                        // View ▸ Tiers).
+                        if ui.button("Hide tier").clicked() {
+                            hide_tier = Some(tier.id);
                             ui.close();
                         }
                     });
@@ -12250,6 +12908,11 @@ impl SaddaApp {
             }
             None => {}
         }
+
+        // ---- S3b: hide a tier (apply after &project ended) ---------
+        if let Some(id) = hide_tier {
+            self.persisted.hidden_tier_ids.insert(id);
+        }
     }
 
     /// Resolves the active draft (create or resize) by writing to the
@@ -12419,6 +13082,7 @@ impl SaddaApp {
     /// markers. Both read from the cached [`ReferenceView`], refreshed in
     /// `rebuild_reference_if_stale`.
     fn reference_panel(&mut self, ui: &mut egui::Ui) {
+        self.record_capture_rect(CaptureTarget::ReferencePanel, ui.max_rect());
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Reference").strong());
         });
@@ -12703,6 +13367,12 @@ impl SaddaApp {
         // keeps the callable alive past this scope.
         self.registered_commands
             .extend(std::mem::take(&mut extras.registered_commands));
+        // Apply any visibility changes the script requested (S3 scripting
+        // surface — panes / tiers in/out).
+        self.apply_visibility_actions(std::mem::take(&mut extras.visibility_actions));
+        // S5: a requested window resize is deferred to the end of the next
+        // frame, where the egui `Context` is available to send the command.
+        self.queue_script_layout(&mut extras);
     }
 
     /// Invokes the command at index `i` of `registered_commands`,
@@ -12740,6 +13410,114 @@ impl SaddaApp {
         // register more commands — drain the extras.
         self.registered_commands
             .extend(std::mem::take(&mut extras.registered_commands));
+        // …and can change pane / tier visibility.
+        self.apply_visibility_actions(std::mem::take(&mut extras.visibility_actions));
+        self.queue_script_layout(&mut extras);
+    }
+
+    /// S5/S6.1: stash script-requested layout changes (window resize + per-pane
+    /// heights) for the next frame to apply — both need the egui `Context`,
+    /// unavailable here. A window resize also pins UI zoom to 100% so the
+    /// eventual shot keeps consistent proportions.
+    fn queue_script_layout(&mut self, extras: &mut ScriptSessionExtras) {
+        if let Some((w, h)) = extras.window_size.take() {
+            self.pending_viewport_size = Some(egui::vec2(w, h));
+            self.persisted.ui_scale = 1.0;
+        }
+        self.pending_pane_heights.append(&mut extras.pane_heights);
+        self.pending_column_widths.append(&mut extras.column_widths);
+        // S7: theme change (egui picks it up next frame via `apply_theme`).
+        if let Some(name) = extras.theme.take() {
+            if let Some(pref) = ThemePref::from_name(&name) {
+                self.persisted.theme = pref;
+            }
+        }
+    }
+
+    /// S6.1: the egui panel id whose height controls a signal-column pane, or
+    /// `None` for the spectrogram (the central/flex pane, sized by the
+    /// remainder). Panel ids match the `Panel::top/bottom(id)` calls in
+    /// `bundle_content_pane`.
+    fn pane_panel_id(pane: SignalPaneId) -> Option<&'static str> {
+        match pane {
+            SignalPaneId::Waveform => Some("waveform_split"),
+            SignalPaneId::TierStrip => Some("tier_strip"),
+            SignalPaneId::F0 => Some("f0_lane"),
+            SignalPaneId::Formants => Some("formant_lane"),
+            SignalPaneId::Intensity => Some("intensity_lane"),
+            SignalPaneId::Vad => Some("vad_lane"),
+            SignalPaneId::Mfcc => Some("mfcc_lane"),
+            SignalPaneId::Spectrogram => None,
+        }
+    }
+
+    /// S6.2: the egui panel id for a resizable GUI column. Ids match the
+    /// `Panel::left/right(id)` calls in `ui`.
+    fn column_panel_id(col: GuiColumn) -> &'static str {
+        match col {
+            GuiColumn::Bundles => "bundle_sidebar",
+            GuiColumn::Annotation => "annotation_panel",
+            GuiColumn::Reference => "reference_panel",
+        }
+    }
+
+    /// Force a resizable panel to an exact size by writing egui's persisted
+    /// [`PanelState`] for it — the same slot a user drag writes, so the panel
+    /// stays draggable and the size survives relaunch (eframe persists it). egui
+    /// reads a top/bottom panel's height from `PanelState.rect.height()` and a
+    /// left/right panel's width from `.rect.width()`; the other axis is ignored.
+    fn force_panel_size(ctx: &egui::Context, panel_id: &str, size: egui::Vec2) {
+        let id = egui::Id::new(panel_id);
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        ctx.data_mut(|d| {
+            d.insert_persisted(id, egui::containers::panel::PanelState { rect });
+        });
+    }
+
+    /// S6.1: force a signal-column pane to `height` logical points. No-op for
+    /// the spectrogram (the flex pane, no fixed height).
+    fn apply_pane_height(ctx: &egui::Context, pane: SignalPaneId, height: f32) {
+        if let Some(panel_id) = Self::pane_panel_id(pane) {
+            Self::force_panel_size(ctx, panel_id, egui::vec2(0.0, height.max(1.0)));
+        }
+    }
+
+    /// S6.2: force a GUI column to `width` logical points.
+    fn apply_column_width(ctx: &egui::Context, col: GuiColumn, width: f32) {
+        Self::force_panel_size(
+            ctx,
+            Self::column_panel_id(col),
+            egui::vec2(width.max(1.0), 0.0),
+        );
+    }
+
+    /// Applies visibility changes a script requested via `sadda.app`
+    /// (`set_pane_visible` / `set_tier_visible`). Maps the module's
+    /// config-independent [`VisibilityAction`]s onto the persisted GUI state,
+    /// so the next frame reflects them. The scripting foundation for
+    /// composing a view to capture (S3 → the documentation pathway).
+    fn apply_visibility_actions(&mut self, actions: Vec<VisibilityAction>) {
+        for action in actions {
+            match action {
+                VisibilityAction::Pane { pane, visible } => match pane {
+                    SignalPaneId::Waveform => self.persisted.panes.waveform = visible,
+                    SignalPaneId::Spectrogram => self.persisted.panes.spectrogram = visible,
+                    SignalPaneId::TierStrip => self.persisted.panes.tier_strip = visible,
+                    SignalPaneId::F0 => self.persisted.tracks.f0_visible = visible,
+                    SignalPaneId::Formants => self.persisted.tracks.formants_visible = visible,
+                    SignalPaneId::Intensity => self.persisted.tracks.intensity_visible = visible,
+                    SignalPaneId::Vad => self.persisted.tracks.vad_visible = visible,
+                    SignalPaneId::Mfcc => self.persisted.mfcc.show = visible,
+                },
+                VisibilityAction::Tier { tier_id, visible } => {
+                    if visible {
+                        self.persisted.hidden_tier_ids.remove(&tier_id);
+                    } else {
+                        self.persisted.hidden_tier_ids.insert(tier_id);
+                    }
+                }
+            }
+        }
     }
 
     /// Builds an `AppSnapshot` describing the current GUI state,
