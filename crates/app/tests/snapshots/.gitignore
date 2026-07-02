@@ -1,0 +1,5 @@
+# egui_kittest writes these next to a golden on a snapshot mismatch; only the
+# golden `*.png` itself is committed.
+*.new.png
+*.diff.png
+*.old.png

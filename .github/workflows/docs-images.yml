@@ -1,0 +1,77 @@
+name: Docs images
+
+# S8 — the documentation-image drift gate. Renders the real app HEADLESSLY
+# (egui_kittest + wgpu on lavapipe, a software Vulkan rasteriser) and checks the
+# results, so a UI change that alters a documentation figure is caught here.
+#
+# Two levels, because pixel-exact rendering is not guaranteed across machines
+# (mesa/lavapipe version, font AA):
+#   * structural checks (dimensions, region geometry, "renders at all") are
+#     deterministic → a REQUIRED gate.
+#   * the pixel snapshot vs the committed golden is machine-sensitive → ADVISORY
+#     (continue-on-error). It surfaces diffs as artifacts. Once the goldens are
+#     regenerated FROM this CI environment (UPDATE_SNAPSHOTS=1) and confirmed
+#     stable, drop `continue-on-error` to make it a hard gate too.
+#
+# Local equivalents: `just docs-images` (render + check) and
+# `just docs-images-update` (refresh goldens after an intended UI change).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  PYO3_PYTHON: "/usr/bin/python3"
+  # Force wgpu onto lavapipe (software Vulkan) so we never touch a real/absent
+  # GPU on the runner. The tests also auto-detect this, but be explicit.
+  WGPU_BACKEND: vulkan
+  VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+
+jobs:
+  docs-images:
+    name: headless doc-image render (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install system deps
+        # libasound2-dev: cpal (live recording) build. mesa-vulkan-drivers +
+        # libvulkan1 + vulkan-tools: lavapipe software Vulkan. python3-dev: a
+        # shared libpython for pyo3 auto-initialize at runtime.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libasound2-dev mesa-vulkan-drivers libvulkan1 vulkan-tools python3-dev
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Sanity-check the software Vulkan adapter
+        run: vulkaninfo --summary | head -40 || true
+
+      # Deterministic: geometry + "it renders" — safe as a hard gate. Excludes
+      # the pixel-snapshot test (run separately below).
+      - name: Render checks (structural)
+        run: |
+          cargo test -p sadda-app --bins doc_render -- \
+            --ignored --test-threads=1 --skip snapshot_
+
+      # Machine-sensitive: pixel diff vs the committed golden. Advisory for now.
+      - name: Snapshot diff (advisory)
+        id: snapshot
+        continue-on-error: true
+        run: |
+          cargo test -p sadda-app --bins doc_render -- \
+            --ignored --test-threads=1 snapshot_
+
+      - name: Upload snapshot diffs
+        if: steps.snapshot.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-diffs
+          path: |
+            crates/app/tests/snapshots/*.new.png
+            crates/app/tests/snapshots/*.diff.png
+          if-no-files-found: ignore
