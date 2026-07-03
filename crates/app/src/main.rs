@@ -47,9 +47,13 @@ use crate::state::{
     normalize_embedding, power_to_db_normalized, truncate_label,
 };
 
-/// Maximum characters drawn inside an interval rectangle or above a
-/// point tick before truncation kicks in (with an ellipsis).
+/// Maximum characters drawn above a point tick before truncation kicks in
+/// (with an ellipsis). Interval labels instead fit to the interval's on-screen
+/// width — see `render_interval_lane`.
 const TIER_LABEL_MAX_CHARS: usize = 20;
+/// Bottom-edge marker colour on an interval whose label is clipped (not fully
+/// visible at the current width) — a "there's more text here" cue.
+const TRUNCATION_INDICATOR: egui::Color32 = egui::Color32::from_rgb(220, 60, 60);
 /// Vertical pixels per lane in the tier strip.
 const TIER_LANE_HEIGHT: f32 = 28.0;
 /// Shared width of the left gutter that holds the y-axis ticks /
@@ -8489,14 +8493,45 @@ fn render_interval_lane(
             painter.rect_filled(strip, 0.0, tint);
         }
         if let Some(label) = &r.label {
-            if !label.is_empty() && item_rect.width() > 20.0 {
-                painter.text(
-                    item_rect.left_center() + egui::Vec2::new(4.0, 0.0),
-                    egui::Align2::LEFT_CENTER,
-                    truncate_label(label, TIER_LABEL_MAX_CHARS),
-                    egui::FontId::proportional(11.0),
-                    text_color,
-                );
+            if !label.is_empty() {
+                // Fit as much of the label as the interval's on-screen width
+                // allows (egui measures glyph widths and elides with "…"),
+                // rather than a fixed character cap that left wide intervals
+                // looking half-empty. If any of the label is hidden, flag it
+                // with a red line along the interval's bottom edge.
+                let avail = (item_rect.width() - 8.0).max(0.0);
+                let truncated = if avail >= 2.0 {
+                    let mut job = egui::text::LayoutJob::single_section(
+                        label.clone(),
+                        egui::TextFormat {
+                            font_id: egui::FontId::proportional(11.0),
+                            color: text_color,
+                            ..Default::default()
+                        },
+                    );
+                    job.break_on_newline = false;
+                    job.wrap.max_width = avail;
+                    job.wrap.max_rows = 1;
+                    job.wrap.overflow_character = Some('…');
+                    let galley = painter.layout_job(job);
+                    let elided = galley.elided;
+                    let pos = egui::pos2(
+                        item_rect.left() + 4.0,
+                        item_rect.center().y - galley.size().y / 2.0,
+                    );
+                    painter.galley(pos, galley, text_color);
+                    elided
+                } else {
+                    // Too narrow to show even one character — but there's a label.
+                    true
+                };
+                if truncated {
+                    painter.hline(
+                        item_rect.x_range(),
+                        item_rect.bottom() - 1.0,
+                        egui::Stroke::new(2.0, TRUNCATION_INDICATOR),
+                    );
+                }
             }
         }
     }
