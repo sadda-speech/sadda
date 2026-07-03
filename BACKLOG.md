@@ -226,10 +226,10 @@ spine (S6). Absorbs the former "structural-lane toggles" item into S3._
 - [~] **Doc-image catalog — Phase 1 + B1** _(rendered, feat/figure-export)_ — Group A
   (overview/hero, signal-view, spectrogram, pitch, formants, intensity, mfcc,
   measure-stack; light+dark hero) + B1 annotated tiers via `shot(textgrid=…)`,
-  from the CC0 demo clip → `docs/assets/generated/`. ⬜ Remaining: user's real
-  word/phone annotation of `demo.wav` (replaces the placeholder phrase tier);
-  wire images into doc pages (Home hero, a "tour" section, annotation-cycle). —
-  _added 2026-07-02_
+  from the CC0 demo clip → `docs/assets/generated/`. ✅ Real Utterance+Words
+  annotation wired in; ✅ Home hero on `index.md` (light/dark via Material
+  `#only-light/#only-dark`). ⬜ Remaining: a "tour" section + annotation-cycle
+  images; README still uses the old hand-taken screenshot. — _added 2026-07-02_
 - [ ] **Doc-image recipe primitives (Group B)** — small recipe additions for the
   remaining figures: `selection`/`cursor` (measurement + annotation-editing
   shots), reference-panel open + distribution install/select (vowel-space

@@ -4,7 +4,8 @@
 phonetics and speech-science research, with a modern Python API,
 NumPy- and Polars-native data types, and a corpus-first project model.
 
-![The sadda desktop app showing a speech recording as a waveform, a spectrogram, and stacked f0, formant, and intensity measure tracks, alongside a bundle-list sidebar and a reference-distribution panel.](assets/sadda_screenshot.png){ width="820" }
+![The sadda desktop app showing a short speech recording — a waveform, a spectrogram, an MFCC heatmap, and stacked f0, formant, and intensity tracks — with word- and utterance-level annotation tiers below and a bundle-list sidebar.](assets/generated/overview.png#only-light){ width="900" }
+![The sadda desktop app (dark theme) showing a short speech recording — a waveform, a spectrogram, an MFCC heatmap, and stacked f0, formant, and intensity tracks — with word- and utterance-level annotation tiers below and a bundle-list sidebar.](assets/generated/overview-dark.png#only-dark){ width="900" }
 
 These docs always reflect the latest commit on `main`. For per-release
 notes, see the
