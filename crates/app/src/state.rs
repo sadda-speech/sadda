@@ -36,6 +36,26 @@ impl ThemePref {
     }
 }
 
+/// Horizontal alignment of interval labels within their box in the tier strip.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LabelAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl LabelAlign {
+    /// Menu label for the alignment picker.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Left => "Left",
+            Self::Center => "Center",
+            Self::Right => "Right",
+        }
+    }
+}
+
 /// State that survives across launches. Eframe's `Storage` hook
 /// serializes this via serde; window size + position are persisted
 /// separately by eframe itself.
@@ -125,6 +145,9 @@ pub struct PersistedState {
     /// another project — are harmless no-ops. Default: empty (all tiers shown).
     #[serde(default)]
     pub hidden_tier_ids: std::collections::HashSet<i64>,
+    /// Horizontal alignment of interval labels within their box. Default left.
+    #[serde(default)]
+    pub interval_label_align: LabelAlign,
 }
 
 fn default_pitch_preset_id() -> String {
@@ -165,6 +188,7 @@ impl Default for PersistedState {
             formant_preset_id: default_formant_preset_id(),
             panes: SignalPaneVisibility::default(),
             hidden_tier_ids: std::collections::HashSet::new(),
+            interval_label_align: LabelAlign::default(),
         }
     }
 }

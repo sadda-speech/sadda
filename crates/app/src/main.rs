@@ -41,10 +41,10 @@ use crate::sadda_app::{
     SignalPaneId, VisibilityAction, with_snapshot_active,
 };
 use crate::state::{
-    ColormapKind, EmbeddingHeatmapConfig, EnvelopeCache, MeasureTrackConfig, MfccLaneConfig,
-    PersistedState, PlotPalette, RefdistOverlay, SpectrogramConfig, ThemePref, TimelineState,
-    build_envelope_for_range, colormap_bake, format_reference_lane_caption, nearest_frame_index,
-    normalize_embedding, power_to_db_normalized, truncate_label,
+    ColormapKind, EmbeddingHeatmapConfig, EnvelopeCache, LabelAlign, MeasureTrackConfig,
+    MfccLaneConfig, PersistedState, PlotPalette, RefdistOverlay, SpectrogramConfig, ThemePref,
+    TimelineState, build_envelope_for_range, colormap_bake, format_reference_lane_caption,
+    nearest_frame_index, normalize_embedding, power_to_db_normalized, truncate_label,
 };
 
 /// Maximum characters drawn above a point tick before truncation kicks in
@@ -8424,6 +8424,7 @@ fn render_interval_lane(
     tier_id: i64,
     rows: &[sadda_engine::Interval],
     status_palette: &[String],
+    label_align: LabelAlign,
     is_preview: bool,
     selection: Option<AnnotationSelection>,
     response: &egui::Response,
@@ -8512,13 +8513,18 @@ fn render_interval_lane(
                     job.break_on_newline = false;
                     job.wrap.max_width = avail;
                     job.wrap.max_rows = 1;
-                    job.wrap.overflow_character = Some('…');
+                    // No overflow character: clipping is signalled by the red
+                    // bottom-edge line, not an ellipsis (which eats a glyph).
+                    job.wrap.overflow_character = None;
                     let galley = painter.layout_job(job);
                     let elided = galley.elided;
-                    let pos = egui::pos2(
-                        item_rect.left() + 4.0,
-                        item_rect.center().y - galley.size().y / 2.0,
-                    );
+                    // Align the (possibly clipped) label within the box.
+                    let x = match label_align {
+                        LabelAlign::Left => item_rect.left() + 4.0,
+                        LabelAlign::Center => item_rect.center().x - galley.size().x / 2.0,
+                        LabelAlign::Right => item_rect.right() - 4.0 - galley.size().x,
+                    };
+                    let pos = egui::pos2(x, item_rect.center().y - galley.size().y / 2.0);
                     painter.galley(pos, galley, text_color);
                     elided
                 } else {
@@ -10249,6 +10255,16 @@ impl SaddaApp {
     /// `persisted.hidden_tier_ids`; stale ids from deleted tiers never surface
     /// here because we only list the bundle's live tiers.
     fn tiers_submenu(&mut self, ui: &mut egui::Ui) {
+        // Global interval-label alignment (applies to every interval tier).
+        ui.label("Interval label alignment");
+        ui.horizontal(|ui| {
+            for a in [LabelAlign::Left, LabelAlign::Center, LabelAlign::Right] {
+                ui.radio_value(&mut self.persisted.interval_label_align, a, a.label());
+            }
+        });
+        ui.separator();
+        ui.label("Tiers");
+
         let (Some(env), AppState::ProjectLoaded { project, .. }) =
             (&self.active_envelope, &self.app_state)
         else {
@@ -12742,6 +12758,7 @@ impl SaddaApp {
                                 tier.id,
                                 &rows,
                                 &status_palette,
+                                self.persisted.interval_label_align,
                                 is_preview_tier(&tier.name),
                                 self.selected_annotation,
                                 &response,
