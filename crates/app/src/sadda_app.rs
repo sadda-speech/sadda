@@ -187,6 +187,8 @@ pub struct RecipeShot {
     pub audio: Option<String>,
     /// Bundle to select, by name.
     pub bundle: Option<String>,
+    /// A Praat TextGrid to import into the bundle (so tiers show in the strip).
+    pub textgrid: Option<String>,
     /// Window size in logical points.
     pub size: Option<(f32, f32)>,
     /// Theme: `"light"`, `"dark"`, or `"system"`.
@@ -538,7 +540,7 @@ fn set_theme(name: String) -> PyResult<()> {
 /// optional. Called from a Python recipe (`import sadda.doc as doc`); the
 /// headless runner executes the accumulated shots. Does not touch the live GUI.
 #[pyfunction]
-#[pyo3(signature = (to, capture, project=None, audio=None, bundle=None, size=None, theme=None, show=None, heights=None, widths=None))]
+#[pyo3(signature = (to, capture, project=None, audio=None, bundle=None, textgrid=None, size=None, theme=None, show=None, heights=None, widths=None))]
 #[allow(clippy::too_many_arguments)]
 fn shot(
     to: String,
@@ -546,6 +548,7 @@ fn shot(
     project: Option<String>,
     audio: Option<String>,
     bundle: Option<String>,
+    textgrid: Option<String>,
     size: Option<(f32, f32)>,
     theme: Option<String>,
     show: Option<Vec<String>>,
@@ -571,6 +574,7 @@ fn shot(
             project,
             audio,
             bundle,
+            textgrid,
             size,
             theme,
             show,

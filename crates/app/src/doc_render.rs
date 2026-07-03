@@ -253,6 +253,18 @@ mod tests {
         if let Some(bundle) = &shot.bundle {
             select_bundle_by_name(app, bundle);
         }
+        // B1: import a TextGrid into the selected bundle so its tiers show.
+        if let Some(tg) = &shot.textgrid {
+            let path = source_base.join(tg);
+            match (&app.app_state, app.selected_bundle_id) {
+                (crate::AppState::ProjectLoaded { project, .. }, Some(bid)) if path.exists() => {
+                    if let Err(e) = project.import_textgrid(&path, bid) {
+                        eprintln!("[doc_render] TextGrid import failed ({tg}): {e}");
+                    }
+                }
+                _ => eprintln!("[doc_render] TextGrid skipped (not found / no bundle): {tg}"),
+            }
+        }
         if let Some(show) = &shot.show {
             apply_show_only(app, show);
         }
@@ -547,6 +559,37 @@ doc.shot(
             .output_path(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots"));
         egui_kittest::try_image_snapshot_options(&img, "doc-signal-column", &opts)
             .expect("signal-column drifted from golden — run UPDATE_SNAPSHOTS=1 to refresh");
+    }
+
+    /// B1: `textgrid=` imports annotations so the tier strip has content — guards
+    /// the "image annotation piping" from silently regressing (a broken import
+    /// would still render an image, just without tiers).
+    #[test]
+    #[ignore = "needs a software wgpu adapter (lavapipe); run with --ignored"]
+    fn textgrid_import_adds_tiers() {
+        let mut harness = doc_harness(egui::vec2(900.0, 700.0));
+        let shot = crate::sadda_app::RecipeShot {
+            to: "unused".into(),
+            capture: "signal-column".into(),
+            audio: Some("docs/recipes/assets/demo.wav".into()),
+            textgrid: Some("docs/recipes/assets/demo.TextGrid".into()),
+            show: Some(vec!["waveform".into(), "tier_strip".into()]),
+            ..Default::default()
+        };
+        apply_shot(&mut harness, &shot, &repo_root(), &scratch_dir("tg"), 0);
+        settle_analysis(&mut harness, Duration::from_secs(10));
+
+        let app = harness.state();
+        let n_tiers = match (&app.app_state, app.selected_bundle_id) {
+            (crate::AppState::ProjectLoaded { project, .. }, Some(bid)) => {
+                project.tiers(Some(bid)).map(|t| t.len()).unwrap_or(0)
+            }
+            _ => 0,
+        };
+        assert!(
+            n_tiers >= 1,
+            "textgrid= should have imported at least one tier"
+        );
     }
 
     /// S7b: run the committed recipe *files* under `docs/recipes/` against the
