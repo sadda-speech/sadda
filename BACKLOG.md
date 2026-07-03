@@ -16,6 +16,9 @@ Status: `[ ]` open · `[~]` in progress · `[x]` done (move to DEVLOG when shipp
 
 _Raw captures land here; groomed into the sections below on request._
 
+- [ ] **Automatic prosodic annotation** — auto prosody-annotation system with defaults that just work — _added 2026-07-02_
+- [ ] **ASR + forced alignment engine** — STT pipeline + forced alignment with default setups that just work; produces Words, Syllables, and Phones tiers — _added 2026-07-02_
+- [ ] **Import from image → sound** — synthesize audio from a figure (waveform image, spectrogram, cepstrogram, or MFCC heatmap; consider other representations) — _added 2026-07-02_
 - [ ] **Interval-create → Enter opens label edit (cursor in field), Enter accepts, Esc cancels** — currently Enter on a just-created interval throws an overlap warning instead of entering label editing — _added 2026-07-02_
 - [ ] **Bug: signal-lane y-axis labels clipped at the top** — rotated labels like "f0" lose the top of the glyphs; add a bit more left/top padding — _added 2026-07-02_
 - [ ] **Bug: "Recording too short for spectrogram window" shows mid-recording** — message bar reports it before the recording is finished — _added 2026-07-02_
@@ -217,6 +220,18 @@ spine (S6). Absorbs the former "structural-lane toggles" item into S3._
   goldens are regenerated from CI); ✅ `just docs-images` (check) + `docs-images-update`
   (refresh goldens). ⬜ Promote the pixel gate to blocking once CI-native goldens land.
   — _added 2026-07-02_
+- [~] **Doc-image catalog — Phase 1 + B1** _(rendered, feat/figure-export)_ — Group A
+  (overview/hero, signal-view, spectrogram, pitch, formants, intensity, mfcc,
+  measure-stack; light+dark hero) + B1 annotated tiers via `shot(textgrid=…)`,
+  from the CC0 demo clip → `docs/assets/generated/`. ⬜ Remaining: user's real
+  word/phone annotation of `demo.wav` (replaces the placeholder phrase tier);
+  wire images into doc pages (Home hero, a "tour" section, annotation-cycle). —
+  _added 2026-07-02_
+- [ ] **Doc-image recipe primitives (Group B)** — small recipe additions for the
+  remaining figures: `selection`/`cursor` (measurement + annotation-editing
+  shots), reference-panel open + distribution install/select (vowel-space
+  figure), DSP-method choice (f0/formant method comparison), multiple bundles
+  (corpus/sidebar navigation). — _added 2026-07-02_
 - [ ] **(future north star) Scripted screencast + TTS narration** — the fuller
   vision from `devlog/2026-05.md`: script an in-app workflow (create/record → measure
   → annotate → …) and emit a **screencast video with narration**, doubling as
@@ -230,6 +245,8 @@ spine (S6). Absorbs the former "structural-lane toggles" item into S3._
   walkthrough idea. Needs its own design pass (engine choice + voice licensing —
   e.g. Piper/Coqui/espeak-ng — offline vs cloud, quality vs footprint). —
   _added 2026-07-02_
+  - Build a **default TTS pipeline in sadda that just works** out of the box —
+    good-enough (not perfect) quality, iterated on later. — _added 2026-07-02_
 
 ## Annotation suite tweaks
 

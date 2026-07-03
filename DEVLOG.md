@@ -6,6 +6,53 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-02 — Doc-image catalog + Phase-1 figures rendered from a real clip
+
+Planned the documentation-image set (what would most help users) now that the
+pipeline exists, and rendered the first batch. The docs had **almost no
+screenshots** — one hand-taken hero + a logo — so this fills the biggest gap.
+
+**Demo clip.** A ~6s CC0 recording (user-provided), *"I don't know, should I
+make a picture of the app? I guess I should make a picture of the app"* — chosen
+for its clear question-vs-statement intonation and varied vowels. Committed at
+`docs/recipes/assets/demo.wav` (mono 16 kHz).
+
+**Catalog (organised by user need, not feature enumeration):**
+
+- *Group A — the signal surfaces* (renderable now): **overview/hero** (the whole
+  app, maximal), **signal-view** (waveform+spectrogram), **spectrogram**,
+  **pitch-contour**, **formant-tracks**, **intensity**, **mfcc**,
+  **measure-stack**. Light + dark for the hero. → `docs/recipes/overview.py`,
+  output to `docs/assets/generated/`.
+- *Group B — annotation + interaction* (needs API extensions): **annotated
+  tiers** (done this pass — see below), then **selection/measurement**,
+  **reference-distribution panel**, **DSP-method comparison**, **corpus/bundle
+  navigation** (deferred; each needs a small recipe primitive — selection,
+  refdist panel toggle + install, DSP-method, multiple bundles).
+
+**B1 shipped — the annotation piping.** Added `shot(textgrid=…)`: the runner
+imports a Praat TextGrid into the bundle so the tier strip has content
+(`RecipeShot.textgrid` → `apply_shot` → `project.import_textgrid`). The hero is
+now **maximal**: menu bar + sidebar + waveform + spectrogram + MFCC + f0 +
+formants + intensity + an annotation tier, showing sadda's *signal* and *corpus*
+sides in one figure. Guarded by `textgrid_import_adds_tiers`.
+
+**Placeholder annotation.** `docs/recipes/assets/demo.TextGrid` currently holds a
+2-interval **phrase** tier placed at the audible silence gaps (accurate enough to
+look right in the hero). The user will replace it with a proper word/phone
+annotation (done *in sadda* — dogfooding the annotation workflow); the hero
+regenerates from it. (A real forced-aligner is the backlogged ASR item.)
+
+**Notable:** lane-focused shots need the *focal* lane sized explicitly, because
+the spectrogram is the flex/remainder pane and otherwise eats the height — e.g.
+`heights=[("f0", 220)]` for the pitch figure. The hero also re-confirmed the
+backlogged y-axis-label clipping bug ("formants" clipped on the left).
+
+**Next:** wire the images into the doc pages (Home hero, a "tour" section,
+annotation-cycle), the user's real demo annotation, and the Group-B primitives.
+
+---
+
 ## 2026-07-02 — Shipped: view-composition scripting + headless documentation-image pipeline (S2–S8)
 
 Built the whole documentation-automation strand designed in the two entries
