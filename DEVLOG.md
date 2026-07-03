@@ -37,11 +37,13 @@ now **maximal**: menu bar + sidebar + waveform + spectrogram + MFCC + f0 +
 formants + intensity + an annotation tier, showing sadda's *signal* and *corpus*
 sides in one figure. Guarded by `textgrid_import_adds_tiers`.
 
-**Placeholder annotation.** `docs/recipes/assets/demo.TextGrid` currently holds a
-2-interval **phrase** tier placed at the audible silence gaps (accurate enough to
-look right in the hero). The user will replace it with a proper word/phone
-annotation (done *in sadda* — dogfooding the annotation workflow); the hero
-regenerates from it. (A real forced-aligner is the backlogged ASR item.)
+**Annotation.** `docs/recipes/assets/demo.TextGrid` now holds the **real**
+annotation — an **Utterance** tier (2 phrases) + a **Words** tier (21 words),
+created *in sadda* (dogfooding the annotation workflow) and exported from the
+project DB (gaps filled as empty intervals for valid Praat tiers). The hero shows
+both, aligned under the speech; the narrow word intervals also exercise the new
+label width-fit + red truncation indicator. (An earlier placeholder phrase tier
+was superseded.)
 
 **Notable:** lane-focused shots need the *focal* lane sized explicitly, because
 the spectrogram is the flex/remainder pane and otherwise eats the height — e.g.
