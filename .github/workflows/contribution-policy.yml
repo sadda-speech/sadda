@@ -1,0 +1,35 @@
+name: Contribution policy
+
+# Enforces CONTRIBUTING.md house rule #6 ("AI assistance is welcome; AI
+# authorship is not"): contributors own their changes, so PRs must not carry AI
+# co-author/generation notation in their commits or description, and must not
+# add an AI assistant's personal workspace config to the repo.
+#
+# NOTE: for this to *block* a merge (not just report red), a maintainer must add
+# the "no-ai-notation" check to main's required status checks in branch
+# protection — CI can report, but only branch protection can gate.
+
+on:
+  pull_request:
+    branches: [main]
+    # `edited` re-runs the check when the PR description changes, catching a
+    # generation footer added to the body after the commits are already clean.
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  no-ai-notation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so BASE..HEAD is resolvable.
+          fetch-depth: 0
+      - name: Check for AI authorship notation
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: bash .github/scripts/check-no-ai-notation.sh

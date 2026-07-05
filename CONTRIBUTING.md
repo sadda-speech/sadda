@@ -86,6 +86,29 @@ mirrors a production path still matches it. Don't leave experimental code in a
 default-compiled path "temporarily"; if it's worth keeping, gate it, and if it's
 not, delete it (git history is the archive).
 
+### 6. AI assistance is welcome; AI authorship is not
+
+Use whatever tools help you write a good contribution — including AI assistants.
+But **you are the author of everything you submit, and you are responsible for
+it**: the code, the commit messages, and the PR description. A tool doesn't
+contribute to sadda any more than a compiler or a text editor does. Two rules
+follow, and CI enforces them:
+
+- **No AI authorship notation.** Don't credit an assistant as an author or
+  co-author, and don't leave generation footers. Concretely: no
+  `Co-authored-by:` (or `Assisted-by:` / `Generated-by:`) trailers naming an
+  assistant — Claude, Copilot, Cursor, and the like — and no "Generated
+  with …" / 🤖 footers in commit messages or PR descriptions. If a tool inserts
+  these by default, strip them before you push. Commit under your own name, too
+  — not an AI bot account — since a squash merge folds commit authorship into
+  `Co-authored-by:` trailers.
+- **No personal AI-assistant config in the repo.** Your assistant's workspace
+  configuration (`.claude/`, `.cursor/`, …) is how _you_ work, not part of
+  sadda — keep it local (it's gitignored).
+
+This isn't a judgment on using AI. It's about a clean, honest record of who
+stands behind each change — and that's you.
+
 ## Filing a good issue
 
 Many contributions start as an issue. A well formed issue lets
