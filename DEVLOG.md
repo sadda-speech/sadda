@@ -6,6 +6,89 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-05 — TTS pipeline T1: the backend-agnostic voiceover core (shipped)
+
+First slice of a text-to-speech capability. The **immediate** driver is voiceover
+for auto-generated documentation (screencasts / tutorial videos); the **general**
+mandate is that the same surface serve any user's ad-hoc TTS. Those two goals have
+different centres of gravity — the docs use case wants *reproducible, free,
+offline, CI-runnable*; the general use case wants *pluggable backends + a stable
+API* — and a single backend abstraction serves both as long as the docs use case
+doesn't quietly dictate the public API.
+
+**Design forks (I proposed defaults; the user stepped away mid-question, so I
+proceeded on the recommendation — flagged here as pending confirmation):**
+
+- **Scope / home → ship `sadda.tts` (Python), GUI deferred.** Not the tooling-only
+  `tools/` option, and *not* full three-surface. This is a deliberate, flagged
+  departure from the three-surface principle (engine + Python + GUI for every
+  user-facing capability): neural TTS has **no meaningful Rust-engine
+  implementation** to write (it's ONNX / Python), and a phonetics *analysis* tool
+  has no proven user story for a "type text, hear voice" GUI button yet. A
+  GUI-native path would force the egui app to either shell to Python or run
+  Kokoro-ONNX via the `ort` crate — real cost, deferred until a concrete analysis
+  use case (analysis-by-synthesis, perception-experiment stimuli) appears.
+- **Backend → local default + pluggable, cloud later.** A structural
+  `TTSBackend` protocol (`name` + `synthesize(text, out_path, *, voice, rate)
+  → SynthesisResult`) is the whole contract; caching / assembly / pipeline speak
+  only to it. Cloud backends (ElevenLabs / OpenAI) are designed to plug in the
+  same way as opt-in add-ons.
+- **Default engine → espeak-ng now; Kokoro is the planned quality default.**
+  `EspeakNgBackend` shells out to the system `espeak-ng` (22.05 kHz mono 16-bit):
+  robotic, but zero-dependency, offline, deterministic, and phonetically apt — the
+  right *reference / CI* backend where reproducibility beats naturalness. **Kokoro**
+  (82M, Apache 2.0, CPU faster-than-real-time, near-ElevenLabs for clean narration)
+  is registered but **not yet wired**: requesting it raises an actionable error
+  rather than shipping guessed API calls, pending the `sadda[tts]` extra decision.
+  Kokoro's Apache-2.0 aligns with sadda's Apache/MIT stance; **Piper was passed
+  over** because its active fork is now GPL-3.0 (copyleft — awkward to bundle even
+  if only invoked as a subprocess) and it's more robotic; XTTS/F5/Fish are
+  non-commercial → out.
+- **Pipeline scope → audio voiceover only.** Screencast/gif capture + A/V muxing
+  (the rest of the doc-automation vision) is a genuinely different problem
+  (GUI-driving under WSLg/xvfb + ffmpeg) → BACKLOG, not this slice.
+
+**What shipped (`python/sadda/tts/`, pure Python, PROVISIONAL):**
+
+- **`script.py`** — the narration model: `Segment` (text + optional voice / rate /
+  `pause_after_s` / stable `id`) and `NarrationScript` (segments + script-wide
+  voice/rate defaults, with a segment-wins fallback chain). `parse_script` is a
+  deliberately minimal text convenience (blank-line-separated paragraphs →
+  segments; soft-wraps collapsed). A richer on-disk format (per-scene ids, inline
+  directives, screencast timing markers) is an **open design question** → BACKLOG.
+- **`backends.py`** — `TTSBackend` protocol, `SynthesisResult`, `EspeakNgBackend`
+  (text fed via `-f tmpfile` to dodge quoting / arg-length; `rate` multiplier →
+  clamped wpm), and a name→factory registry (`get_backend` / `list_backends` /
+  `register_backend`; default via `$SADDA_TTS_BACKEND` → `espeak-ng`).
+- **`pipeline.py`** — the layer voiceover calls. **Content-hash caching**
+  (`cache_key` over `(backend, voice, rate, text)`) so a doc rebuild only
+  re-synthesizes changed lines — the crux of cheap, reproducible generated docs.
+  `synthesize` (one-shot), `synthesize_script` (per-segment cached synthesis +
+  optional assembly), `concat_wavs` (stdlib `wave`; inserts per-segment silence,
+  rejects sample-rate/width/channel mismatches).
+
+Wired into the top-level package (`import sadda; sadda.tts.…`), matching the
+`dsp`/`ml` eager-import convention. **No new dependencies** — espeak-ng is a system
+binary, not a pip dep, so the base install stays lean; the future `sadda[tts]`
+extra is where Kokoro/torch will live.
+
+**Verified end-to-end** (not just unit tests): a two-paragraph script → espeak →
+a 9.34 s assembled 22.05 kHz mono `narration.wav` (4.51 + 4.42 s segments + 0.4 s
+pause), 2 cache entries; a re-run with one line changed re-synthesized exactly one
+segment.
+
+**Deferred → BACKLOG:** Kokoro backend + `sadda[tts]` extra (needs the dependency
+decision); cloud backends (ElevenLabs/OpenAI); screencast/gif capture + A/V mux;
+richer narration-script format; a GUI surface (only if an analysis user story
+lands); a docs API-reference page for `sadda.tts`.
+
+**Gate:** Python **251 passed / 6 skipped** (incl. `test_tts.py`: 13 — script
+parse/fallback, registry + Kokoro-pending error, cache-key stability, WAV concat +
+mismatch guard, pipeline assembly + cache-hit + single-segment re-synth, and an
+espeak-ng integration test that skips when the binary is absent so CI stays green).
+Rust side untouched (pure-Python slice; stubs/clippy unaffected). **Next: confirm
+the forks above, then wire Kokoro (the `sadda[tts]` extra) as the quality default.**
+
 ## 2026-07-02 — Doc-image catalog + Phase-1 figures rendered from a real clip
 
 Planned the documentation-image set (what would most help users) now that the
