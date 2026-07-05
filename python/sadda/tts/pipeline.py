@@ -30,6 +30,7 @@ __all__ = ["ScriptResult", "cache_key", "synthesize", "synthesize_script", "conc
 BackendArg = Union[str, TTSBackend, None]
 
 
+# [docs:sadda.tts.ScriptResult]
 @dataclass(frozen=True)
 class ScriptResult:
     """The outcome of synthesizing a whole :class:`NarrationScript`."""
@@ -45,6 +46,7 @@ def _resolve_backend(backend: BackendArg) -> TTSBackend:
     return backend
 
 
+# [docs:sadda.tts.cache_key]
 @provisional
 def cache_key(text: str, *, backend: str, voice: Optional[str], rate: Optional[float]) -> str:
     """Deterministic hex digest identifying one synthesized span.
@@ -64,6 +66,7 @@ def cache_key(text: str, *, backend: str, voice: Optional[str], rate: Optional[f
     return h.hexdigest()
 
 
+# [docs:sadda.tts.concat_wavs]
 @provisional
 def concat_wavs(
     paths: Sequence[Union[str, Path]],
@@ -119,6 +122,7 @@ def concat_wavs(
     return SynthesisResult(path=out_path, sample_rate=sample_rate, duration_s=duration_s)
 
 
+# [docs:sadda.tts.synthesize]
 @provisional
 def synthesize(
     text: str,
@@ -132,6 +136,7 @@ def synthesize(
     return _resolve_backend(backend).synthesize(text, out_path, voice=voice, rate=rate)
 
 
+# [docs:sadda.tts.synthesize_script]
 @provisional
 def synthesize_script(
     script: NarrationScript,

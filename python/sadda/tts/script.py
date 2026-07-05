@@ -28,6 +28,7 @@ from sadda._stability import provisional
 __all__ = ["Segment", "NarrationScript", "parse_script", "load_script"]
 
 
+# [docs:sadda.tts.Segment]
 @dataclass(frozen=True)
 class Segment:
     """One span of narration.
@@ -55,6 +56,7 @@ class Segment:
     id: Optional[str] = None
 
 
+# [docs:sadda.tts.NarrationScript]
 @provisional
 @dataclass(frozen=True)
 class NarrationScript:
@@ -72,6 +74,7 @@ class NarrationScript:
         # Accept any iterable of segments but store an immutable tuple.
         object.__setattr__(self, "segments", tuple(self.segments))
 
+    # [docs:sadda.tts.NarrationScript.from_texts]
     @classmethod
     def from_texts(
         cls,
@@ -85,10 +88,12 @@ class NarrationScript:
         segs = tuple(Segment(text=t, pause_after_s=pause_after_s) for t in texts)
         return cls(segments=segs, voice=voice, rate=rate)
 
+    # [docs:sadda.tts.NarrationScript.resolved_voice]
     def resolved_voice(self, segment: Segment) -> Optional[str]:
         """The voice a segment should use, applying the fallback chain."""
         return segment.voice if segment.voice is not None else self.voice
 
+    # [docs:sadda.tts.NarrationScript.resolved_rate]
     def resolved_rate(self, segment: Segment) -> Optional[float]:
         """The rate a segment should use, applying the fallback chain."""
         return segment.rate if segment.rate is not None else self.rate
@@ -100,6 +105,7 @@ class NarrationScript:
         return iter(self.segments)
 
 
+# [docs:sadda.tts.parse_script]
 @provisional
 def parse_script(text: str) -> NarrationScript:
     """Parse a minimal plain-text narration script.
@@ -120,6 +126,7 @@ def parse_script(text: str) -> NarrationScript:
     return NarrationScript(segments=segs)
 
 
+# [docs:sadda.tts.load_script]
 @provisional
 def load_script(path: Union[str, Path]) -> NarrationScript:
     """Load a narration script from a text file via :func:`parse_script`."""

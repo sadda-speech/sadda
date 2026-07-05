@@ -49,6 +49,7 @@ __all__ = [
 DEFAULT_BACKEND = "espeak-ng"
 
 
+# [docs:sadda.tts.SynthesisResult]
 @dataclass(frozen=True)
 class SynthesisResult:
     """The outcome of synthesizing one span of text to a WAV file."""
@@ -89,6 +90,7 @@ def _probe_wav(path: Path) -> tuple[int, float]:
     return framerate, (nframes / framerate if framerate else 0.0)
 
 
+# [docs:sadda.tts.EspeakNgBackend]
 @provisional
 class EspeakNgBackend:
     """Synthesize speech by shelling out to the ``espeak-ng`` binary.
@@ -133,6 +135,7 @@ class EspeakNgBackend:
         wpm = round(self._base_wpm * rate) if rate is not None else self._base_wpm
         return max(self._MIN_WPM, min(self._MAX_WPM, wpm))
 
+    # [docs:sadda.tts.EspeakNgBackend.synthesize]
     def synthesize(
         self,
         text: str,
@@ -187,18 +190,21 @@ _REGISTRY: dict[str, Callable[..., TTSBackend]] = {
 }
 
 
+# [docs:sadda.tts.register_backend]
 @provisional
 def register_backend(name: str, factory: Callable[..., TTSBackend]) -> None:
     """Register a backend factory under ``name`` (overwrites any existing one)."""
     _REGISTRY[name] = factory
 
 
+# [docs:sadda.tts.list_backends]
 @provisional
 def list_backends() -> list[str]:
     """Return the registered backend names, sorted."""
     return sorted(_REGISTRY)
 
 
+# [docs:sadda.tts.get_backend]
 @provisional
 def get_backend(name: Optional[str] = None, **kwargs: object) -> TTSBackend:
     """Instantiate a backend by name.
