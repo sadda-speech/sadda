@@ -16,6 +16,17 @@ Status: `[ ]` open · `[~]` in progress · `[x]` done (move to DEVLOG when shipp
 
 _Raw captures land here; groomed into the sections below on request._
 
+- [ ] **Systematic pass on annotation keybindings** — selection, label typing, tier selection etc. behave oddly with the new keybindings; work through it together (needs a joint design/debug session, not a solo fix) — _added 2026-07-02_
+- [ ] **Glyph-distinguishing font for annotations (maybe global)** — use a font that clearly separates O/0, 1/I/l/|, etc.; leaning toward a teletype monospace for annotation text. Candidates: JetBrains Mono / IBM Plex Mono / DejaVu Sans Mono / Iosevka (all disambiguate). Decide scope (annotation text vs global) + embed the font (licensing/size). — _added 2026-07-02_
+- [ ] **Key pattern: chain an interval from the previous endpoint** — after labeling an interval, a fast keypress should start a new interval whose left edge is the just-finished interval's right edge (common annotation flow); design the keybinding (ties into the keybindings pass). — _added 2026-07-02_
+- [ ] **Automatic prosodic annotation** — auto prosody-annotation system with defaults that just work — _added 2026-07-02_
+- [ ] **ASR + forced alignment engine** — STT pipeline + forced alignment with default setups that just work; produces Words, Syllables, and Phones tiers — _added 2026-07-02_
+- [ ] **Import from image → sound** — synthesize audio from a figure (waveform image, spectrogram, cepstrogram, or MFCC heatmap; consider other representations) — _added 2026-07-02_
+- [ ] **Interval-create → Enter opens label edit (cursor in field), Enter accepts, Esc cancels** — currently Enter on a just-created interval throws an overlap warning instead of entering label editing — _added 2026-07-02_
+- [ ] **Bug: signal-lane y-axis labels clipped at the top** — rotated labels like "f0" lose the top of the glyphs; add a bit more left/top padding — _added 2026-07-02_
+- [ ] **Bug: "Recording too short for spectrogram window" shows mid-recording** — message bar reports it before the recording is finished — _added 2026-07-02_
+- [ ] **Bug: View ▸ UI scale slider moves as it scales** — the slider repositions under the cursor while dragging, breaking the selector — _added 2026-07-02_
+- [ ] **Rework the annotation project cycle** — the current flow is clunky/confusing; refine it to feel like an extension of the hand, not a mechsuit — _added 2026-07-02_
 - [ ] **Accessibility for blind researchers** — explore what it would take to do phonetic analyses in sadda with no visual info (non-visual access to waveform/spectrogram/measures — e.g. sonification, screen-reader-friendly Python surface, audio cues). Design exploration. — _added 2026-07-05_
 - [ ] **TTS: build a Guiyang-dialect (Chinese) voice model** — train/adapt a TTS voice for the Guiyang dialect; personal-interest, **low priority**. Would slot in as another `TTSBackend` once a model exists. — _added 2026-07-05_
 - [ ] **TTS: wire the Kokoro backend + `sadda[tts]` extra** — the planned high-quality neural default (Kokoro-82M, hexgrad; weights **Apache-2.0**, confirmed). T1 (2026-07-05) registered `"kokoro"` as a pending backend that raises an actionable error. **Prep done (2026-07-05):** two pip packages exist — `kokoro` (pulls **torch**) vs **`kokoro-onnx`** (ONNX-runtime based). Prefer `kokoro-onnx`: sadda's `[ml]` extra already ships `onnxruntime>=1.22`, so the `[tts]` extra can reuse ORT instead of dragging torch into the wheel, and the model (`onnx-community/Kokoro-82M-v1.0-ONNX`) can likely plug into the existing `hf://` model-registry/fetch path (SADDA_ALLOW_NETWORK-gated). Open: `kokoro-onnx`'s own package license + its phonemizer dep (espeak-ng-backed) licensing; confirm before committing the extra. — _added 2026-07-05_
@@ -119,6 +130,134 @@ _Raw captures land here; groomed into the sections below on request._
     the explore→note flow). Integration: "add to notebook" from the view
     (target_type prefilled + back-link); measure-over-the-set → a `measurement`
     note. Do a design session first. (raised + refined 2026-06-01)
+
+## Export & figures
+
+_Designed 2026-07-01 (see DEVLOG design entry). `FigureSpec` IR in
+`crates/engine/src/io/figure.rs` → pluggable serializers; strand 2 ships first._
+
+- [x] **S2 — GUI-region capture → PNG** _(done, feat/figure-export)_ — rubber-band
+  region select over the app, crop the framebuffer `ColorImage` to the rect, save
+  PNG via a file dialog (reuses/un-gates the F12 screenshot path). The manual/
+  hand-draw tier; named capture + headless automation build on top (S3–S8). —
+  _added 2026-07-01_
+- [ ] **G0 — figure-export groundwork** — move the colormap/spectrogram bake into
+  the engine + expose the spectrogram raster/matrix; add a `visible_lanes()`
+  accessor to the app. Bake-parity test; no user surface. — _added 2026-07-01_
+- [ ] **G1 — first shippable figure** — `FigureSpec` IR + **SVG** serializer for
+  waveform + spectrogram + tiers (specTeX-parity core) + PDF via SVG→PDF; Python
+  `export_figure(...)`; GUI "Export figure…" dialog with per-element include
+  checkboxes (default from `visible_lanes()`) + format choice. — _added 2026-07-01_
+- [ ] **G2 — TikZ backend** — TikZ serializer off the same IR + standalone `.tex`
+  preview wrapper (specTeX integration model). — _added 2026-07-01_
+- [ ] **G3 — measure lanes in figures** — f0 / formants / intensity / VAD as
+  stacked rows, both backends. — _added 2026-07-01_
+- [ ] **G4 — heatmap lanes + style knobs** — MFCC + embedding rasters; expose
+  colormap/palette/font/dimension overrides across Python + GUI (completes the
+  "whole signal column" default). — _added 2026-07-01_
+## Documentation-image pathway
+
+_Designed 2026-07-02 (see DEVLOG design entry). North star: an **automatable,
+headless, drift-tested** pipeline to regenerate documentation images from a
+scripted recipe. Anti-drift = same `SaddaApp::ui` + same egui/wgpu renderer in
+both the live app and the headless path, enforced by `egui_kittest` snapshot
+goldens. Shared primitives (S3–S5) feed both a live driver and the headless
+spine (S6). Absorbs the former "structural-lane toggles" item into S3._
+
+- [~] **S3 — Visibility & selection model** _(mostly done, feat/figure-export)_ —
+  ✅ show/hide for every structural subpane (waveform/spectrogram/tier strip) via
+  View ▸ Signal panes; ✅ per-tier in/out (strip context "Hide tier" + View ▸ Tiers
+  checkboxes, `hidden_tier_ids`); ✅ Python control — `sadda.app.set_pane_visible`
+  / `set_tier_visible` drained + applied after a run. ⬜ Remaining: a
+  `visible_lanes()` accessor (lands with the S4 named-rect registry; also unblocks
+  figure-export G0). — _added 2026-07-02_
+- [~] **S4 — Named-rect registry + interactive named capture** _(mostly done,
+  feat/figure-export)_ — ✅ per-frame double-buffered registry (`capture_rects`) of
+  named rects: composites `whole-window`/`signal-column` + waveform/spectrogram/
+  each measure lane/tier strip; ✅ **View ▸ Capture image → PNG** submenu (hand-drawn
+  *or* named region, greyed when not visible); ✅ `PendingNamed` deferred one frame
+  so the menu leaves the shot; ✅ pixel-rect echo on save (`reproduce with
+  capture(rect=(x,y,w,h))`). ⬜ Remaining: record sidebar/console/side-panels too
+  (only signal-column components + whole-window today); a config-derived
+  `visible_lanes()` for figure-export G0 (the render-time registry covers capture).
+  — _added 2026-07-02_
+- [x] **S6.2 — Programmatic column widths** _(done, feat/figure-export)_ — scriptable
+  `sadda.app.set_column_width(name, width)` for the GUI columns (`bundles` sidebar,
+  `annotation`, `reference`), via the same `PanelState` mechanism as heights. Signal
+  column = the flex/remainder column (set the sides + window size; rejected with a
+  clear error). Also added the three columns to the named-capture registry (closes
+  the S4 gap). Verified headless by difference: widening the request 100pt widens the
+  rendered panel 100pt. — _added 2026-07-02_
+- [x] **S6.1 — Programmatic pane heights** _(done, feat/figure-export)_ — scriptable
+  `sadda.app.set_pane_height(name, height)` for the individual signal-column panes
+  (waveform / tier strip / f0 / formants / intensity / vad / mfcc), by writing
+  egui's `PanelState` — keeps drag intact, persists via eframe, reproducible in the
+  headless harness. Spectrogram = the flex/remainder pane, so it's sized indirectly
+  (rejected with a clear error). Verified headless: a scripted 120px waveform renders
+  at ~120px. ⬜ Optional later: a GUI numeric height control + embedding-lane name. —
+  _added 2026-07-02_
+- [x] **S5 — Standard doc-size presets** _(done, feat/figure-export)_ — ✅ `View ▸
+  Doc size ▸` {1280×800, 1600×1000, 1024×768} via `ViewportCommand::InnerSize`,
+  UI zoom pinned to 100%; ✅ scriptable `sadda.app.set_window_size(w, h)` (queued
+  during a run, applied next frame where the `Context` is in hand). Pixel density
+  on the live window still tracks monitor DPI — the S6 headless path fixes it for
+  byte-reproducibility. — _added 2026-07-02_
+- [~] **S6 — Headless doc-render harness (spine)** _(working, feat/figure-export)_ —
+  ✅ `egui_kittest` 0.34 (eframe+wgpu+snapshot, dev-dep) drives the real `SaddaApp`
+  offscreen in `doc_render.rs`; ✅ compose view via app state → settle async DSP →
+  resolve a named `capture_rect` → wgpu render → crop → PNG (verified: faithful
+  waveform+spectrogram figure of a fixture bundle); ✅ headless via **lavapipe**
+  (software Vulkan) — `configure_headless_gpu` auto-points wgpu at the ICD;
+  render tests `#[ignore]` so default `cargo test` never hits the crashy WSL GPU.
+  ⬜ Remaining: theme/light-mode knob, sequence rendering (for the screencast north
+  star), and folding into the recipe runner (S7). — _added 2026-07-02_
+- [~] **S7 — Recipe API + in-repo recipes** _(core done, feat/figure-export)_ —
+  ✅ `sadda.doc.shot(to, capture, project, bundle, size, theme, show, heights,
+  widths)` declarative Python recipe API; ✅ headless executor (open → select →
+  compose → settle → render → crop → write); ✅ `capture` = named target **or**
+  `rect:x,y,w,h`; ✅ **light/dark theme** (`sadda.app.set_theme` + shot `theme=`);
+  ✅ `just docs-images` (self-configures lavapipe, runs serially). ✅ external
+  recipe **files** (`run_recipe_file` + `docs/recipes/*.py`); ✅ `audio=` builds a
+  throwaway project from a WAV so recipes are self-contained (no committed DB); ✅
+  committed example `docs/recipes/overview.py` rendered by a test. Verified: the
+  file recipe renders end-to-end; parallel scratch-dir race fixed. ⬜ Remaining:
+  a clean-licensed demo speech clip (fixture is synthetic), committing real doc
+  images, and wiring them into the mkdocs site. — _added 2026-07-02_
+- [x] **S8 — CI snapshot-diff gate** _(done, feat/figure-export)_ — ✅ `egui_kittest`
+  `try_image_snapshot` diffs the cropped figure vs a committed golden
+  (`crates/app/tests/snapshots/doc-signal-column.png`) with egui's cross-platform
+  tolerance; ✅ `.github/workflows/docs-images.yml` runs lavapipe headless — structural
+  checks blocking, pixel snapshot advisory (cross-machine determinism unproven until
+  goldens are regenerated from CI); ✅ `just docs-images` (check) + `docs-images-update`
+  (refresh goldens). ⬜ Promote the pixel gate to blocking once CI-native goldens land.
+  — _added 2026-07-02_
+- [~] **Doc-image catalog — Phase 1 + B1** _(rendered, feat/figure-export)_ — Group A
+  (overview/hero, signal-view, spectrogram, pitch, formants, intensity, mfcc,
+  measure-stack; light+dark hero) + B1 annotated tiers via `shot(textgrid=…)`,
+  from the CC0 demo clip → `docs/assets/generated/`. ✅ Real Utterance+Words
+  annotation wired in; ✅ Home hero on `index.md` (light/dark via Material
+  `#only-light/#only-dark`). ⬜ Remaining: a "tour" section + annotation-cycle
+  images; README still uses the old hand-taken screenshot. — _added 2026-07-02_
+- [ ] **Doc-image recipe primitives (Group B)** — small recipe additions for the
+  remaining figures: `selection`/`cursor` (measurement + annotation-editing
+  shots), reference-panel open + distribution install/select (vowel-space
+  figure), DSP-method choice (f0/formant method comparison), multiple bundles
+  (corpus/sidebar navigation). — _added 2026-07-02_
+- [ ] **(future north star) Scripted screencast + TTS narration** — the fuller
+  vision from `devlog/2026-05.md`: script an in-app workflow (create/record → measure
+  → annotate → …) and emit a **screencast video with narration**, doubling as
+  end-to-end UI testing. Rides on the S6 headless driver rendering a **timed frame
+  sequence** (not single frames) + `ffmpeg` muxing (frames + audio → mp4/gif) + an
+  audio track. Design S6/S7 so they don't foreclose it; not on the doc-image
+  critical path. — _added 2026-07-02_
+- [ ] **TTS / speech synthesis in the app (roadmap dependency)** — prerequisite for
+  the screencast narration above (and generally useful: synthesized stimuli,
+  narrated tutorials). Not yet on any roadmap; only appeared in the 2026-05
+  walkthrough idea. Needs its own design pass (engine choice + voice licensing —
+  e.g. Piper/Coqui/espeak-ng — offline vs cloud, quality vs footprint). —
+  _added 2026-07-02_
+  - Build a **default TTS pipeline in sadda that just works** out of the box —
+    good-enough (not perfect) quality, iterated on later. — _added 2026-07-02_
 
 ## Annotation suite tweaks
 

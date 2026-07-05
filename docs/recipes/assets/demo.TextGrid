@@ -1,0 +1,204 @@
+File type = "ooTextFile"
+Object class = "TextGrid"
+
+xmin = 0
+xmax = 5.952
+tiers? <exists>
+size = 2
+item []:
+    item [1]:
+        class = "IntervalTier"
+        name = "Utterance"
+        xmin = 0
+        xmax = 5.952
+        intervals: size = 5
+        intervals [1]:
+            xmin = 0.0
+            xmax = 0.7824511193761129
+            text = ""
+        intervals [2]:
+            xmin = 0.7824511193761129
+            xmax = 3.1154445391037657
+            text = "Should I make a picture of the app?"
+        intervals [3]:
+            xmin = 3.1154445391037657
+            xmax = 3.225986028284205
+            text = ""
+        intervals [4]:
+            xmin = 3.225986028284205
+            xmax = 5.1926103935934576
+            text = "I don't know, I guess I should make a picture of the app."
+        intervals [5]:
+            xmin = 5.1926103935934576
+            xmax = 5.952
+            text = ""
+    item [2]:
+        class = "IntervalTier"
+        name = "Words"
+        xmin = 0
+        xmax = 5.952
+        intervals: size = 41
+        intervals [1]:
+            xmin = 0.0
+            xmax = 0.7778652166261033
+            text = ""
+        intervals [2]:
+            xmin = 0.7778652166261033
+            xmax = 1.077042528190408
+            text = "should"
+        intervals [3]:
+            xmin = 1.077042528190408
+            xmax = 1.0913822914313536
+            text = ""
+        intervals [4]:
+            xmin = 1.0913822914313536
+            xmax = 1.1912405390781464
+            text = "i"
+        intervals [5]:
+            xmin = 1.1912405390781464
+            xmax = 1.2055060030276883
+            text = ""
+        intervals [6]:
+            xmin = 1.2055060030276883
+            xmax = 1.4004673436714266
+            text = "make"
+        intervals [7]:
+            xmin = 1.4004673436714266
+            xmax = 1.4154689246865573
+            text = ""
+        intervals [8]:
+            xmin = 1.4154689246865573
+            xmax = 1.6413387705543028
+            text = "a"
+        intervals [9]:
+            xmin = 1.6413387705543028
+            xmax = 2.0764354210153284
+            text = ""
+        intervals [10]:
+            xmin = 2.0764354210153284
+            xmax = 2.488560518201177
+            text = "picture"
+        intervals [11]:
+            xmin = 2.488560518201177
+            xmax = 2.4926873928188034
+            text = ""
+        intervals [12]:
+            xmin = 2.4926873928188034
+            xmax = 2.6210765683646793
+            text = "of"
+        intervals [13]:
+            xmin = 2.6210765683646793
+            xmax = 2.6265700131549616
+            text = ""
+        intervals [14]:
+            xmin = 2.6265700131549616
+            xmax = 2.719295528826983
+            text = "the"
+        intervals [15]:
+            xmin = 2.719295528826983
+            xmax = 2.7366717909261333
+            text = ""
+        intervals [16]:
+            xmin = 2.7366717909261333
+            xmax = 3.112329008264068
+            text = "app"
+        intervals [17]:
+            xmin = 3.112329008264068
+            xmax = 3.225986028284205
+            text = ""
+        intervals [18]:
+            xmin = 3.225986028284205
+            xmax = 3.316415419658654
+            text = "I"
+        intervals [19]:
+            xmin = 3.316415419658654
+            xmax = 3.337094194290339
+            text = ""
+        intervals [20]:
+            xmin = 3.337094194290339
+            xmax = 3.462251299700414
+            text = "don't"
+        intervals [21]:
+            xmin = 3.462251299700414
+            xmax = 3.4674661790925003
+            text = ""
+        intervals [22]:
+            xmin = 3.4674661790925003
+            xmax = 3.5573197784645987
+            text = "know"
+        intervals [23]:
+            xmin = 3.5573197784645987
+            xmax = 3.576978646326316
+            text = ""
+        intervals [24]:
+            xmin = 3.576978646326316
+            xmax = 3.652594397511569
+            text = "I"
+        intervals [25]:
+            xmin = 3.652594397511569
+            xmax = 3.8325077365385525
+            text = ""
+        intervals [26]:
+            xmin = 3.8325077365385525
+            xmax = 3.8403300556266813
+            text = ""
+        intervals [27]:
+            xmin = 3.8403300556266813
+            xmax = 3.9055160480277626
+            text = "I"
+        intervals [28]:
+            xmin = 3.9055160480277626
+            xmax = 4.028065713741794
+            text = "should"
+        intervals [29]:
+            xmin = 4.028065713741794
+            xmax = 4.054140110702226
+            text = ""
+        intervals [30]:
+            xmin = 4.054140110702226
+            xmax = 4.19494185428856
+            text = "make"
+        intervals [31]:
+            xmin = 4.19494185428856
+            xmax = 4.21058649246482
+            text = ""
+        intervals [32]:
+            xmin = 4.21058649246482
+            xmax = 4.307061761218419
+            text = "a"
+        intervals [33]:
+            xmin = 4.307061761218419
+            xmax = 4.327921278786765
+            text = ""
+        intervals [34]:
+            xmin = 4.327921278786765
+            xmax = 4.7425041904576375
+            text = "picture"
+        intervals [35]:
+            xmin = 4.7425041904576375
+            xmax = 4.75293394924181
+            text = ""
+        intervals [36]:
+            xmin = 4.75293394924181
+            xmax = 4.810297622554761
+            text = "of"
+        intervals [37]:
+            xmin = 4.810297622554761
+            xmax = 4.823334821034978
+            text = ""
+        intervals [38]:
+            xmin = 4.823334821034978
+            xmax = 4.885913373740015
+            text = "the"
+        intervals [39]:
+            xmin = 4.885913373740015
+            xmax = 4.888520813436059
+            text = ""
+        intervals [40]:
+            xmin = 4.888520813436059
+            xmax = 5.1753391800008135
+            text = "app"
+        intervals [41]:
+            xmin = 5.1753391800008135
+            xmax = 5.952
+            text = ""

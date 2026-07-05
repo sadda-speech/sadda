@@ -112,6 +112,20 @@ develop:
 pytest: develop
     uv run pytest python/tests/ tools/docs/
 
+# Regenerate documentation images headlessly (S7). Drives the real app offscreen
+# via egui_kittest + wgpu — the same stack users see, so images can't drift.
+# Needs a software-Vulkan (lavapipe) adapter; the tests auto-detect the ICD, or
+# set VK_ICD_FILENAMES + WGPU_BACKEND=vulkan yourself (CI does). Recipes live in
+# `crates/app/src/doc_render.rs`; rendered images land under `target/doc-render/`.
+docs-images:
+    cargo test -p sadda-app --bins doc_render -- --ignored --nocapture --test-threads=1
+
+# Refresh the committed snapshot goldens after an *intended* UI change (S8).
+# Review the resulting image diff before committing — this is the deliberate
+# "yes, the docs figure should change" step.
+docs-images-update:
+    UPDATE_SNAPSHOTS=1 cargo test -p sadda-app --bins doc_render -- --ignored --test-threads=1
+
 # ── Convenience ─────────────────────────────────────────────────────────────
 
 # Auto-format (the mutating counterpart to fmt-check).

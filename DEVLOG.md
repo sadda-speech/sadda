@@ -89,6 +89,406 @@ espeak-ng integration test that skips when the binary is absent so CI stays gree
 Rust side untouched (pure-Python slice; stubs/clippy unaffected). **Next: confirm
 the forks above, then wire Kokoro (the `sadda[tts]` extra) as the quality default.**
 
+## 2026-07-02 — Doc-image catalog + Phase-1 figures rendered from a real clip
+
+Planned the documentation-image set (what would most help users) now that the
+pipeline exists, and rendered the first batch. The docs had **almost no
+screenshots** — one hand-taken hero + a logo — so this fills the biggest gap.
+
+**Demo clip.** A ~6s CC0 recording (user-provided), *"I don't know, should I
+make a picture of the app? I guess I should make a picture of the app"* — chosen
+for its clear question-vs-statement intonation and varied vowels. Committed at
+`docs/recipes/assets/demo.wav` (mono 16 kHz).
+
+**Catalog (organised by user need, not feature enumeration):**
+
+- *Group A — the signal surfaces* (renderable now): **overview/hero** (the whole
+  app, maximal), **signal-view** (waveform+spectrogram), **spectrogram**,
+  **pitch-contour**, **formant-tracks**, **intensity**, **mfcc**,
+  **measure-stack**. Light + dark for the hero. → `docs/recipes/overview.py`,
+  output to `docs/assets/generated/`.
+- *Group B — annotation + interaction* (needs API extensions): **annotated
+  tiers** (done this pass — see below), then **selection/measurement**,
+  **reference-distribution panel**, **DSP-method comparison**, **corpus/bundle
+  navigation** (deferred; each needs a small recipe primitive — selection,
+  refdist panel toggle + install, DSP-method, multiple bundles).
+
+**B1 shipped — the annotation piping.** Added `shot(textgrid=…)`: the runner
+imports a Praat TextGrid into the bundle so the tier strip has content
+(`RecipeShot.textgrid` → `apply_shot` → `project.import_textgrid`). The hero is
+now **maximal**: menu bar + sidebar + waveform + spectrogram + MFCC + f0 +
+formants + intensity + an annotation tier, showing sadda's *signal* and *corpus*
+sides in one figure. Guarded by `textgrid_import_adds_tiers`.
+
+**Annotation.** `docs/recipes/assets/demo.TextGrid` now holds the **real**
+annotation — an **Utterance** tier (2 phrases) + a **Words** tier (21 words),
+created *in sadda* (dogfooding the annotation workflow) and exported from the
+project DB (gaps filled as empty intervals for valid Praat tiers). The hero shows
+both, aligned under the speech; the narrow word intervals also exercise the new
+label width-fit + red truncation indicator. (An earlier placeholder phrase tier
+was superseded.)
+
+**Notable:** lane-focused shots need the *focal* lane sized explicitly, because
+the spectrogram is the flex/remainder pane and otherwise eats the height — e.g.
+`heights=[("f0", 220)]` for the pitch figure. The hero also re-confirmed the
+backlogged y-axis-label clipping bug ("formants" clipped on the left).
+
+**Next:** wire the images into the doc pages (Home hero, a "tour" section,
+annotation-cycle), the user's real demo annotation, and the Group-B primitives.
+
+---
+
+## 2026-07-02 — Shipped: view-composition scripting + headless documentation-image pipeline (S2–S8)
+
+Built the whole documentation-automation strand designed in the two entries
+below, on `feat/figure-export`. The result: **compose the app's view, capture a
+region, and regenerate documentation images headlessly from a Python recipe —
+all drift-tested against the real app.**
+
+- **S2 — hand-draw capture** (`crates/app/src/capture.rs`). Rubber-band a region
+  → crop the framebuffer → save PNG; echoes the pixel rect so a hand-drawn
+  selection lifts into a scriptable `capture(rect=…)`.
+- **S3 — visibility & selection model.** Every signal subpane is now show/hideable
+  (waveform/spectrogram/tier strip had no toggle before) and every tier is
+  selectable in/out; a dynamic **flex-lane** chooser so hiding *any* lane reflows
+  instead of leaving a hole. Scriptable: `sadda.app.set_pane_visible` /
+  `set_tier_visible`.
+- **S4 — named-rect registry + named capture.** A per-frame registry of named
+  regions (composites `whole-window`/`signal-column`, every lane, the side
+  columns); a "Capture ▸ region" menu; capture by name or pixel rect.
+- **S5/S6.1/S6.2 — reproducible layout, all scriptable.** `set_window_size` (doc
+  presets + zoom pin), `set_pane_height`, `set_column_width` — the last two by
+  writing egui's `PanelState`, so drag stays intact and sizes persist.
+- **S6 — the headless spine** (`crates/app/src/doc_render.rs`, `#[cfg(test)]`).
+  `egui_kittest` + wgpu drives the *real* `SaddaApp` offscreen through the same
+  egui/wgpu stack users see, on **lavapipe** (software Vulkan) — no window, no
+  display. This is the anti-drift guarantee made concrete.
+- **S7 — the recipe runner.** `sadda.doc.shot(...)` declarative Python recipes
+  (project/audio, bundle, size, theme, visibility, heights, widths, capture);
+  `audio=` builds a throwaway project from a WAV so recipes are self-contained;
+  external recipe *files* under `docs/recipes/`; `just docs-images`; a light/dark
+  `set_theme` knob.
+- **S8 — the drift gate.** The cropped figure is an `egui_kittest` snapshot golden
+  (`crates/app/tests/snapshots/`); `.github/workflows/docs-images.yml` renders on
+  lavapipe in CI — structural checks blocking, the pixel snapshot advisory until
+  goldens are regenerated from CI's own renderer.
+
+**Scripting surface** (drained after a run, like `register_command`):
+`sadda.app.{set_pane_visible, set_tier_visible, set_window_size, set_pane_height,
+set_column_width, set_theme}` + `sadda.doc.shot`. Every one is exercised by a
+Python-through-the-interpreter integration test; the layout ones are additionally
+verified by *rendering* and measuring the real geometry.
+
+**Notable engineering:** wgpu segfaults on the WSL/CI default adapter → pinned to
+lavapipe (auto-detected ICD; render tests `#[ignore]` so a normal `cargo test`
+never touches it). egui stores a panel's *content* rect in `PanelState`, so the
+column-width test verifies by *difference* (widen 100pt → panel moves 100pt),
+cancelling the frame-margin offset. Render tests share the GPU + one embedded
+Python interpreter, so `just docs-images` runs them serially and per-run scratch
+dirs avoid a project-clobber race.
+
+**Deferred (in BACKLOG):** a clean-licensed demo speech clip (fixture is a
+synthetic tone), committing real doc images into the mkdocs site, and promoting
+the pixel snapshot to a blocking gate once CI-native goldens are validated.
+
+---
+
+## 2026-07-02 — Design: automatable documentation-image pathway (headless, drift-tested)
+
+Strand 2 (the 2026-07-01 entry) shipped hand-drawn region capture. The user then
+expanded the goal into its real shape: **an automatable pathway to regenerate a
+set of documentation images from a scripted, repeatable recipe** — so docs stay
+in sync when the UI changes. Explicit requirements added in this session:
+
+1. Select regions to capture **by name/category**, not only by hand-draw (keep
+   hand-draw too).
+2. **Standard window sizes** (presets) so screenshots share consistent
+   proportions/look.
+3. **Every signal subpane show/hideable** and **every annotation tier selectable
+   in/out**.
+4. **Scriptable, repeatable** recipes.
+5. **Headless.**
+6. **No drift** from the GUI users actually see.
+
+### The load-bearing question: headless *and* faithful
+
+Requirements 5 and 6 look opposed (a headless offscreen renderer is the classic
+place drift creeps in). Resolution — **there is no separate doc renderer**:
+
+- **Structural anti-drift.** Both the live app and the headless pipeline run the
+  *identical* `SaddaApp::ui` through the *identical* egui + wgpu stack. Confirmed
+  `eframe` 0.34 renders via wgpu (`egui-wgpu` on by default), and
+  [`egui_kittest`](https://crates.io/crates/egui_kittest) with its `wgpu` feature
+  renders through that same stack. The only things that can differ are
+  environmental — fonts, theme, `pixels_per_point`, window size — which we pin to
+  identical values in both paths.
+- **Enforced anti-drift.** The doc images *are* `egui_kittest` snapshot goldens.
+  CI re-renders and diffs them, so any UI change that would alter a documentation
+  image **fails the build** until the image is regenerated and reviewed. This is
+  exactly what kittest exists for; drift becomes a caught test failure, not a
+  silent doc rot.
+- **Headless falls out for free.** kittest renders offscreen via wgpu — a
+  software Vulkan adapter (lavapipe) in CI, WSLg's adapter locally. No display
+  server needed.
+
+### Prior art
+
+docs-as-code screenshots: Playwright/Puppeteer element screenshots + fixed
+viewport; Storybook + Chromatic; `VHS` (terminal); and `egui_kittest` itself
+(egui's own snapshot-test suite). The named-rect registry is a curated version of
+an accessibility/testing tree (AccessKit, which eframe already enables).
+
+### Architecture
+
+- **Shared primitives** (driver-agnostic): per-subpane visibility; per-tier
+  in/out; a per-frame **named-rect registry** (panes + lanes + composites like
+  `signal-column` and `whole-window`); window-size presets; a pinned zoom so
+  output pixels are deterministic.
+- **A recipe** = an ordered list of *shots*: `{ size, project, bundle, visible
+  panes, visible tiers, cursor/selection, region → output file }`.
+- **Two drivers off the shared primitives:**
+  - *Live (eframe)* — interactive/authoring. Actions run against the live window;
+    capture via `ViewportCommand::Screenshot`. Best-effort/async (the script
+    engine can't pump frames — it runs synchronously between them). This is the
+    already-shipped hand-draw + the forthcoming named-capture menu.
+  - *Headless (`egui_kittest` + wgpu)* — **the automation spine.** A step-driven
+    harness owns the frame loop, so it can drive `SaddaApp` directly, run frames
+    until DSP analysis settles, snapshot the named region, and write the PNG —
+    all *synchronously* and deterministically. Drift-tested via snapshots.
+
+### Feasibility & risks (checked)
+
+- eframe→wgpu confirmed; kittest+wgpu shares it. **Low renderer-drift risk.**
+- `egui_kittest` must match egui **0.34** (pin the dev-dep; fallback = bump
+  egui/eframe to 0.35 — larger, deferred unless forced).
+- CI needs a wgpu adapter → **lavapipe** (software Vulkan) for deterministic
+  headless pixels; allow a small snapshot diff tolerance (as egui's CI does).
+
+### Reconciliation with the 2026-07-01 entry
+
+The user now wants **real GUI toggles** for every subpane + per-tier in/out. This
+supersedes the 07-01 note that "the export dialog owns per-element include flags
+(rather than force GUI changes)" and **absorbs** the parked "separable
+structural-lane toggles" backlog item into this work. The interactive hand-draw
+capture (shipped) and the named-capture menu remain as the manual/authoring tier
+beneath the headless spine.
+
+### Slice plan
+
+- **S3 — Visibility & selection model** (shared): show/hide for *every* signal
+  subpane (waveform, spectrogram, tier strip — none today — unified with the
+  existing f0/formant/intensity/VAD/MFCC toggles) + per-tier in/out; a
+  `visible_lanes()` accessor. GUI menus.
+- **S4 — Named-rect registry + interactive named capture**: per-frame registry
+  (panes + lanes + composites); "Capture ▸ *region*" submenu (live driver).
+- **S5 — Standard size presets**: `View ▸ Doc size ▸` {1280×800, 1600×1000,
+  1024×768} via `ViewportCommand::InnerSize`; zoom pinned to 1.0 in doc size.
+- **S6 — Headless doc-render harness** (the spine): `egui_kittest` + wgpu binary/
+  test driving `SaddaApp`, capturing named regions, writing PNGs.
+- **S7 — Recipe API + in-repo recipes**: a shared **Python** primitive API
+  (decided 2026-07-02 — recipes are Python; the user authors in Python and the
+  app already embeds CPython) — `size`, `open`, `select`, `show_only`,
+  `show_tiers`, `cursor`, `capture`, `quit`. `capture` accepts **either** a named
+  region **or** an explicit pixel rect `(x, y, w, h)` — pixel rects are
+  reproducible precisely because doc-mode pins size + zoom. The interactive
+  hand-draw (S2) **echoes its final pixel rect** (info banner / console) so a
+  hand-drawn selection lifts straight into a scriptable `capture(rect=…)`. A
+  `just docs-images` regeneration target.
+- **S8 — CI snapshot-diff gate**: lavapipe adapter + golden diffing.
+
+### North star: scripted screencast + narration (future)
+
+Logged, not scoped now — the fuller vision the user has carried since
+[`devlog/2026-05.md`](devlog/2026-05.md) (the "auto-generated feature walkthrough
+with synthesized voiceover, doubling as end-to-end UI testing" intake): script a
+whole in-app workflow (create/record a sound → measure → annotate → …) and emit a
+**screencast video with TTS narration**. Why it belongs here: a screencast is the
+S6 headless driver rendering a **timed frame sequence** + an audio track, rather
+than one snapshot per shot — so **S6 should be built to render sequences, not
+hard-code single frames** (each "shot" = a settle-then-grab; a screencast = grab
+every frame at a fixed fps). Additional pieces it needs, none built: a fixed-fps
+frame-sequence recorder, `ffmpeg` muxing (frames + audio → mp4/gif), an audio
+track (real playback capture and/or synthesized), and **TTS for the narration —
+which is not yet on the roadmap** (see the new BACKLOG item). Kept as a north star
+so nothing in S6/S7 forecloses it; not on the critical path for doc images.
+
+### What this doesn't decide
+
+Recipe format (Python vs data file — settle at S7); exact lavapipe/tolerance
+tuning (S8); whether the live driver ever gains a full async action-queue or
+stays hand-draw + named-menu only (revisit after the headless spine lands).
+
+### Sources / references
+
+- egui_kittest — egui's snapshot-testing harness: crates.io/crates/egui_kittest
+- 2026-07-01 strand-2 entry (hand-draw capture; the primitives this builds on)
+- `devlog/2026-05.md` — the auto-generated feature-walkthrough + voiceover intake
+  (the screencast/TTS north star this pathway seeds)
+
+---
+
+## 2026-07-01 — Design session: figure export + GUI-region capture
+
+The **publication-quality figure export** logged on 2026-05-25 (intake only,
+gated on "once the visual elements are all developed") gets its design pass. The
+session also split out a second, smaller strand the user raised alongside it.
+This is a **design entry** — no code yet; it settles the route, architecture,
+and slice plan, and reframes a premise the intake note had baked in.
+
+### Two strands
+
+1. **Publication figures.** A simple way to write out professional, journal-ready
+   figures *from within the app* — the waveform / spectrogram / annotation-tier
+   figure that is the staple of a phonetics paper.
+2. **GUI-region capture.** Separately: write out a raster image of an arbitrary
+   region of the GUI, for documentation/slides. No signal semantics — just a
+   crop-and-save. Small; shipped **first** as a quick win.
+
+### The gate had quietly changed shape (stale premise)
+
+The intake note gated the exporter on "after Phase-3 GUI *overlay rendering*" —
+meaning f0/formants composited **on** the spectrogram. That was never built.
+Instead the GUI pivoted to a **stacked-lane** layout: waveform → spectrogram →
+separate f0 / formant / intensity / MFCC / VAD / embedding lanes → tier strips
+(`crates/app/src/main.rs:10899+`). So the gate's *premise* is stale, not failed:
+the visual elements are all developed, just as sibling lanes rather than
+overlays. Not a blocker.
+
+### Prior art — specTeX sample studied
+
+The user's own Praat exporter, **specTeX** (github.com/dbqpdb/specTeX), is the
+style baseline. Studied its rendered sample (`examples/demo_document.pdf`): two
+stacked panels sharing a time axis — thin black waveform (y = "Pressure (Pa)",
+min/max labels + zero line) over a greyscale spectrogram (y = "Frequency (Hz)"
+on the right); a **tier header row** (`p ɹ ɑː t` / `praat`) whose interval
+**boundary lines extend down through both panels**; Computer-Modern serif with
+cleanly typeset IPA; "Time (s)" along the bottom. Architecture: a Praat script
+exports raster PDFs (waveform + spectrogram) + a `.tex` data file of TikZ
+commands, assembled via `\specfigure{…}`. Deps: tikz/graphicx/calc/fontspec,
+XeLaTeX/LuaLaTeX, Doulos SIL for IPA.
+
+**Key reframe:** in Praat, that export-rasters-and-reassemble-in-LaTeX dance was
+a *limitation Praat forced* (Praat can't draw the finished figure itself), not a
+workflow the user prefers. Sadda has no such constraint — it can render the
+finished figure directly. So "must this go through LaTeX/TikZ at all?" was
+genuinely re-opened rather than inherited. Everything that makes the target look
+good (crisp vector axes/ticks/tier-boxes/boundary lines, embedded greyscale
+raster spectrogram, journal proportions) is achievable by **any** good vector
+renderer. The *only* thing that strictly needs the LaTeX route is having figure
+text match the surrounding document's fonts automatically; a direct SVG/PDF gets
+very close by embedding a Latin-Modern-like serif + a Unicode IPA font (and can
+outline glyphs to paths for a fully self-contained file).
+
+### Standard problem & alternatives
+
+Reproducible scientific-figure generation — vector export of a mixed
+raster+vector plot. Phonetics prior art: Praat Picture→EPS/PDF, **praatpicture**
+(R/ggplot, Puggaard-Rode), parselmouth+matplotlib, specTeX (TikZ). Route options
+weighed: (A) **direct vector** SVG/PDF — one file, one click, no toolchain, drops
+into LaTeX/Word/web; (B) **TikZ/LaTeX** — document-font-matched + hand-editable,
+but multi-file + a LaTeX build; (C) **both off a shared IR**. The IR investment
+is route-agnostic, so (C) dominates on flexibility for a bounded extra cost.
+
+### Decisions locked
+
+- **Architecture: a `FigureSpec` IR + pluggable serializers.** New
+  `crates/engine/src/io/figure.rs`, mirroring the tabular exporter's
+  `ExportBundle`/`ExportTier` → `to_csv`/`to_json` split (data-IR → serializer).
+- **Two backends, both in this effort:** **SVG/PDF** (the easy default; PDF via
+  an SVG→PDF step) **and** **TikZ** (`.tex` fragment + raster assets, specTeX
+  integration model, for LaTeX-native tuning). Same IR feeds both.
+- **Content: the whole signal column** (not the Python console) by default, with
+  **per-element include flags on the `FigureSpec`** so a figure can differ from
+  the screen (e.g. spectrogram without waveform). Defaults from current
+  visibility.
+- **Style: clean publication defaults**, with the IR carrying overridable style
+  fields (colormap, palette, fonts, dimensions, bounds) — knobs surfaced to
+  Python/GUI later.
+- **Strand 2 (GUI capture) ships first.**
+
+### Toggle reality (the requirement to confirm)
+
+Audited whether the signal column is fully togglable today (so "export what's
+shown" is user-controlled). It is **not, yet**: f0/formants/intensity/VAD are
+View-menu checkboxes (`persisted.tracks.*`, visibility coupled to computation),
+MFCC has "Show MFCC lane" (`persisted.mfcc.show`), embedding is shown iff a tier
+is picked (`persisted.embedding.selected_tier_id`) — but **waveform, spectrogram,
+and tier strips have no toggle** (always drawn), and there is **no single
+"visible lanes" descriptor** — visibility is scattered across three
+`PersistedState` fields plus the layout control-flow in `bundle_content_pane`.
+Resolution (better than forcing GUI changes): the **export dialog owns its own
+per-element include checkboxes** — including the always-on lanes — defaulting
+from a new consolidating `visible_lanes()` accessor the app should have anyway.
+Adding real GUI show/hide toggles for the structural lanes is a **separable** UI
+enhancement, not part of this feature.
+
+### The one real refactor
+
+The spectrogram exists only as a **baked GPU texture**, and the colormap bake
+(`power_to_db_normalized`/`colormap_bake`/`sample_colormap`) currently lives in
+the **app** (`state.rs`), not the engine. Headless, three-surface export needs
+that bake (or the raw STFT power matrix) available engine-side — so it moves into
+the engine (where those pure-data functions arguably belong). Everything else the
+exporter needs already exists as clean engine data: `PitchFrame`/`FormantFrame`/
+`IntensityFrame` frame vectors (vector-friendly polylines), tiers, and a min/max
+waveform envelope (drawn as a **vector** band — improving on specTeX, which
+rasters the waveform).
+
+### Slice plan
+
+Strand 2 first, then strand 1 by capability; each slice ships engine + Python +
+GUI + tests per the three-surface rule (from G1 on).
+
+- **S2 — GUI region capture (first).** Rubber-band region select over the app →
+  `ViewportCommand::Screenshot` → crop `ColorImage` to the rect (logical→physical
+  px via `pixels_per_point`) → save PNG via file dialog. Reuses/un-gates the F12
+  screenshot path (`debug::save_screenshot`, `main.rs:8900-8916`). GUI-only.
+- **G0 — groundwork.** Move the colormap/spectrogram bake into the engine +
+  expose the spectrogram raster/matrix; add `visible_lanes()` to the app.
+  Bake-parity test. No user surface.
+- **G1 — first shippable figure.** `FigureSpec` IR + **SVG** serializer for
+  **waveform + spectrogram + tiers** (specTeX-parity core) + PDF via SVG→PDF;
+  Python `export_figure(...)`; GUI "Export figure…" dialog with per-element
+  include checkboxes (default from `visible_lanes()`) + format choice.
+  Golden-SVG + round-trip tests.
+- **G2 — TikZ backend.** TikZ serializer off the same IR + a standalone `.tex`
+  wrapper for one-shot preview. Golden-`.tex` test.
+- **G3 — measure lanes.** f0 / formants / intensity / VAD as stacked rows in the
+  IR, both backends.
+- **G4 — heatmap lanes + style knobs.** MFCC + embedding rasters; expose
+  colormap/palette/font/dimension overrides across Python + GUI. Completes the
+  "whole signal column" goal.
+
+### Steelman & disconfirmers
+
+- **Steelman for TikZ-only (path not fully taken):** the user already owns a
+  mature TikZ renderer; document-font-matched, hand-editable output is a real
+  advantage for camera-ready figures. Kept alive as the G2 backend — not
+  discarded. Disconfirmer for direct-SVG-primary: if in practice every figure
+  needs LaTeX-native font matching and hand-tuning, the SVG path is dead weight
+  and we should have led with TikZ. Watch which backend the user actually reaches
+  for once both exist.
+- **Disconfirmer for the whole feature:** if the direct SVG figure can't hit the
+  specTeX look convincingly (IPA typesetting, spectrogram fidelity), the
+  "simple/easy" promise fails and the LaTeX route was the honest answer. G1's
+  SVG sample against `demo_document.pdf` is the checkpoint.
+
+### What this entry doesn't decide
+
+Exact `FigureSpec` field names; the SVG font-embedding vs glyph-outlining choice
+for IPA (decided at G1 against the specTeX sample); the SVG→PDF crate
+(`svg2pdf`/`resvg` — evaluated at G1); whether structural-lane GUI toggles ever
+get added (separate).
+
+### Sources / references
+
+- specTeX — Praat TikZ figure exporter; style baseline: github.com/dbqpdb/specTeX
+  (`examples/demo_document.pdf`, `specTeX.sty`, `specTeX.praat`)
+- 2026-05-25 intake entry (the deferred figure-export + bundle-rename items)
+- praatpicture (R) — Puggaard-Rode; prior art for reproducing Praat-style figures
+
+---
+
 ## 2026-07-01 — Git history rewrite: removed AI co-author trailers
 
 Rewrote the **entire commit history** to strip the `Co-Authored-By: Claude …`
