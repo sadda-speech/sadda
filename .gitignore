@@ -46,3 +46,7 @@ Thumbs.db
 # Local scratch — manual-testing recordings / projects, informal artifacts
 /ManualTesting/
 /scratch/
+
+# Claude Code — personal workflow config (commands, settings), not project
+# spec. Kept out of the repo so it isn't imposed on contributors.
+/.claude/
