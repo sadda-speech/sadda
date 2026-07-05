@@ -31,11 +31,14 @@ for users who don't need VAD / embeddings; ML calls raise a clean
 - **[Quickstart](quickstart.md)** — open a project, register a bundle,
   run pitch / formants / a clinical measure, query the results as a
   Polars DataFrame.
+- **[Text-to-speech](tts.md)** — synthesize narration for generated docs
+  (or any TTS task) through a pluggable backend, with content-hash caching
+  and 100+ languages via espeak-ng.
 - **API reference** — auto-generated from the Python source for
   [`sadda.corpus`](api/corpus.md), [`sadda.dsp`](api/dsp.md),
   [`sadda.clinical`](api/clinical.md), [`sadda.refdist`](api/refdist.md),
-  [`sadda.ml`](api/ml.md), [`sadda.live`](api/live.md), and
-  [`sadda.recipe`](api/recipe.md).
+  [`sadda.ml`](api/ml.md), [`sadda.live`](api/live.md),
+  [`sadda.recipe`](api/recipe.md), and [`sadda.tts`](api/tts.md).
 - **Round-trip lossiness** — what's preserved (and what isn't) on
   [TextGrid](lossiness/textgrid.md) and [EAF](lossiness/eaf.md)
   import/export.
@@ -50,7 +53,7 @@ Per the
 |---|---|---|
 | **Stable** | `sadda.corpus`, `sadda.dsp`, top-level project loaders | Won't break across minor versions |
 | **Stable (clinical)** | `sadda.clinical` | Same commitment as Stable; the separate tier flags that these measures are **research-use only**, not for clinical diagnosis |
-| **Provisional** | `sadda.live`, `sadda.recipe`, `sadda.refdist`, `sadda.ml` | May break in minor versions after a deprecation cycle |
+| **Provisional** | `sadda.live`, `sadda.recipe`, `sadda.refdist`, `sadda.ml`, `sadda.tts` | May break in minor versions after a deprecation cycle |
 | **Experimental** | `sadda.experimental.*` (none yet) | May break any release |
 
 Non-stable APIs emit a one-time `ProvisionalAPIWarning` /
