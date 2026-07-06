@@ -3500,8 +3500,12 @@ impl SaddaApp {
                 } else {
                     for c in &view.citations {
                         ui.label(&c.reference);
-                        if let Some(doi) = &c.doi {
-                            ui.hyperlink_to(format!("doi:{doi}"), format!("https://doi.org/{doi}"));
+                        if let Some(link) = c.weblink() {
+                            let label = match &c.doi {
+                                Some(doi) => format!("doi:{doi}"),
+                                None => link.clone(),
+                            };
+                            ui.hyperlink_to(label, link);
                         }
                         ui.add_space(4.0);
                     }
@@ -3512,8 +3516,8 @@ impl SaddaApp {
             let text = view
                 .citations
                 .iter()
-                .map(|c| match &c.doi {
-                    Some(doi) => format!("{} https://doi.org/{doi}", c.reference),
+                .map(|c| match c.weblink() {
+                    Some(link) => format!("{} {link}", c.reference),
                     None => c.reference.clone(),
                 })
                 .collect::<Vec<_>>()

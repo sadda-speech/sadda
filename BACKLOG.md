@@ -16,6 +16,8 @@ Status: `[ ]` open · `[~]` in progress · `[x]` done (move to DEVLOG when shipp
 
 _Raw captures land here; groomed into the sections below on request._
 
+- [ ] **Yearly citation-link check** — once a year, verify every weblink in a citation (engine `citation_for` registry + `## References` blocks + module/docstring refs + model cards) still resolves *and* points to the intended material. Fix drifted URLs; for a link that's gone dead with no replacement, remove the link and leave a note that no weblink is available (per the weblink convention: a citation has either a working link or an explicit "no weblink available" note). Could be a scripted link-checker over the repo's http(s)/doi.org URLs, run manually or in a scheduled CI job. — _added 2026-07-06_
+
 - [ ] **Systematic pass on annotation keybindings** — selection, label typing, tier selection etc. behave oddly with the new keybindings; work through it together (needs a joint design/debug session, not a solo fix) — _added 2026-07-02_
 - [ ] **Glyph-distinguishing font for annotations (maybe global)** — use a font that clearly separates O/0, 1/I/l/|, etc.; leaning toward a teletype monospace for annotation text. Candidates: JetBrains Mono / IBM Plex Mono / DejaVu Sans Mono / Iosevka (all disambiguate). Decide scope (annotation text vs global) + embed the font (licensing/size). — _added 2026-07-02_
 - [ ] **Key pattern: chain an interval from the previous endpoint** — after labeling an interval, a fast keypress should start a new interval whose left edge is the just-finished interval's right edge (common annotation flow); design the keybinding (ties into the keybindings pass). — _added 2026-07-02_

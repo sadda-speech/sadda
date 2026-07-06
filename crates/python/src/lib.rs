@@ -1795,11 +1795,19 @@ impl PyCitation {
     fn doi(&self) -> Option<String> {
         self.inner.doi.clone()
     }
+    /// A resolvable weblink: the `https://doi.org/<doi>` URL when there's a DOI,
+    /// otherwise an explicit canonical URL. `None` only if neither is known.
+    #[getter]
+    fn weblink(&self) -> Option<String> {
+        self.inner.weblink()
+    }
 
     fn __repr__(&self) -> String {
         format!(
-            "Citation(processor_id={:?}, doi={:?})",
-            self.inner.processor_id, self.inner.doi
+            "Citation(processor_id={:?}, doi={:?}, weblink={:?})",
+            self.inner.processor_id,
+            self.inner.doi,
+            self.inner.weblink()
         )
     }
 }
