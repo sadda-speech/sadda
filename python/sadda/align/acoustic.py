@@ -47,6 +47,29 @@ PROCESSOR_ID = "sadda.align.wav2vec2_espeak"
 #: facebook/wav2vec2-lv-60-espeak-cv-ft). Fetched by :meth:`Wav2Vec2EspeakModel.from_pretrained`.
 DEFAULT_REPO = "sadda-speech/wav2vec2-espeak-ctc"
 
+#: The input sample rate the wav2vec2 CTC net was trained at. Audio at any other
+#: rate is resampled to this before inference (see :func:`_resample_to_model_rate`).
+SAMPLE_RATE = 16_000
+
+
+def _resample_to_model_rate(audio: np.ndarray, sample_rate: int) -> np.ndarray:
+    """Mono float32 ``audio`` resampled to the model's :data:`SAMPLE_RATE`.
+
+    Returns the input (as a flat float32 array) unchanged when it is already at
+    the model rate. Otherwise resamples via the engine's FFT-domain resampler
+    (:meth:`sadda.Audio.resample`) — the same resampler the VAD path uses — so
+    arbitrary-rate recordings can be aligned without the caller resampling by
+    hand. Kept module-level (not inlined into :meth:`Wav2Vec2EspeakModel.emissions`)
+    so the resampling seam is unit-testable without the ONNX-gated model.
+    """
+    x = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if sample_rate == SAMPLE_RATE:
+        return x
+    import sadda  # local import avoids a package-level import cycle
+
+    resampled = sadda.Audio.from_samples(x, sample_rate, channels=1).resample(SAMPLE_RATE)
+    return np.asarray(resampled.samples, dtype=np.float32)
+
 
 def _import_onnxruntime():
     try:
@@ -131,13 +154,13 @@ class Wav2Vec2EspeakModel:
 
     # [docs:sadda.align.Wav2Vec2EspeakModel.emissions]
     def emissions(self, audio: np.ndarray, sample_rate: int) -> Emissions:
-        """Run the model over ``audio`` (mono, 16 kHz) → per-frame log-probs."""
-        if sample_rate != 16000:
-            raise ValueError(
-                f"Wav2Vec2EspeakModel expects 16 kHz audio, got {sample_rate} Hz "
-                "— resample first."
-            )
-        x = np.asarray(audio, dtype=np.float32).reshape(-1)
+        """Run the model over mono ``audio`` → per-frame log-probs.
+
+        Audio not already at the model's :data:`SAMPLE_RATE` (16 kHz) is
+        resampled first (:func:`_resample_to_model_rate`), so recordings at any
+        rate align without the caller resampling by hand.
+        """
+        x = _resample_to_model_rate(audio, sample_rate)
         # wav2vec2 input normalisation: zero mean, unit variance.
         x = (x - x.mean()) / (x.std() + 1e-7)
         logits = self._session.run([self._output], {self._input: x[None, :]})[0][0]

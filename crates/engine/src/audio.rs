@@ -102,6 +102,54 @@ impl Audio {
         }
     }
 
+    /// Returns a new `Audio` resampled to `target_hz`, preserving the channel
+    /// count. Each channel is resampled independently with the crate's
+    /// FFT-domain resampler ([`crate::dsp::resample_to_hz`]) — the same one the
+    /// VAD path uses to reach a model's fixed input rate. Returns a clone when
+    /// the rate already matches or the buffer is empty. Used by the forced
+    /// aligner to feed models that require a specific rate (e.g. the 16 kHz
+    /// wav2vec2 CTC net), so arbitrary-rate recordings "just work".
+    pub fn resample_to(&self, target_hz: u32) -> Audio {
+        if target_hz == self.sample_rate || self.samples.is_empty() {
+            let mut out = self.clone();
+            out.sample_rate = target_hz;
+            return out;
+        }
+        let channels = self.channels as usize;
+        if channels <= 1 {
+            return Audio {
+                samples: crate::dsp::resample_to_hz(&self.samples, self.sample_rate, target_hz),
+                sample_rate: target_hz,
+                channels: self.channels,
+            };
+        }
+        // De-interleave → resample each channel → re-interleave. Every channel
+        // has the same input length, so `resample_to_hz` yields the same output
+        // length for each; guard with `min` in case a short channel is returned
+        // unchanged.
+        let frames = self.frame_count();
+        let planes: Vec<Vec<f32>> = (0..channels)
+            .map(|c| {
+                let chan: Vec<f32> = (0..frames)
+                    .map(|i| self.samples[i * channels + c])
+                    .collect();
+                crate::dsp::resample_to_hz(&chan, self.sample_rate, target_hz)
+            })
+            .collect();
+        let out_frames = planes.iter().map(Vec::len).min().unwrap_or(0);
+        let mut samples = Vec::with_capacity(out_frames * channels);
+        for i in 0..out_frames {
+            for plane in &planes {
+                samples.push(plane[i]);
+            }
+        }
+        Audio {
+            samples,
+            sample_rate: target_hz,
+            channels: self.channels,
+        }
+    }
+
     /// Reads only a WAV file's header to learn its size without decoding any
     /// samples — cheap regardless of file length. Used to decide, *before*
     /// committing to a full in-memory load, whether a file is large enough to
@@ -250,6 +298,59 @@ mod tests {
         assert!((0.49..0.51).contains(&peak), "peak was {peak}");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn resample_to_changes_rate_and_length_proportionally() {
+        // 8 kHz mono sine → 16 kHz doubles the frame count (± a couple frames).
+        let n = 8_000usize;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / 8_000.0;
+                0.5 * (2.0 * std::f32::consts::PI * 200.0 * t).sin()
+            })
+            .collect();
+        let a = Audio::from_samples(samples, 8_000, 1);
+
+        let up = a.resample_to(16_000);
+        assert_eq!(up.sample_rate, 16_000);
+        assert_eq!(up.channels, 1);
+        let expected = n * 16_000 / 8_000;
+        assert!(
+            (up.frame_count() as i64 - expected as i64).abs() <= 2,
+            "frames {} vs expected {expected}",
+            up.frame_count()
+        );
+        // amplitude is preserved (not a no-op that zeroed the signal)
+        let peak = up.samples.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+        assert!((0.4..0.6).contains(&peak), "peak was {peak}");
+    }
+
+    #[test]
+    fn resample_to_matching_rate_is_a_copy() {
+        let a = Audio::from_samples(vec![0.1, -0.2, 0.3, -0.4], 16_000, 1);
+        let same = a.resample_to(16_000);
+        assert_eq!(same.sample_rate, 16_000);
+        assert_eq!(same.samples, a.samples);
+    }
+
+    #[test]
+    fn resample_to_preserves_channel_count_and_interleaving() {
+        // Stereo 8 kHz → 16 kHz stays stereo; interleaved length = frames × 2.
+        let frames = 4_000usize;
+        let mut samples = Vec::with_capacity(frames * 2);
+        for i in 0..frames {
+            let t = i as f32 / 8_000.0;
+            samples.push(0.4 * (2.0 * std::f32::consts::PI * 150.0 * t).sin()); // L
+            samples.push(0.3 * (2.0 * std::f32::consts::PI * 300.0 * t).sin()); // R
+        }
+        let a = Audio::from_samples(samples, 8_000, 2);
+
+        let up = a.resample_to(16_000);
+        assert_eq!(up.channels, 2);
+        assert_eq!(up.sample_rate, 16_000);
+        assert_eq!(up.samples.len(), up.frame_count() * 2);
+        assert!((up.frame_count() as i64 - 8_000).abs() <= 2);
     }
 
     #[test]

@@ -282,6 +282,14 @@ class Audio:
         Construct an `Audio` from a 1-D float32 NumPy array of interleaved samples
         (values in `[-1.0, 1.0]`). For stereo the layout is `[L0, R0, L1, R1, ...]`.
         """
+    def resample(self, target_hz: builtins.int) -> Audio:
+        r"""
+        Return a new `Audio` resampled to `target_hz` (Hz), preserving the
+        channel count. Uses the engine's FFT-domain resampler — the same one the
+        VAD path uses to reach a model's required rate — so any-rate audio can be
+        fed to a fixed-rate model (e.g. forced alignment's 16 kHz net). A no-op
+        copy when the rate already matches.
+        """
     def __repr__(self) -> builtins.str: ...
 
 @typing.final

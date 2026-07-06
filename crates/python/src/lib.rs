@@ -142,6 +142,17 @@ impl PyAudio {
         }
     }
 
+    /// Return a new `Audio` resampled to `target_hz` (Hz), preserving the
+    /// channel count. Uses the engine's FFT-domain resampler — the same one the
+    /// VAD path uses to reach a model's required rate — so any-rate audio can be
+    /// fed to a fixed-rate model (e.g. forced alignment's 16 kHz net). A no-op
+    /// copy when the rate already matches.
+    fn resample(&self, target_hz: u32) -> PyAudio {
+        PyAudio {
+            inner: self.inner.resample_to(target_hz),
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Audio(sample_rate={}, channels={}, n_frames={}, duration_seconds={:.4})",

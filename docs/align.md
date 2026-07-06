@@ -22,11 +22,11 @@ PROVISIONAL tier. See the API reference at [`sadda.align`](api/align.md), and th
 import sadda
 import numpy as np
 
-# audio: a mono 16 kHz float32 waveform (resample first if yours isn't 16 kHz)
-audio = load_your_audio_as_16k_mono()
+# audio: a mono float32 waveform at any sample rate (resampled to 16 kHz for you)
+audio, sample_rate = load_your_audio_as_mono()
 
 model = sadda.align.Wav2Vec2EspeakModel.from_pretrained("sadda-speech/wav2vec2-espeak-ctc")
-alignment = sadda.align.align(audio, 16000, "the words that were said", model=model)
+alignment = sadda.align.align(audio, sample_rate, "the words that were said", model=model)
 
 for w in alignment.words:
     print(f"{w.start_seconds:.2f}-{w.end_seconds:.2f}  {w.text}  [{' '.join(p.label for p in w.phones)}]")
@@ -115,8 +115,9 @@ agreement engine scores an aligner against a hand-corrected reference).
 
 ## Caveats
 
-- **16 kHz mono input.** `Wav2Vec2EspeakModel` requires 16 kHz; resample first
-  (a built-in resample is a planned refinement).
+- **Mono input.** Pass a mono waveform. Any sample rate is accepted —
+  `Wav2Vec2EspeakModel` resamples to its 16 kHz training rate internally (via
+  the engine's FFT-domain resampler, `Audio.resample`), so you don't have to.
 
 ## References
 

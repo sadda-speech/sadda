@@ -158,8 +158,11 @@ def test_wav2vec2_espeak_model_produces_emissions() -> None:
     # log-probs: each frame's exp-sum ~ 1
     assert np.allclose(np.exp(em.log_probs).sum(axis=1), 1.0, atol=1e-3)
 
-    with pytest.raises(ValueError, match="16 kHz"):
-        model.emissions(np.zeros(8000, dtype=np.float32), 8000)
+    # non-16 kHz audio is resampled internally, not rejected: 0.5 s at 8 kHz
+    # yields the same frame count as 0.5 s at 16 kHz.
+    em_16k = model.emissions(np.zeros(8000, dtype=np.float32), 16000)
+    em_8k = model.emissions(np.zeros(4000, dtype=np.float32), 8000)
+    assert em_8k.log_probs.shape == em_16k.log_probs.shape
 
 
 # --- silence detection (blank detector) ---
@@ -250,6 +253,41 @@ def test_audio_from_samples_roundtrip() -> None:
     a = sadda.Audio.from_samples(x, 16000)
     assert a.sample_rate == 16000 and a.channels == 1 and a.n_frames == 800
     assert np.allclose(a.samples, x, atol=1e-6)
+
+
+def test_audio_resample_changes_rate_and_length() -> None:
+    # 0.5 s of an 8 kHz sine → 16 kHz: rate updates, frame count ~doubles,
+    # amplitude survives (not a zeroing no-op).
+    t = np.arange(4000, dtype=np.float32) / 8000.0
+    x = (0.5 * np.sin(2 * np.pi * 200.0 * t)).astype(np.float32)
+    up = sadda.Audio.from_samples(x, 8000).resample(16000)
+    assert up.sample_rate == 16000 and up.channels == 1
+    assert abs(up.n_frames - 8000) <= 2
+    assert 0.4 <= float(np.max(np.abs(up.samples))) <= 0.6
+
+
+def test_audio_resample_matching_rate_is_noop() -> None:
+    x = np.linspace(-0.3, 0.3, 500, dtype=np.float32)
+    same = sadda.Audio.from_samples(x, 16000).resample(16000)
+    assert same.sample_rate == 16000 and same.n_frames == 500
+    assert np.allclose(same.samples, x, atol=1e-6)
+
+
+def test_resample_to_model_rate_helper() -> None:
+    from sadda.align.acoustic import SAMPLE_RATE, _resample_to_model_rate
+
+    # already at the model rate → returned unchanged (flat float32)
+    x = np.linspace(-0.4, 0.4, 640, dtype=np.float32)
+    at_rate = _resample_to_model_rate(x, SAMPLE_RATE)
+    assert at_rate.dtype == np.float32
+    assert np.allclose(at_rate, x, atol=1e-6)
+
+    # off-rate → resampled to the model rate, proportional length
+    t = np.arange(4000, dtype=np.float32) / 8000.0
+    y = (0.5 * np.sin(2 * np.pi * 150.0 * t)).astype(np.float32)
+    out = _resample_to_model_rate(y, 8000)
+    assert out.dtype == np.float32
+    assert abs(len(out) - len(y) * SAMPLE_RATE // 8000) <= 2
 
 
 @pytest.mark.skipif(shutil.which("espeak-ng") is None, reason="espeak-ng not installed")
