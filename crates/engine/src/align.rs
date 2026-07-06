@@ -267,7 +267,9 @@ mod tests {
             .map(|&hot| {
                 let hi = 0.8f32.ln();
                 let lo = (0.2f32 / (n_classes - 1) as f32).ln();
-                (0..n_classes).map(|c| if c == hot { hi } else { lo }).collect()
+                (0..n_classes)
+                    .map(|c| if c == hot { hi } else { lo })
+                    .collect()
             })
             .collect()
     }
@@ -282,8 +284,14 @@ mod tests {
         let m = emissions(&[1, 1, 2, 2], 3);
         let spans = forced_align(&as_slices(&m), &[1, 2], 0).unwrap();
         assert_eq!(spans.len(), 2);
-        assert_eq!((spans[0].label, spans[0].start_frame, spans[0].end_frame), (1, 0, 2));
-        assert_eq!((spans[1].label, spans[1].start_frame, spans[1].end_frame), (2, 2, 4));
+        assert_eq!(
+            (spans[0].label, spans[0].start_frame, spans[0].end_frame),
+            (1, 0, 2)
+        );
+        assert_eq!(
+            (spans[1].label, spans[1].start_frame, spans[1].end_frame),
+            (2, 2, 4)
+        );
     }
 
     #[test]
@@ -291,8 +299,15 @@ mod tests {
         // A leading blank frame + trailing blank frame must still be covered.
         let m = emissions(&[0, 1, 2, 0], 3);
         let spans = forced_align(&as_slices(&m), &[1, 2], 0).unwrap();
-        assert_eq!(spans[0].start_frame, 0, "leading blank attaches to first phone");
-        assert_eq!(spans.last().unwrap().end_frame, 4, "trailing blank attaches to last phone");
+        assert_eq!(
+            spans[0].start_frame, 0,
+            "leading blank attaches to first phone"
+        );
+        assert_eq!(
+            spans.last().unwrap().end_frame,
+            4,
+            "trailing blank attaches to last phone"
+        );
         // no gaps
         for w in spans.windows(2) {
             assert_eq!(w[0].end_frame, w[1].start_frame);
@@ -319,7 +334,10 @@ mod tests {
     #[test]
     fn rejects_bad_input() {
         let m = emissions(&[1, 2], 3);
-        assert_eq!(forced_align(&as_slices(&m), &[], 0), Err(AlignError::EmptyTargets));
+        assert_eq!(
+            forced_align(&as_slices(&m), &[], 0),
+            Err(AlignError::EmptyTargets)
+        );
         assert_eq!(forced_align(&[], &[1], 0), Err(AlignError::NoFrames));
         assert_eq!(
             forced_align(&as_slices(&m), &[9], 0),
