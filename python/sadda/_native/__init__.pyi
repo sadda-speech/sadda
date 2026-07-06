@@ -433,6 +433,12 @@ class Citation:
         r"""
         Bare DOI, if one exists.
         """
+    @property
+    def weblink(self) -> typing.Optional[builtins.str]:
+        r"""
+        A resolvable weblink: the `https://doi.org/<doi>` URL when there's a DOI,
+        otherwise an explicit canonical URL. `None` only if neither is known.
+        """
     def __repr__(self) -> builtins.str: ...
 
 @typing.final

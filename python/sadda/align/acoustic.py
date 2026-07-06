@@ -15,11 +15,12 @@ References
 ---------
 - Xu, Q., Baevski, A. & Auli, M. (2022). Simple and Effective Zero-shot
   Cross-lingual Phoneme Recognition. *Interspeech 2022*, 2113–2117.
-  doi:10.21437/Interspeech.2022-60. — the espeak-IPA fine-tuned model; the
-  citation the ``sadda.align.wav2vec2_espeak`` processor registers.
+  https://doi.org/10.21437/Interspeech.2022-60 — the espeak-IPA fine-tuned
+  model; the citation the ``sadda.align.wav2vec2_espeak`` processor registers.
 - Baevski, A., Zhou, Y., Mohamed, A. & Auli, M. (2020). wav2vec 2.0: A
   Framework for Self-Supervised Learning of Speech Representations. *NeurIPS
-  33*, 12449–12460. — the underlying self-supervised architecture.
+  33*, 12449–12460. https://arxiv.org/abs/2006.11477 — the underlying
+  self-supervised architecture.
 
 Stability tier: PROVISIONAL.
 """

@@ -18,17 +18,17 @@
 //!
 //! - Graves, A., Fernández, S., Gomez, F. & Schmidhuber, J. (2006). Connectionist
 //!   temporal classification: labelling unsegmented sequence data with recurrent
-//!   neural networks. *ICML 2006*, 369–376. doi:10.1145/1143844.1143891. — the
-//!   CTC alignment lattice this is a forced (fixed-target) instance of; the
+//!   neural networks. *ICML 2006*, 369–376. <https://doi.org/10.1145/1143844.1143891>
+//!   — the CTC alignment lattice this is a forced (fixed-target) instance of; the
 //!   citation the [`crate::citation`] registry returns for `sadda.align.forced_align`.
 //! - Viterbi, A. J. (1967). Error bounds for convolutional codes and an
 //!   asymptotically optimum decoding algorithm. *IEEE Trans. Inf. Theory* 13(2):
-//!   260–269. doi:10.1109/TIT.1967.1054010. — the max-probability-path dynamic
-//!   program.
+//!   260–269. <https://doi.org/10.1109/TIT.1967.1054010> — the max-probability-path
+//!   dynamic program.
 //! - Kürzinger, L., Winkelbauer, D., Li, L., Watzel, T. & Rigoll, G. (2020).
 //!   CTC-Segmentation of Large Corpora for German End-to-End Speech Recognition.
-//!   *SPECOM 2020*, LNCS 12335. doi:10.1007/978-3-030-60276-5_27. — using CTC
-//!   posteriors as a forced aligner for text-to-audio segmentation.
+//!   *SPECOM 2020*, LNCS 12335. <https://doi.org/10.1007/978-3-030-60276-5_27> —
+//!   using CTC posteriors as a forced aligner for text-to-audio segmentation.
 //!
 //! Implementation reference (not a paper): `torchaudio.functional.forced_align`
 //! — same blank-staggered trellis and transition rules.

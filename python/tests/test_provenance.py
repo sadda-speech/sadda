@@ -70,4 +70,6 @@ def test_citations_dedup_and_omit_uncited() -> None:
         assert len(cites) == 1
         assert "Davis" in cites[0].reference
         assert cites[0].doi == "10.1109/TASSP.1980.1163420"
+        # the DOI also resolves to a clickable weblink
+        assert cites[0].weblink == "https://doi.org/10.1109/TASSP.1980.1163420"
         assert cites[0].processor_id == "sadda.dsp.mfcc"

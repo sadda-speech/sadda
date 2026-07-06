@@ -121,8 +121,19 @@ agreement engine scores an aligner against a hand-corrected reference).
 
 ## References
 
-The forced-align DP: Graves et al. (2006, CTC), Kürzinger et al. (2020,
-CTC-Segmentation). The acoustic model: Xu et al. (2022), Baevski et al. (2020).
+The forced-align DP:
+
+- Graves et al. (2006), *Connectionist temporal classification* —
+  <https://doi.org/10.1145/1143844.1143891>
+- Kürzinger et al. (2020), *CTC-Segmentation of Large Corpora* —
+  <https://doi.org/10.1007/978-3-030-60276-5_27>
+
+The acoustic model:
+
+- Xu et al. (2022), *Simple and Effective Zero-shot Cross-lingual Phoneme
+  Recognition* — <https://doi.org/10.21437/Interspeech.2022-60>
+- Baevski et al. (2020), *wav2vec 2.0* — <https://arxiv.org/abs/2006.11477>
+
 Full citations are in the [`sadda.align`](api/align.md) module and the engine
 citation registry (`citation_for("sadda.align.forced_align")` /
-`"sadda.align.wav2vec2_espeak"`).
+`"sadda.align.wav2vec2_espeak"`), each of which carries a weblink.
