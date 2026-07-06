@@ -527,6 +527,29 @@ mod tests {
     }
 
     #[test]
+    fn silence_intervals_are_never_adjacent() {
+        // sil A sil B sil — three silence regions, each separated by a phone.
+        let m = emissions(&[0, 0, 1, 0, 0, 0, 2, 0, 0], 3);
+        // Also stress the merge: a mask that marks the phone frames silent too,
+        // so the blank runs would be adjacent unless the carve merges them.
+        let all_silent = vec![true; 9];
+        for mask in [None, Some(all_silent.as_slice())] {
+            let spans = forced_align(&as_slices(&m), &[1, 2], 0, 2, mask).unwrap();
+            for w in spans.windows(2) {
+                assert!(
+                    !(w[0].is_silence && w[1].is_silence),
+                    "adjacent silence spans (mask={})",
+                    mask.is_some()
+                );
+            }
+        }
+        // The all-silent mask collapses everything into a single silence span.
+        let one = forced_align(&as_slices(&m), &[1, 2], 0, 0, Some(&all_silent)).unwrap();
+        assert_eq!(one.len(), 1);
+        assert!(one[0].is_silence);
+    }
+
+    #[test]
     fn silence_mask_wrong_length_errors() {
         let m = emissions(&[1, 2], 3);
         let mask = [false, false, false];

@@ -169,11 +169,12 @@ class _EdgeSilenceMock:
     """Emits blank-favoured frames around the phone blocks — leading + trailing
     silence — so the blank detector should carve them into empty intervals."""
 
-    def __init__(self, phones, frames_per_phone=3, silence_frames=6, frame_rate=100.0):
+    def __init__(self, phones, frames_per_phone=3, silence_frames=6, frame_rate=100.0, gap_after=None):
         self.phones = phones
         self.fpp = frames_per_phone
         self.sil = silence_frames
         self.fr = frame_rate
+        self.gap_after = gap_after  # insert a blank block after this phone index (mid pause)
         self.v = {p: i + 1 for i, p in enumerate(dict.fromkeys(phones))}
 
     def emissions(self, audio, sample_rate) -> Emissions:
@@ -186,8 +187,10 @@ class _EdgeSilenceMock:
                 rows.append([hi if c == hot else lo for c in range(C)])
 
         block(0, self.sil)  # leading silence (blank)
-        for p in self.phones:
+        for i, p in enumerate(self.phones):
             block(self.v[p], self.fpp)
+            if i == self.gap_after:
+                block(0, self.sil)  # mid-utterance pause (blank)
         block(0, self.sil)  # trailing silence
         return Emissions(np.array(rows, dtype=np.float32), self.v, self.fr, 0)
 
@@ -211,6 +214,25 @@ def test_blank_detector_marks_edge_silence_as_empty_intervals() -> None:
     hi = next(w for w in al.words if w.text == "hi")
     assert hi.start_seconds > 0.0
     assert [w.text for w in al.words][0] == "" and [w.text for w in al.words][-1] == ""
+
+
+@pytest.mark.skipif(shutil.which("espeak-ng") is None, reason="espeak-ng not installed")
+def test_no_two_adjacent_empty_intervals() -> None:
+    # leading + mid + trailing silence: three distinct silence regions. Both
+    # tiers must stay a partition with NO two empty intervals back-to-back —
+    # adjacent silences must always merge into one.
+    phones = list(sadda.align.phonemize("hi there").words[0].phones) + list(
+        sadda.align.phonemize("hi there").words[1].phones
+    )
+    model = _EdgeSilenceMock(phones, frames_per_phone=3, silence_frames=6, frame_rate=100.0, gap_after=1)
+    al = sadda.align.align(np.zeros(16000, np.float32), 16000, "hi there", model=model, min_silence_seconds=0.03)
+
+    empty_phone_runs = [a.label == "" and b.label == "" for a, b in zip(al.phones, al.phones[1:])]
+    assert not any(empty_phone_runs), "adjacent empty phone intervals"
+    empty_word_runs = [a.text == "" and b.text == "" for a, b in zip(al.words, al.words[1:])]
+    assert not any(empty_word_runs), "adjacent empty word intervals"
+    # and there really were interior pauses to merge (not a vacuous pass)
+    assert sum(1 for p in al.phones if p.label == "") >= 3
 
 
 @pytest.mark.skipif(shutil.which("espeak-ng") is None, reason="espeak-ng not installed")
