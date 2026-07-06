@@ -42,6 +42,7 @@ _STRESS = "ˈˌ"
 _EDGE_PUNCT = string.punctuation + "…—–«»¡¿"
 
 
+# [docs:sadda.align.Word]
 @dataclass(frozen=True)
 class Word:
     """One word and its phonemization.
@@ -59,6 +60,7 @@ class Word:
     phones: tuple[str, ...]
 
 
+# [docs:sadda.align.Utterance]
 @dataclass(frozen=True)
 class Utterance:
     """A phonemized transcript: an ordered list of :class:`Word`\\ s."""
@@ -66,17 +68,20 @@ class Utterance:
     words: tuple[Word, ...]
     voice: str
 
+    # [docs:sadda.align.Utterance.phones]
     @property
     def phones(self) -> tuple[str, ...]:
         """The full phone sequence across all words, in order."""
         return tuple(p for w in self.words for p in w.phones)
 
 
+# [docs:sadda.align.strip_stress]
 def strip_stress(ipa: str) -> str:
     """Remove IPA primary/secondary stress marks (``ˈ ˌ``)."""
     return ipa.translate({ord(c): None for c in _STRESS})
 
 
+# [docs:sadda.align.split_phones]
 def split_phones(ipa: str) -> list[str]:
     """Segment an IPA string into phones.
 
@@ -121,6 +126,7 @@ def _espeak_ipa(text: str, voice: str) -> str:
     return out.stdout.replace("\n", " ").strip()
 
 
+# [docs:sadda.align.phonemize]
 @provisional
 def phonemize(text: str, *, voice: str = "en-us") -> Utterance:
     """Phonemize a transcript to per-word IPA phones via espeak-ng.

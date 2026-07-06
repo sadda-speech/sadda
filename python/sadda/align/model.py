@@ -20,6 +20,7 @@ import numpy as np
 __all__ = ["Emissions", "AcousticModel"]
 
 
+# [docs:sadda.align.Emissions]
 @dataclass(frozen=True)
 class Emissions:
     """Per-frame acoustic posteriors for one audio clip.

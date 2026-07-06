@@ -30,6 +30,7 @@ from .model import AcousticModel
 __all__ = ["TimedPhone", "TimedWord", "Alignment", "tokenize", "align"]
 
 
+# [docs:sadda.align.TimedPhone]
 @dataclass(frozen=True)
 class TimedPhone:
     """One aligned phone with its time span and confidence."""
@@ -40,6 +41,7 @@ class TimedPhone:
     score: float
 
 
+# [docs:sadda.align.TimedWord]
 @dataclass(frozen=True)
 class TimedWord:
     """One aligned word: its span and the phones inside it."""
@@ -50,6 +52,7 @@ class TimedWord:
     phones: tuple[TimedPhone, ...]
 
 
+# [docs:sadda.align.Alignment]
 @dataclass(frozen=True)
 class Alignment:
     """A forced alignment: aligned words and the flat phone sequence."""
@@ -58,6 +61,7 @@ class Alignment:
     phones: tuple[TimedPhone, ...]
 
 
+# [docs:sadda.align.tokenize]
 def tokenize(ipa: str, vocab: Mapping[str, int]) -> list[int]:
     """Greedy longest-match an IPA string into ``vocab`` class ids.
 
@@ -83,6 +87,7 @@ def tokenize(ipa: str, vocab: Mapping[str, int]) -> list[int]:
     return out
 
 
+# [docs:sadda.align.align]
 @provisional
 def align(
     audio: np.ndarray,

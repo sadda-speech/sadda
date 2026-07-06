@@ -70,6 +70,7 @@ def _import_hf_hub():
     return hf_hub_download
 
 
+# [docs:sadda.align.Wav2Vec2EspeakModel]
 @provisional
 class Wav2Vec2EspeakModel:
     """espeak-IPA wav2vec2 CTC acoustic model (ONNX) — an ``AcousticModel``.
@@ -105,6 +106,7 @@ class Wav2Vec2EspeakModel:
         self.blank_id = self.vocab[blank_token]
         self.frame_rate = float(frame_rate)
 
+    # [docs:sadda.align.Wav2Vec2EspeakModel.from_pretrained]
     @classmethod
     def from_pretrained(
         cls,
@@ -127,6 +129,7 @@ class Wav2Vec2EspeakModel:
         vocab_path = hf_hub_download(repo_id, vocab_file, revision=revision)
         return cls(model_path, vocab_path, **kwargs)
 
+    # [docs:sadda.align.Wav2Vec2EspeakModel.emissions]
     def emissions(self, audio: np.ndarray, sample_rate: int) -> Emissions:
         """Run the model over ``audio`` (mono, 16 kHz) → per-frame log-probs."""
         if sample_rate != 16000:
