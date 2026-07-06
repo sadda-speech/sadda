@@ -80,14 +80,35 @@ The aligner is backend-agnostic: any object satisfying the
 returning [`Emissions`](api/align.md) = log-probs + vocab + frame-rate + blank
 id) can drive it — your own model, or a test mock.
 
+## Silence and pauses
+
+Leading/trailing silence and inter-word pauses are detected and left as
+**empty-labeled intervals** (the tiers stay a contiguous partition of the
+recording — on TextGrid export these are Praat's empty intervals):
+
+```python
+sadda.align.align(audio, 16000, transcript, model=model,
+                  detector="blank", min_silence_seconds=0.12)
+```
+
+- `detector="blank"` (default) marks long runs of the CTC **blank** as silence —
+  it reuses the acoustic model's own posteriors, so it's consistent with the
+  alignment and needs no second model.
+- `detector="vad"` uses Silero VAD (`sadda.ml`). More independent, but coarser —
+  its speech/non-speech boundaries can disagree with the alignment and swallow
+  very short edge phones. Prefer `blank` unless VAD robustness matters.
+- `detector=None` disables silence handling.
+
+!!! note "Inferred, not modeled, silence"
+    Neither detector is a *trained* silence model — `blank` infers silence from
+    "no phoneme emitted", `vad` from a separate detector. Truly **modeled**
+    silence (an explicit `sil` state) comes with the planned **MFA passthrough**
+    backend, whose HMM models optional silence directly.
+
 ## Caveats
 
 - **16 kHz mono input.** `Wav2Vec2EspeakModel` requires 16 kHz; resample first
   (a built-in resample is a planned refinement).
-- **No silence model yet.** The DP assigns every frame to a phone, so leading
-  and trailing silence and long pauses get absorbed into adjacent words. A VAD
-  pre-pass (`sadda.ml` already has VAD) or an optional-silence token is a planned
-  refinement.
 
 ## References
 

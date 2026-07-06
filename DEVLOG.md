@@ -6,6 +6,49 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-06 — Forced-alignment silence handling (prototype, both detectors)
+
+A1's aligner absorbed non-speech into edge phones (the demo clip's leading "I"
+ran 0.00–0.98 s; "a" stretched over a 0.66 s pause). This adds silence detection.
+
+**Standard problem:** *optional silence* in forced alignment. Field-standard
+aligners (HTK/P2FA, Kaldi, MFA) model an explicit optional `sil` between words
+and at edges. In the CTC setting the model has no `sil` phone, but its **blank**
+(`<pad>`) fires during silence ("no phoneme emitted").
+
+**Decided forks (user-confirmed):**
+- **Detector → both, user-selected.** `align(..., detector="blank"|"vad"|None)`.
+  `"blank"` (default): CTC-blank runs ≥ `min_silence_seconds` (~120 ms) → silence;
+  reuses the model's own posteriors. `"vad"`: Silero VAD (`sadda.ml`), external
+  per-frame mask. Both combine in the engine (mask OR blank-run).
+- **Representation → empty-labeled intervals, not gaps.** The user's point: an
+  interval *tier* is a full partition; silence is an **empty-labeled** interval,
+  not a hole. So the Word/Phone results stay contiguous over `0..T`; silence
+  intervals carry `label=""` (Praat empty intervals on export). A1's contiguity
+  property is preserved — we insert empties, not gaps.
+
+**Implementation.** Engine `forced_align` gains `min_silence_frames` + optional
+`silence_mask`; a **carve** step (leaving the DP + collapse untouched) splits the
+contiguous phone spans wherever silence is detected → `TokenSpan.is_silence`.
+Added `Audio::from_samples` (+ `sadda.Audio.from_samples`) so the VAD detector can
+build an `Audio` from the numpy waveform for `sadda.ml` VAD.
+
+**Blank vs VAD (validated on demo.wav):** blank keeps every word and its silence
+boundaries agree with the alignment (leading "I" → pause 0.00–0.94, "I" 0.94–0.98;
+the pause after "a" broken out). VAD is **coarser** — its independent boundary
+swallowed the 40 ms leading "I" — and can *drop* a word whose phones fully overlap
+VAD-silence. Hence **blank is the default**; VAD is opt-in.
+
+**The modeled-silence caveat (user's wish):** neither detector is a *trained*
+silence model — both infer it. Truly modeled silence (an explicit `sil` state)
+arrives with **A2 (MFA passthrough)**, whose HMM models optional silence directly.
+Backlogged: a silence-aware neural model, and a VAD∩blank hybrid to fix VAD
+dropping short phones.
+
+**Status:** prototype on `feat/align-silence` (draft PR) — engine 263 + python 313,
+clippy/fmt clean. **Pending review:** confirm the `min_silence_seconds` default and
+the blank-default choice.
+
 ## 2026-07-05 — Design: ASR + phone-level forced alignment (A1–A5)
 
 Design for the "ASR + forced alignment engine" backlog item (produces Words /
