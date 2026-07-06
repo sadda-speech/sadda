@@ -34,17 +34,23 @@
 //! — same blank-staggered trellis and transition rules.
 //!
 //! Frames on the CTC *blank* are attributed to the preceding phone
-//! (carry-forward), so the returned phone spans are **contiguous** — which is
-//! what phoneticians expect of a phone tier — rather than leaving inter-phone
-//! gaps. Leading blanks (before the first phone) attach to the first phone.
+//! (carry-forward), so phones stay contiguous — **except** where silence is
+//! carved out (long blank runs via `min_silence_frames`, or an external mask),
+//! which becomes its own empty-labeled interval. The result is always a
+//! contiguous partition of `0..T` (a full interval tier); silence is *empty*,
+//! not a gap.
 
-/// One aligned phone: the position in the target sequence, the class id
-/// (phone) it carries, and its frame span into the emission matrix.
+/// One interval of the aligned tier: either a phone or a stretch of silence.
+///
+/// The returned spans are **contiguous** and cover `0..T` — a full partition, as
+/// an interval tier should be. Silence intervals (`is_silence`) carry no phone
+/// (`token == usize::MAX`, `label == blank`); a consumer renders them as
+/// empty-labeled intervals.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TokenSpan {
-    /// Index of this token within the input `targets` sequence.
+    /// Index of this phone within `targets`, or `usize::MAX` for a silence span.
     pub token: usize,
-    /// The emission class id (phone) aligned — `targets[token]`.
+    /// The emission class id (`targets[token]` for a phone; `blank` for silence).
     pub label: usize,
     /// First frame of the span (inclusive).
     pub start_frame: usize,
@@ -52,6 +58,8 @@ pub struct TokenSpan {
     pub end_frame: usize,
     /// Mean emission log-probability over the span (an alignment-confidence proxy).
     pub score: f32,
+    /// Whether this span is detected silence (an empty interval) rather than a phone.
+    pub is_silence: bool,
 }
 
 /// Why a forced alignment could not be produced.
@@ -71,23 +79,34 @@ pub enum AlignError {
         /// Frames actually supplied.
         have: usize,
     },
+    /// The external `silence_mask` length did not match the number of frames.
+    SilenceMaskLength,
 }
 
 const NEG_INF: f32 = f32::NEG_INFINITY;
 
-/// CTC forced alignment.
+/// CTC forced alignment, optionally carving out silence.
 ///
 /// - `emissions`: `T` frames, each a slice of `C` **log**-probabilities
 ///   (log-softmax over classes, blank included). All rows must have width `C`.
 /// - `targets`: `L` class ids to align in order (none may equal `blank`).
 /// - `blank`: the CTC blank class id.
+/// - `min_silence_frames`: if `> 0`, contiguous runs of the CTC blank at least
+///   this long become silence intervals (0 disables blank-run silence).
+/// - `silence_mask`: an optional external per-frame silence mask (e.g. from VAD),
+///   length `T`; frames marked `true` become silence. Combined (OR) with the
+///   blank-run silence.
 ///
-/// Returns one [`TokenSpan`] per target phone, in order, with contiguous frame
-/// spans covering `0..T`.
+/// Returns a **contiguous** partition of `0..T`: one [`TokenSpan`] per target
+/// phone in order, interleaved with `is_silence` spans where silence is detected.
+/// With `min_silence_frames == 0` and no mask, the result is fully phone-labeled
+/// (one span per target), as before.
 pub fn forced_align(
     emissions: &[&[f32]],
     targets: &[usize],
     blank: usize,
+    min_silence_frames: usize,
+    silence_mask: Option<&[bool]>,
 ) -> Result<Vec<TokenSpan>, AlignError> {
     let t_len = emissions.len();
     let l_len = targets.len();
@@ -100,6 +119,9 @@ pub fn forced_align(
     let n_classes = emissions[0].len();
     if blank >= n_classes || targets.iter().any(|&c| c >= n_classes) {
         return Err(AlignError::LabelOutOfRange);
+    }
+    if silence_mask.is_some_and(|m| m.len() != t_len) {
+        return Err(AlignError::SilenceMaskLength);
     }
 
     // Shortest feasible path = one frame per phone, plus a mandatory blank
@@ -211,6 +233,7 @@ pub fn forced_align(
                 start_frame: start,
                 end_frame: t,
                 score: sum / (t - start) as f32,
+                is_silence: false,
             });
             start = t;
         }
@@ -223,7 +246,100 @@ pub fn forced_align(
         spans = splice_missing(spans, targets, t_len);
     }
 
+    // Carve detected silence out of the contiguous phone spans → a contiguous
+    // tier with empty-labeled silence intervals. Silence = an external per-frame
+    // mask (e.g. VAD) OR runs of the CTC blank at least `min_silence_frames` long.
+    if min_silence_frames > 0 || silence_mask.is_some() {
+        let sil = silence_frames(&path, min_silence_frames, silence_mask, t_len);
+        if sil.iter().any(|&b| b) {
+            spans = carve_silence(spans, &sil, emissions, blank);
+        }
+    }
+
     Ok(spans)
+}
+
+/// Per-frame silence: an external `mask` OR runs of the CTC blank (even extended
+/// positions in `path`) at least `min_silence_frames` long. Blank runs shorter
+/// than the threshold stay attached to a neighbouring phone (coarticulation).
+fn silence_frames(
+    path: &[usize],
+    min_silence_frames: usize,
+    mask: Option<&[bool]>,
+    t_len: usize,
+) -> Vec<bool> {
+    let mut sil = vec![false; t_len];
+    if let Some(m) = mask {
+        sil.copy_from_slice(m);
+    }
+    if min_silence_frames > 0 {
+        let mut i = 0;
+        while i < t_len {
+            if path[i] % 2 == 0 {
+                let start = i;
+                while i < t_len && path[i] % 2 == 0 {
+                    i += 1;
+                }
+                if i - start >= min_silence_frames {
+                    sil[start..i].fill(true);
+                }
+            } else {
+                i += 1;
+            }
+        }
+    }
+    sil
+}
+
+/// Split contiguous phone spans into a contiguous tier where silence frames
+/// become empty-labeled intervals (`is_silence`, `token == usize::MAX`).
+fn carve_silence(
+    phone_spans: Vec<TokenSpan>,
+    sil: &[bool],
+    emissions: &[&[f32]],
+    blank: usize,
+) -> Vec<TokenSpan> {
+    let t_len = sil.len();
+    // frame -> index into phone_spans (which are contiguous and cover 0..t_len).
+    let mut frame_span = vec![0usize; t_len];
+    for (i, sp) in phone_spans.iter().enumerate() {
+        frame_span[sp.start_frame..sp.end_frame].fill(i);
+    }
+    let key = |t: usize| -> Option<usize> { if sil[t] { None } else { Some(frame_span[t]) } };
+    let mut out: Vec<TokenSpan> = Vec::with_capacity(phone_spans.len() + 4);
+    let mut start = 0usize;
+    for t in 1..=t_len {
+        if t == t_len || key(t) != key(start) {
+            let (start_frame, end_frame) = (start, t);
+            match key(start) {
+                Some(idx) => {
+                    let sp = &phone_spans[idx];
+                    let sum: f32 = (start..t).map(|f| emissions[f][sp.label]).sum();
+                    out.push(TokenSpan {
+                        token: sp.token,
+                        label: sp.label,
+                        start_frame,
+                        end_frame,
+                        score: sum / (t - start) as f32,
+                        is_silence: false,
+                    });
+                }
+                None => {
+                    let sum: f32 = (start..t).map(|f| emissions[f][blank]).sum();
+                    out.push(TokenSpan {
+                        token: usize::MAX,
+                        label: blank,
+                        start_frame,
+                        end_frame,
+                        score: sum / (t - start) as f32,
+                        is_silence: true,
+                    });
+                }
+            }
+            start = t;
+        }
+    }
+    out
 }
 
 /// Ensure exactly one span per target, inserting zero-width spans (at the prior
@@ -243,6 +359,7 @@ fn splice_missing(partial: Vec<TokenSpan>, targets: &[usize], t_len: usize) -> V
                 start_frame: at,
                 end_frame: at,
                 score: NEG_INF,
+                is_silence: false,
             });
         }
     }
@@ -282,7 +399,7 @@ mod tests {
     fn aligns_two_phones_at_the_emission_boundary() {
         // classes: 0=blank, 1=phone A, 2=phone B. Frames 0-1 favour A, 2-3 B.
         let m = emissions(&[1, 1, 2, 2], 3);
-        let spans = forced_align(&as_slices(&m), &[1, 2], 0).unwrap();
+        let spans = forced_align(&as_slices(&m), &[1, 2], 0, 0, None).unwrap();
         assert_eq!(spans.len(), 2);
         assert_eq!(
             (spans[0].label, spans[0].start_frame, spans[0].end_frame),
@@ -298,7 +415,7 @@ mod tests {
     fn spans_are_contiguous_covering_all_frames() {
         // A leading blank frame + trailing blank frame must still be covered.
         let m = emissions(&[0, 1, 2, 0], 3);
-        let spans = forced_align(&as_slices(&m), &[1, 2], 0).unwrap();
+        let spans = forced_align(&as_slices(&m), &[1, 2], 0, 0, None).unwrap();
         assert_eq!(
             spans[0].start_frame, 0,
             "leading blank attaches to first phone"
@@ -318,7 +435,7 @@ mod tests {
     fn repeated_phone_needs_a_separating_blank() {
         // targets [A, A] require a blank between → at least 3 frames.
         let m = emissions(&[1, 0, 1], 3);
-        let spans = forced_align(&as_slices(&m), &[1, 1], 0).unwrap();
+        let spans = forced_align(&as_slices(&m), &[1, 1], 0, 0, None).unwrap();
         assert_eq!(spans.len(), 2);
         assert_eq!(spans[0].label, 1);
         assert_eq!(spans[1].label, 1);
@@ -326,7 +443,7 @@ mod tests {
         // too few frames for two identical phones (need 3: A, blank, A) fails cleanly.
         let short = emissions(&[1], 3);
         assert_eq!(
-            forced_align(&as_slices(&short), &[1, 1], 0),
+            forced_align(&as_slices(&short), &[1, 1], 0, 0, None),
             Err(AlignError::TooFewFrames { needed: 3, have: 1 })
         );
     }
@@ -335,12 +452,15 @@ mod tests {
     fn rejects_bad_input() {
         let m = emissions(&[1, 2], 3);
         assert_eq!(
-            forced_align(&as_slices(&m), &[], 0),
+            forced_align(&as_slices(&m), &[], 0, 0, None),
             Err(AlignError::EmptyTargets)
         );
-        assert_eq!(forced_align(&[], &[1], 0), Err(AlignError::NoFrames));
         assert_eq!(
-            forced_align(&as_slices(&m), &[9], 0),
+            forced_align(&[], &[1], 0, 0, None),
+            Err(AlignError::NoFrames)
+        );
+        assert_eq!(
+            forced_align(&as_slices(&m), &[9], 0, 0, None),
             Err(AlignError::LabelOutOfRange)
         );
     }
@@ -348,7 +468,7 @@ mod tests {
     #[test]
     fn score_reflects_emission_confidence() {
         let m = emissions(&[1, 1, 2, 2], 3);
-        let spans = forced_align(&as_slices(&m), &[1, 2], 0).unwrap();
+        let spans = forced_align(&as_slices(&m), &[1, 2], 0, 0, None).unwrap();
         // both phones sat on their hot class → score ~ log(0.8)
         for s in &spans {
             assert!((s.score - 0.8f32.ln()).abs() < 1e-5);
@@ -358,5 +478,84 @@ mod tests {
     #[test]
     fn frame_to_seconds_uses_frame_rate() {
         assert!((frame_to_seconds(50, 50.0) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn long_blank_run_becomes_an_empty_silence_interval() {
+        // A, then a 3-frame blank run, then B. classes: 0=blank, 1=A, 2=B.
+        let m = emissions(&[1, 0, 0, 0, 2], 3);
+        let slices = as_slices(&m);
+
+        // Without silence: the blank run is carried onto A → contiguous phones.
+        let plain = forced_align(&slices, &[1, 2], 0, 0, None).unwrap();
+        assert_eq!(plain.len(), 2);
+        assert!(plain.iter().all(|s| !s.is_silence));
+        assert_eq!(plain[0].end_frame, 4); // A absorbs the blanks
+
+        // With min_silence_frames=2: the 3-frame blank run → an empty interval.
+        let sil = forced_align(&slices, &[1, 2], 0, 2, None).unwrap();
+        assert_eq!(sil.len(), 3, "A, <silence>, B");
+        assert_eq!(
+            (sil[0].label, sil[0].start_frame, sil[0].end_frame),
+            (1, 0, 1)
+        );
+        assert!(sil[1].is_silence);
+        assert_eq!((sil[1].start_frame, sil[1].end_frame), (1, 4));
+        assert_eq!(sil[1].token, usize::MAX);
+        assert_eq!(
+            (sil[2].label, sil[2].start_frame, sil[2].end_frame),
+            (2, 4, 5)
+        );
+        // still a contiguous partition of 0..T
+        assert_eq!(sil[0].start_frame, 0);
+        assert_eq!(sil.last().unwrap().end_frame, 5);
+        for w in sil.windows(2) {
+            assert_eq!(w[0].end_frame, w[1].start_frame);
+        }
+    }
+
+    #[test]
+    fn external_mask_carves_leading_silence() {
+        // blank, blank, A, B — mask the two leading frames as silence (e.g. VAD).
+        let m = emissions(&[0, 0, 1, 2], 3);
+        let mask = [true, true, false, false];
+        let spans = forced_align(&as_slices(&m), &[1, 2], 0, 0, Some(&mask)).unwrap();
+        assert!(spans[0].is_silence);
+        assert_eq!((spans[0].start_frame, spans[0].end_frame), (0, 2));
+        assert_eq!((spans[1].label, spans[1].start_frame), (1, 2)); // A no longer absorbs the lead
+        assert_eq!(spans.last().unwrap().end_frame, 4);
+    }
+
+    #[test]
+    fn silence_intervals_are_never_adjacent() {
+        // sil A sil B sil — three silence regions, each separated by a phone.
+        let m = emissions(&[0, 0, 1, 0, 0, 0, 2, 0, 0], 3);
+        // Also stress the merge: a mask that marks the phone frames silent too,
+        // so the blank runs would be adjacent unless the carve merges them.
+        let all_silent = vec![true; 9];
+        for mask in [None, Some(all_silent.as_slice())] {
+            let spans = forced_align(&as_slices(&m), &[1, 2], 0, 2, mask).unwrap();
+            for w in spans.windows(2) {
+                assert!(
+                    !(w[0].is_silence && w[1].is_silence),
+                    "adjacent silence spans (mask={})",
+                    mask.is_some()
+                );
+            }
+        }
+        // The all-silent mask collapses everything into a single silence span.
+        let one = forced_align(&as_slices(&m), &[1, 2], 0, 0, Some(&all_silent)).unwrap();
+        assert_eq!(one.len(), 1);
+        assert!(one[0].is_silence);
+    }
+
+    #[test]
+    fn silence_mask_wrong_length_errors() {
+        let m = emissions(&[1, 2], 3);
+        let mask = [false, false, false];
+        assert_eq!(
+            forced_align(&as_slices(&m), &[1, 2], 0, 0, Some(&mask)),
+            Err(AlignError::SilenceMaskLength)
+        );
     }
 }
