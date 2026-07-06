@@ -43,6 +43,11 @@ __all__ = ["Wav2Vec2EspeakModel"]
 PROCESSOR_ID = "sadda.align.wav2vec2_espeak"
 
 
+#: The default hosted model on the sadda HF org (Apache-2.0 ONNX export of
+#: facebook/wav2vec2-lv-60-espeak-cv-ft). Fetched by :meth:`Wav2Vec2EspeakModel.from_pretrained`.
+DEFAULT_REPO = "sadda-speech/wav2vec2-espeak-ctc"
+
+
 def _import_onnxruntime():
     try:
         import onnxruntime
@@ -52,6 +57,17 @@ def _import_onnxruntime():
             'with `pip install "sadda[align]"`.'
         ) from exc
     return onnxruntime
+
+
+def _import_hf_hub():
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError as exc:  # pragma: no cover - exercised without the extra
+        raise ImportError(
+            "huggingface_hub is required to fetch the model. Install it with "
+            '`pip install "sadda[align]"`.'
+        ) from exc
+    return hf_hub_download
 
 
 @provisional
@@ -88,6 +104,28 @@ class Wav2Vec2EspeakModel:
             raise ValueError(f"blank token {blank_token!r} not in vocab")
         self.blank_id = self.vocab[blank_token]
         self.frame_rate = float(frame_rate)
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        repo_id: str = DEFAULT_REPO,
+        *,
+        revision: str | None = None,
+        model_file: str = "model.onnx",
+        vocab_file: str = "vocab.json",
+        **kwargs,
+    ) -> "Wav2Vec2EspeakModel":
+        """Fetch the ONNX model + vocab from a Hugging Face repo, then build it.
+
+        Downloads ``model_file`` and ``vocab_file`` from ``repo_id`` (default the
+        sadda HF org) via ``huggingface_hub`` (cached locally), then constructs
+        the model. ``pip install "sadda[align]"`` provides both onnxruntime and
+        huggingface_hub. Remaining kwargs pass through to the constructor.
+        """
+        hf_hub_download = _import_hf_hub()
+        model_path = hf_hub_download(repo_id, model_file, revision=revision)
+        vocab_path = hf_hub_download(repo_id, vocab_file, revision=revision)
+        return cls(model_path, vocab_path, **kwargs)
 
     def emissions(self, audio: np.ndarray, sample_rate: int) -> Emissions:
         """Run the model over ``audio`` (mono, 16 kHz) → per-frame log-probs."""

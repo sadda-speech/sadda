@@ -62,9 +62,10 @@ ml = ["onnxruntime>=1.22"]
 download = ["sadda[ml]"]
 # `pip install sadda[align]` adds the neural forced-alignment acoustic model
 # (`sadda.align.Wav2Vec2EspeakModel`), which runs an ONNX CTC net via ONNX
-# Runtime — hence the [ml] dependency. The espeak-ng G2P side needs no Python
-# dep (it shells out to the espeak-ng binary).
-align = ["sadda[ml]"]
+# Runtime (hence [ml]) and fetches the model from the HF Hub via
+# huggingface_hub. The espeak-ng G2P side needs no Python dep (it shells out to
+# the espeak-ng binary).
+align = ["sadda[ml]", "huggingface_hub>=0.20"]
 
 [project.urls]
 Homepage = "https://sadda-speech.github.io/sadda/"
