@@ -6,6 +6,49 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-06 — Forced-alignment input resampling (any-rate audio "just works")
+
+A1 shipped with a hard 16 kHz requirement: `Wav2Vec2EspeakModel.emissions`
+raised `ValueError("…expects 16 kHz…— resample first")` on anything else. Since
+most recordings are 44.1/48 kHz, alignment failed on ordinary audio unless the
+caller resampled by hand — against the "defaults that just work" goal.
+
+**Standard problem:** fixed-rate model input. The model was trained at 16 kHz
+mono; the fix is to resample the caller's audio to that rate transparently.
+
+**Decided forks:**
+- **Where → in the model, not the orchestration.** The model is the authority
+  on its own input rate, so `emissions()` resamples. This makes *any* caller
+  robust (not just `align()`), needs no change to the minimal `AcousticModel`
+  protocol (mocks stay trivial: `emissions` only), and can't desync the VAD
+  path — `_vad_silence_mask` keys silence to the emission `frame_rate`, so it's
+  rate-agnostic and unaffected.
+- **Which resampler → the engine's existing one.** Reuse `dsp::resample_to_hz`
+  (FFT-domain, scipy-`resample`-style) — the same resampler the VAD/GNE paths
+  use — rather than pulling scipy into the Python layer. One documented method,
+  consistent with the cite-one-method convention.
+- **Surface → `Audio.resample`.** Exposed as a general `Audio::resample_to` in
+  the engine + `sadda.Audio.resample(target_hz)` in Python (preserves channel
+  count; de-interleave → per-channel resample → re-interleave). The natural
+  sibling of the `from_samples`/`mono` methods, independently testable.
+
+**Two surfaces, not three.** Resampling here is align-internal plumbing (its
+GUI is the still-deferred A5 slice), so engine + Python only — the same way
+`from_samples` landed in the silence work without a GUI control.
+
+**Implementation.** `Audio::resample_to(target_hz)` (engine) + `PyAudio.resample`
+(binding, stub regenerated). In `sadda.align.acoustic`, a module-level
+`_resample_to_model_rate(audio, sample_rate)` helper (a unit-testable seam that
+doesn't need the ONNX-gated model) resamples to `SAMPLE_RATE = 16_000`;
+`emissions()` calls it instead of raising. Docs `align.md` caveat updated
+(mono in, any rate — resampled for you).
+
+**Tests:** engine — resample up-samples proportionally, matching-rate is a copy,
+stereo keeps its channel count. python — `Audio.resample` rate/length + no-op,
+`_resample_to_model_rate` at-rate/off-rate; the model-gated test flips from
+asserting an 8 kHz *raise* to asserting an 8 kHz input resamples to the same
+frame count as 16 kHz.
+
 ## 2026-07-06 — Forced-alignment silence handling (prototype, both detectors)
 
 A1's aligner absorbed non-speech into edge phones (the demo clip's leading "I"
