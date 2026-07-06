@@ -93,9 +93,11 @@ sadda.align.align(audio, 16000, transcript, model=model,
 
 The `min_silence_seconds` default (0.20 s) follows the pause literature — above
 typical stop-closure durations, between Praat's 0.1 s silence-detector default
-and Goldman-Eisler's (1968) 0.25 s articulatory-vs-pause boundary. Derive a
-value tuned to your own corpus later (the S5 agreement engine scores an aligner
-against a hand-corrected reference).
+([`To TextGrid (silences)`](https://www.fon.hum.uva.nl/praat/manual/Sound__To_TextGrid__silences____.html))
+and Goldman-Eisler's (1968) 0.25 s articulatory-vs-pause boundary
+(*Psycholinguistics: Experiments in Spontaneous Speech*, Academic Press — no
+stable weblink available). Derive a value tuned to your own corpus later (the S5
+agreement engine scores an aligner against a hand-corrected reference).
 
 - `detector="blank"` (default) marks long runs of the CTC **blank** as silence —
   it reuses the acoustic model's own posteriors, so it's consistent with the

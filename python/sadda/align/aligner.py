@@ -153,8 +153,11 @@ def align(
 
     The ``min_silence_seconds`` default (0.20 s) is grounded in the pause
     literature: above typical stop-closure durations, between Praat's 0.1 s
-    silence-detector default and Goldman-Eisler's (1968) 0.25 s
-    articulatory-vs-hesitation-pause boundary.
+    silence-detector default (`To TextGrid (silences)`,
+    https://www.fon.hum.uva.nl/praat/manual/Sound__To_TextGrid__silences____.html)
+    and Goldman-Eisler's (1968) 0.25 s articulatory-vs-hesitation-pause boundary
+    (*Psycholinguistics: Experiments in Spontaneous Speech*, Academic Press — no
+    stable weblink available).
     """
     audio = np.asarray(audio, dtype=np.float32)
     utt = phonemize(transcript, voice=voice)
