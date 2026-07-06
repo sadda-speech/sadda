@@ -70,6 +70,12 @@ pub fn citation_for(processor_id: &str) -> Option<Citation> {
              Speech Signal Process. 25(3): 235–238.",
             Some("10.1109/TASSP.1977.1162950"),
         ),
+        "sadda.align.forced_align" => (
+            "Graves, A., Fernández, S., Gomez, F. & Schmidhuber, J. (2006). \
+             Connectionist temporal classification: labelling unsegmented \
+             sequence data with recurrent neural networks. ICML 2006, 369–376.",
+            Some("10.1145/1143844.1143891"),
+        ),
         _ => return None,
     };
     Some(Citation {
@@ -96,6 +102,13 @@ mod tests {
         let b = citation_for("sadda.dsp.pitch.windowed_autocorrelation").unwrap();
         assert_eq!(a.reference, b.reference);
         assert!(a.reference.contains("Boersma"));
+    }
+
+    #[test]
+    fn forced_align_cites_ctc() {
+        let c = citation_for("sadda.align.forced_align").expect("forced align is cited");
+        assert!(c.reference.contains("Graves"));
+        assert_eq!(c.doi.as_deref(), Some("10.1145/1143844.1143891"));
     }
 
     #[test]

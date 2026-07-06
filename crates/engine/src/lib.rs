@@ -4,6 +4,7 @@
 #![warn(missing_docs)]
 
 pub mod agreement;
+pub mod align;
 pub mod audio;
 pub mod citation;
 pub mod clinical;
@@ -30,6 +31,7 @@ pub mod timeline;
 pub mod units;
 
 pub use agreement::{AgreementOptions, AgreementReport};
+pub use align::{AlignError, TokenSpan, forced_align, frame_to_seconds};
 pub use audio::{Audio, AudioProbe};
 pub use citation::{Citation, citation_for};
 pub use clinical::{
