@@ -6,6 +6,90 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-05 — Design: ASR + phone-level forced alignment (A1–A5)
+
+Design for the "ASR + forced alignment engine" backlog item (produces Words /
+Syllables / Phones tiers, "defaults that just work"). Framed → prior art →
+decided the forks → picked the model → sliced it.
+
+**The distinction that structures everything.** Two problems get bundled here and
+are separable: **forced alignment** (audio *+ a known transcript* → time-aligned
+Word/Phone boundaries — the phonetician's classic tool, a *solved* problem whose
+field standard is the **Montreal Forced Aligner**) and **ASR** (audio → text, for
+when there's no transcript). Most phoneticians *have* transcripts, so alignment is
+the core deliverable and ASR is a convenience layer on top. **Syllables are not a
+separate model** — they're derived from the Phone tier by rule.
+
+**Decided forks (user-confirmed):**
+- **Flow → alignment-first** (bring-your-own transcript). Whisper ASR is a later
+  slice (A4), not the core.
+- **Engine → both**, per the DSP-method-diversity convention: a built-in **neural
+  aligner** as the zero-setup default + **MFA passthrough** for the gold standard.
+- **Phones → IPA, multilingual**, via espeak-ng G2P (not English-only ARPABET) —
+  aligns with the localization thread and reuses the TTS espeak-ng dependency.
+
+**Architecture — two cleanly separable stages, and unlike TTS this one has a real
+Rust-engine core:**
+1. **Acoustic posteriors** — audio → per-frame phone (CTC) probabilities. Neural,
+   ONNX → `sadda.ml`. (MFA does its own GMM-HMM version internally.)
+2. **Constrained alignment** — target phone sequence (from G2P) + posteriors →
+   boundaries via a constrained-Viterbi / CTC forced-align DP. **Pure algorithm →
+   the Rust `engine`**, like the agreement engine and DSP: fast, deterministic,
+   unit-testable. (Contrast TTS, which had no engine role, so its GUI/engine
+   surfaces were deferred; forced alignment earns all three surfaces.)
+
+Backends plug in at stage 1 (which posteriors); espeak-ng feeds stage 1's target
+sequence; the DP + tier construction are shared.
+
+**Model decision (researched, clean-license gate applied — CC-BY-NC is out, as
+with XTTS for TTS):**
+- **Neural default → `facebook/wav2vec2-lv-60-espeak-cv-ft`** — **Apache-2.0**,
+  CTC, multilingual, and its output tokens **are espeak IPA phonemes** (trained on
+  eSpeak-phonemized CommonVoice), so it matches espeak-ng G2P with no mapping
+  layer. The only candidate that satisfies *all* of {clean license · espeak-IPA
+  match · CTC · multilingual}. Exported to ONNX, run via the `sadda.ml` ORT path;
+  wav2vec2-large (~315M) → a chunky download, so it lives behind a **`sadda[align]`
+  extra + `hf://` fetch** (int8 to shrink it), never the base install.
+- **MFA 3.0 (MIT) → gold-standard passthrough** (A2): subprocess `mfa align` →
+  TextGrid import (already supported). Mean boundary error <15 ms, harmonized IPA
+  dicts; heavy conda/Kaldi install, so it's opt-in, detected-or-clear-error (the
+  Kokoro-pending pattern).
+- **charsiu (MIT)** — noted alternative; does **text-independent** alignment (align
+  with no transcript — a future option) but IPA support is *TBD* and models are
+  per-language, so not the default.
+- **MMS → rejected**: `uroman` (not IPA) + CC-BY-NC weights on several checkpoints.
+- **G2P**: espeak-ng `--ipa` via the binary already wrapped for TTS — avoids the
+  GPL `phonemizer` Python dep. A1 must verify espeak-ng's token set lines up with
+  the model's (small normalization/mapping may be needed).
+- **Syllabification**: Phone tier → Syllable tier by sonority-sequencing +
+  maximal-onset (Selkirk; language-tunable). Pure `engine` module, no model.
+
+**QA loop, nearly free:** pipe an aligner's output + a manual tier into the S5
+**agreement engine** → boundary deviation + κ. Gives users alignment validation
+*and* a way to benchmark neural-vs-MFA on their own data.
+
+**Where it lives (three surfaces):** `engine` (the forced-align DP + syllabifier +
+tier construction), Python (`sadda.align` + the ONNX model in `sadda.ml`), GUI
+(A5). Provenance records aligner + model + params.
+
+**Slice plan:**
+- **A1** — engine forced-align DP + espeak-ng IPA G2P + the ONNX phone model →
+  **Words + Phones** interval tiers, Python API. The core.
+- **A2** — MFA 3.0 passthrough (subprocess → TextGrid import).
+- **A3** — syllabification (Phones → Syllables).
+- **A4** — Whisper ASR (the no-transcript path).
+- **A5** — GUI surface.
+
+**Open risks:** model ONNX size (int8/distillation); exact espeak-ng↔model token
+match; neural-vs-MFA accuracy gap (neural still trails HMM-GMM on boundary
+precision — real for sub-15 ms phonetics work); non-English syllabification rules.
+
+**Refs:** MFA & the state of alignment in 2026 (arXiv 2606.18466); Xu et al.,
+zero-shot cross-lingual phoneme recognition (the espeak wav2vec2 model); torchaudio
+`forced_align` / CTC-segmentation (Kürzinger et al. 2020); Zhu et al., charsiu
+(text-free phone alignment); BFA (arXiv 2509.23147). **Next: A1, starting by
+confirming the espeak-ng↔model phoneme token alignment.**
+
 ## 2026-07-05 — TTS pipeline T1: the backend-agnostic voiceover core (shipped)
 
 First slice of a text-to-speech capability. The **immediate** driver is voiceover
