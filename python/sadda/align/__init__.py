@@ -18,12 +18,24 @@ Stability tier: PROVISIONAL.
 
 from __future__ import annotations
 
+from .aligner import Alignment, TimedPhone, TimedWord, align, tokenize
 from .g2p import Utterance, Word, phonemize, split_phones, strip_stress
+from .model import AcousticModel, Emissions
 
 __all__ = [
+    # G2P
     "Word",
     "Utterance",
     "phonemize",
     "split_phones",
     "strip_stress",
+    # acoustic model interface
+    "AcousticModel",
+    "Emissions",
+    # alignment
+    "align",
+    "tokenize",
+    "Alignment",
+    "TimedWord",
+    "TimedPhone",
 ]
