@@ -276,6 +276,12 @@ class Audio:
         `audio.mono().samples`. Note most `dsp.*` and `clinical.*` functions
         already mono-mix internally, so you rarely need to call this first.
         """
+    @staticmethod
+    def from_samples(samples: numpy.typing.NDArray[numpy.float32], sample_rate: builtins.int, *, channels: builtins.int = 1) -> Audio:
+        r"""
+        Construct an `Audio` from a 1-D float32 NumPy array of interleaved samples
+        (values in `[-1.0, 1.0]`). For stereo the layout is `[L0, R0, L1, R1, ...]`.
+        """
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
@@ -2380,12 +2386,17 @@ def f0(audio: Audio, *, frame_size_seconds: builtins.float = 0.02999999932944774
     `times` is float64 in seconds, `frequencies` is float32 in Hz.
     """
 
-def forced_align(emissions: numpy.typing.NDArray[numpy.float32], targets: typing.Sequence[builtins.int], *, blank: builtins.int = 0) -> builtins.list[tuple[builtins.int, builtins.int, builtins.int, builtins.int, builtins.float]]:
+def forced_align(emissions: numpy.typing.NDArray[numpy.float32], targets: typing.Sequence[builtins.int], *, blank: builtins.int = 0, min_silence_frames: builtins.int = 0, silence_mask: typing.Optional[typing.Sequence[builtins.bool]] = None) -> builtins.list[tuple[builtins.int, builtins.int, builtins.int, builtins.int, builtins.float, builtins.bool]]:
     r"""
     CTC forced alignment. `emissions` is a `(T, C)` float32 array of per-frame
     log-probabilities (blank included); `targets` is the phone-token id sequence
-    (none equal to `blank`). Returns one span per target as
-    `(token, label, start_frame, end_frame, score)` — contiguous over `0..T`.
+    (none equal to `blank`). With `min_silence_frames > 0`, long CTC-blank runs
+    become silence intervals; `silence_mask` is an optional length-`T` bool array
+    (e.g. from VAD) whose true frames are silence.
+    
+    Returns one span per interval as `(token, label, start_frame, end_frame,
+    score, is_silence)` — contiguous over `0..T`. Silence spans have
+    `token == 2**64-1` and `is_silence == True`.
     """
 
 def formants(audio: Audio, *, frame_size_seconds: builtins.float = 0.02500000037252903, hop_seconds: builtins.float = 0.009999999776482582, n_formants: builtins.int = 5, pre_emphasis: builtins.float = 0.9700000286102295, lpc_order: typing.Optional[builtins.int] = None, method: builtins.str = 'burg', max_bandwidth_hz: builtins.float = 1000.0, min_frequency_hz: builtins.float = 50.0) -> builtins.list[FormantFrame]:

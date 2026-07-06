@@ -160,3 +160,79 @@ def test_wav2vec2_espeak_model_produces_emissions() -> None:
 
     with pytest.raises(ValueError, match="16 kHz"):
         model.emissions(np.zeros(8000, dtype=np.float32), 8000)
+
+
+# --- silence detection (blank detector) ---
+
+
+class _EdgeSilenceMock:
+    """Emits blank-favoured frames around the phone blocks — leading + trailing
+    silence — so the blank detector should carve them into empty intervals."""
+
+    def __init__(self, phones, frames_per_phone=3, silence_frames=6, frame_rate=100.0):
+        self.phones = phones
+        self.fpp = frames_per_phone
+        self.sil = silence_frames
+        self.fr = frame_rate
+        self.v = {p: i + 1 for i, p in enumerate(dict.fromkeys(phones))}
+
+    def emissions(self, audio, sample_rate) -> Emissions:
+        C = len(self.v) + 1
+        hi, lo = math.log(0.9), math.log(0.1 / (C - 1))
+        rows = []
+
+        def block(hot, n):
+            for _ in range(n):
+                rows.append([hi if c == hot else lo for c in range(C)])
+
+        block(0, self.sil)  # leading silence (blank)
+        for p in self.phones:
+            block(self.v[p], self.fpp)
+        block(0, self.sil)  # trailing silence
+        return Emissions(np.array(rows, dtype=np.float32), self.v, self.fr, 0)
+
+
+@pytest.mark.skipif(shutil.which("espeak-ng") is None, reason="espeak-ng not installed")
+def test_blank_detector_marks_edge_silence_as_empty_intervals() -> None:
+    phones = list(sadda.align.phonemize("hi").words[0].phones)
+    model = _EdgeSilenceMock(phones, frames_per_phone=3, silence_frames=6, frame_rate=100.0)
+    audio = np.zeros(16000, dtype=np.float32)
+
+    al = sadda.align.align(audio, 16000, "hi", model=model, min_silence_seconds=0.03)
+
+    # leading + trailing silence become empty-labeled phone intervals
+    assert al.phones[0].label == "" and al.phones[-1].label == ""
+    assert [p.label for p in al.phones if p.label] == phones
+    # the tier is still a contiguous partition of [0, duration]
+    assert al.phones[0].start_seconds == 0.0
+    for a, b in zip(al.phones, al.phones[1:]):
+        assert a.end_seconds == b.start_seconds
+    # the word "hi" doesn't absorb the edge silence; pauses are empty word intervals
+    hi = next(w for w in al.words if w.text == "hi")
+    assert hi.start_seconds > 0.0
+    assert [w.text for w in al.words][0] == "" and [w.text for w in al.words][-1] == ""
+
+
+@pytest.mark.skipif(shutil.which("espeak-ng") is None, reason="espeak-ng not installed")
+def test_detector_none_disables_silence() -> None:
+    phones = list(sadda.align.phonemize("hi").words[0].phones)
+    model = _EdgeSilenceMock(phones, silence_frames=6, frame_rate=100.0)
+    al = sadda.align.align(np.zeros(16000, np.float32), 16000, "hi", model=model, detector=None)
+    # no empty intervals — edge blanks absorbed into the first/last phone (old behavior)
+    assert all(p.label != "" for p in al.phones)
+    assert [w.text for w in al.words] == ["hi"]
+
+
+def test_audio_from_samples_roundtrip() -> None:
+    x = np.linspace(-0.5, 0.5, 800, dtype=np.float32)
+    a = sadda.Audio.from_samples(x, 16000)
+    assert a.sample_rate == 16000 and a.channels == 1 and a.n_frames == 800
+    assert np.allclose(a.samples, x, atol=1e-6)
+
+
+@pytest.mark.skipif(shutil.which("espeak-ng") is None, reason="espeak-ng not installed")
+def test_align_rejects_unknown_detector() -> None:
+    phones = list(sadda.align.phonemize("hi").words[0].phones)
+    model = _BlockModel(phones)
+    with pytest.raises(ValueError, match="unknown detector"):
+        sadda.align.align(np.zeros(16000, np.float32), 16000, "hi", model=model, detector="bogus")

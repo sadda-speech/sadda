@@ -17,7 +17,7 @@ Stability tier: PROVISIONAL.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Mapping, Optional
 
 import numpy as np
 
@@ -87,6 +87,45 @@ def tokenize(ipa: str, vocab: Mapping[str, int]) -> list[int]:
     return out
 
 
+def _vad_silence_mask(
+    audio: np.ndarray, sample_rate: int, n_frames: int, frame_rate: float
+) -> list[bool]:
+    """Per-emission-frame silence mask from Silero VAD (`sadda.ml`).
+
+    Runs VAD, then marks every frame whose centre time falls outside a detected
+    speech region as silence.
+    """
+    import sadda
+
+    audio_obj = sadda.Audio.from_samples(audio, sample_rate, channels=1)
+    segments = sadda.ml.speech_segments(audio_obj)
+    mask = [True] * n_frames
+    for start_s, end_s in segments:
+        lo = max(0, int(start_s * frame_rate))
+        hi = min(n_frames, int(round(end_s * frame_rate)))
+        for f in range(lo, hi):
+            mask[f] = False
+    return mask
+
+
+def _silence_params(
+    detector: Optional[str],
+    min_silence_seconds: float,
+    frame_rate: float,
+    audio: np.ndarray,
+    sample_rate: int,
+    n_frames: int,
+) -> tuple[int, Optional[list[bool]]]:
+    if detector is None:
+        return 0, None
+    if detector == "blank":
+        frames = round(min_silence_seconds * frame_rate) if min_silence_seconds > 0 else 0
+        return max(0, frames), None
+    if detector == "vad":
+        return 0, _vad_silence_mask(audio, sample_rate, n_frames, frame_rate)
+    raise ValueError(f"unknown detector {detector!r}; use 'blank', 'vad', or None")
+
+
 # [docs:sadda.align.align]
 @provisional
 def align(
@@ -96,51 +135,88 @@ def align(
     *,
     model: AcousticModel,
     voice: str = "en-us",
+    detector: Optional[str] = "blank",
+    min_silence_seconds: float = 0.12,
 ) -> Alignment:
     """Force-align ``transcript`` to ``audio`` with ``model``.
 
     Phonemizes the transcript (espeak-ng, ``voice``), gets per-frame posteriors
     from ``model``, tokenizes each word against the model vocab, runs the CTC
     forced-align DP, and returns time-aligned words and phones.
+
+    Silence (``detector``): ``"blank"`` (default) marks CTC-blank runs at least
+    ``min_silence_seconds`` long as silence; ``"vad"`` uses Silero VAD
+    (:mod:`sadda.ml`); ``None`` disables it. Detected silence becomes
+    **empty-labeled intervals** — the Word and Phone results stay contiguous (a
+    full partition of the recording), with pauses and edge silence left empty
+    rather than absorbed into neighbouring words.
     """
+    audio = np.asarray(audio, dtype=np.float32)
     utt = phonemize(transcript, voice=voice)
-    em = model.emissions(np.asarray(audio, dtype=np.float32), sample_rate)
+    em = model.emissions(audio, sample_rate)
     id_to_phone = {i: p for p, i in em.vocab.items()}
 
     target: list[int] = []
-    word_ranges: list[tuple[str, int, int]] = []
-    for w in utt.words:
-        start = len(target)
-        target.extend(tokenize(w.ipa, em.vocab))
-        word_ranges.append((w.text, start, len(target)))
+    word_of_token: list[int] = []
+    word_texts: list[str] = []
+    for wi, w in enumerate(utt.words):
+        word_texts.append(w.text)
+        toks = tokenize(w.ipa, em.vocab)
+        target.extend(toks)
+        word_of_token.extend([wi] * len(toks))
     if not target:
         raise ValueError("transcript produced no phones to align")
 
     log_probs = np.asarray(em.log_probs, dtype=np.float32)
-    spans = _native.forced_align(log_probs, target, blank=em.blank_id)
-
     fr = float(em.frame_rate)
-    phones = tuple(
-        TimedPhone(
-            label=id_to_phone.get(label, str(label)),
-            start_seconds=start_frame / fr,
-            end_seconds=end_frame / fr,
-            score=score,
-        )
-        for (_token, label, start_frame, end_frame, score) in spans
+    min_silence_frames, silence_mask = _silence_params(
+        detector, min_silence_seconds, fr, audio, sample_rate, log_probs.shape[0]
+    )
+    spans = _native.forced_align(
+        log_probs,
+        target,
+        blank=em.blank_id,
+        min_silence_frames=min_silence_frames,
+        silence_mask=silence_mask,
     )
 
-    words: list[TimedWord] = []
-    for text, s, e in word_ranges:
-        wp = phones[s:e]
-        if not wp:
-            continue
-        words.append(
-            TimedWord(
-                text=text,
-                start_seconds=wp[0].start_seconds,
-                end_seconds=wp[-1].end_seconds,
-                phones=wp,
-            )
+    # Phone tier: contiguous; silence spans carry an empty label.
+    phones = tuple(
+        TimedPhone(
+            label="" if is_sil else id_to_phone.get(label, str(label)),
+            start_seconds=sf / fr,
+            end_seconds=ef / fr,
+            score=score,
         )
+        for (_tok, label, sf, ef, score, is_sil) in spans
+    )
+
+    # Word tier: a contiguous partition. Each word spans its phones; pauses
+    # between/around words are empty-labeled word intervals.
+    bounds: dict[int, list[float]] = {}
+    per_word_phones: dict[int, list[TimedPhone]] = {}
+    for (tok, _label, sf, ef, _score, is_sil), ph in zip(spans, phones):
+        if is_sil or tok >= len(word_of_token):
+            continue
+        wi = word_of_token[tok]
+        b = bounds.setdefault(wi, [sf / fr, ef / fr])
+        b[0], b[1] = min(b[0], sf / fr), max(b[1], ef / fr)
+        per_word_phones.setdefault(wi, []).append(ph)
+
+    duration = phones[-1].end_seconds if phones else 0.0
+    words: list[TimedWord] = []
+    prev_end = 0.0
+    for wi, text in enumerate(word_texts):
+        if wi not in bounds:
+            continue
+        w_start, w_end = bounds[wi]
+        if w_start > prev_end + 1e-9:
+            words.append(TimedWord(text="", start_seconds=prev_end, end_seconds=w_start, phones=()))
+        words.append(
+            TimedWord(text=text, start_seconds=w_start, end_seconds=w_end, phones=tuple(per_word_phones[wi]))
+        )
+        prev_end = w_end
+    if duration > prev_end + 1e-9:
+        words.append(TimedWord(text="", start_seconds=prev_end, end_seconds=duration, phones=()))
+
     return Alignment(words=tuple(words), phones=phones)

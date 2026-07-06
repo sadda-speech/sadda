@@ -62,6 +62,16 @@ impl Audio {
         })
     }
 
+    /// Construct an `Audio` from raw interleaved f32 samples (expected in
+    /// `[-1.0, 1.0]`). For stereo the layout is `[L0, R0, L1, R1, ...]`.
+    pub fn from_samples(samples: Vec<f32>, sample_rate: u32, channels: u16) -> Self {
+        Audio {
+            samples,
+            sample_rate,
+            channels,
+        }
+    }
+
     /// Number of frames (samples per channel).
     pub fn frame_count(&self) -> usize {
         self.samples.len() / self.channels as usize

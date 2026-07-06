@@ -124,6 +124,24 @@ impl PyAudio {
         }
     }
 
+    /// Construct an `Audio` from a 1-D float32 NumPy array of interleaved samples
+    /// (values in `[-1.0, 1.0]`). For stereo the layout is `[L0, R0, L1, R1, ...]`.
+    #[staticmethod]
+    #[pyo3(signature = (samples, sample_rate, *, channels=1))]
+    fn from_samples(
+        samples: PyReadonlyArray1<'_, f32>,
+        sample_rate: u32,
+        channels: u16,
+    ) -> PyAudio {
+        PyAudio {
+            inner: sadda_engine::Audio::from_samples(
+                samples.as_array().to_vec(),
+                sample_rate,
+                channels,
+            ),
+        }
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Audio(sample_rate={}, channels={}, n_frames={}, duration_seconds={:.4})",
