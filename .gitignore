@@ -50,3 +50,5 @@ Thumbs.db
 # Claude Code — personal workflow config (commands, settings), not project
 # spec. Kept out of the repo so it isn't imposed on contributors.
 /.claude/
+# AI-assistant skill config (e.g. `hf skills add`) — personal, same rationale.
+/.agents/
