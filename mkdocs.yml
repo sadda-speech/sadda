@@ -108,6 +108,7 @@ nav:
   - Quickstart: quickstart.md
   - Keyboard cheatsheet: cheatsheet.md
   - Text-to-speech: tts.md
+  - Forced alignment: align.md
   - Annotation project cycle: annotation-cycle.md
   - Round-trip lossiness:
       - TextGrid: lossiness/textgrid.md
@@ -121,3 +122,4 @@ nav:
       - sadda.live: api/live.md
       - sadda.recipe: api/recipe.md
       - sadda.tts: api/tts.md
+      - sadda.align: api/align.md

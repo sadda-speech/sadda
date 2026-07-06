@@ -52,6 +52,7 @@ __all__ = [
     "blackman",
     "cpps",
     "f0",
+    "forced_align",
     "formants",
     "gaussian",
     "gne",
@@ -2377,6 +2378,14 @@ def f0(audio: Audio, *, frame_size_seconds: builtins.float = 0.02999999932944774
     
     Returns `(times, frequencies)` as a 2-tuple of NumPy arrays:
     `times` is float64 in seconds, `frequencies` is float32 in Hz.
+    """
+
+def forced_align(emissions: numpy.typing.NDArray[numpy.float32], targets: typing.Sequence[builtins.int], *, blank: builtins.int = 0) -> builtins.list[tuple[builtins.int, builtins.int, builtins.int, builtins.int, builtins.float]]:
+    r"""
+    CTC forced alignment. `emissions` is a `(T, C)` float32 array of per-frame
+    log-probabilities (blank included); `targets` is the phone-token id sequence
+    (none equal to `blank`). Returns one span per target as
+    `(token, label, start_frame, end_frame, score)` — contiguous over `0..T`.
     """
 
 def formants(audio: Audio, *, frame_size_seconds: builtins.float = 0.02500000037252903, hop_seconds: builtins.float = 0.009999999776482582, n_formants: builtins.int = 5, pre_emphasis: builtins.float = 0.9700000286102295, lpc_order: typing.Optional[builtins.int] = None, method: builtins.str = 'burg', max_bandwidth_hz: builtins.float = 1000.0, min_frequency_hz: builtins.float = 50.0) -> builtins.list[FormantFrame]:

@@ -16,6 +16,7 @@ use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
+mod align;
 mod formant_preset;
 mod live;
 mod mfcc_preset;
@@ -4485,6 +4486,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(formants, m)?)?;
     m.add_function(wrap_pyfunction!(mfcc, m)?)?;
     m.add_function(wrap_pyfunction!(log_mel_whisper, m)?)?;
+    m.add_function(wrap_pyfunction!(align::forced_align, m)?)?;
     m.add_function(wrap_pyfunction!(ltas, m)?)?;
     m.add_function(wrap_pyfunction!(perturbation, m)?)?;
     m.add_function(wrap_pyfunction!(hnr, m)?)?;
