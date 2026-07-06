@@ -7,6 +7,7 @@ phonemize test skips when the binary is absent so CI stays green without it.
 from __future__ import annotations
 
 import math
+import os
 import shutil
 import types
 
@@ -125,3 +126,37 @@ def test_align_end_to_end_with_mock() -> None:
     # the word span wraps its phones
     assert al.words[0].start_seconds == al.phones[0].start_seconds
     assert al.words[0].end_seconds == al.phones[-1].end_seconds
+
+
+# --- neural acoustic model (onnxruntime + model-gated; skips in CI) ---
+
+
+def _ort_available() -> bool:
+    try:
+        import onnxruntime  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+_ALIGN_MODEL = os.environ.get("SADDA_TEST_ALIGN_MODEL")
+_ALIGN_VOCAB = os.environ.get("SADDA_TEST_ALIGN_VOCAB")
+
+
+@pytest.mark.skipif(
+    not (_ort_available() and _ALIGN_MODEL and _ALIGN_VOCAB),
+    reason="onnxruntime + SADDA_TEST_ALIGN_MODEL/VOCAB required",
+)
+def test_wav2vec2_espeak_model_produces_emissions() -> None:
+    model = sadda.align.Wav2Vec2EspeakModel(_ALIGN_MODEL, _ALIGN_VOCAB)
+    assert len(model.vocab) == 392
+    assert model.blank_id == model.vocab["<pad>"]
+
+    em = model.emissions(np.zeros(16000, dtype=np.float32), 16000)
+    assert em.log_probs.ndim == 2 and em.log_probs.shape[1] == 392
+    assert em.frame_rate == 50.0 and em.blank_id == model.blank_id
+    # log-probs: each frame's exp-sum ~ 1
+    assert np.allclose(np.exp(em.log_probs).sum(axis=1), 1.0, atol=1e-3)
+
+    with pytest.raises(ValueError, match="16 kHz"):
+        model.emissions(np.zeros(8000, dtype=np.float32), 8000)

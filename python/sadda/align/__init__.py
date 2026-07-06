@@ -18,6 +18,7 @@ Stability tier: PROVISIONAL.
 
 from __future__ import annotations
 
+from .acoustic import Wav2Vec2EspeakModel
 from .aligner import Alignment, TimedPhone, TimedWord, align, tokenize
 from .g2p import Utterance, Word, phonemize, split_phones, strip_stress
 from .model import AcousticModel, Emissions
@@ -29,9 +30,10 @@ __all__ = [
     "phonemize",
     "split_phones",
     "strip_stress",
-    # acoustic model interface
+    # acoustic model interface + the neural model
     "AcousticModel",
     "Emissions",
+    "Wav2Vec2EspeakModel",
     # alignment
     "align",
     "tokenize",
