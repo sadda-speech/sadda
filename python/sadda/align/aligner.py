@@ -136,7 +136,7 @@ def align(
     model: AcousticModel,
     voice: str = "en-us",
     detector: Optional[str] = "blank",
-    min_silence_seconds: float = 0.12,
+    min_silence_seconds: float = 0.20,
 ) -> Alignment:
     """Force-align ``transcript`` to ``audio`` with ``model``.
 
@@ -150,6 +150,11 @@ def align(
     **empty-labeled intervals** — the Word and Phone results stay contiguous (a
     full partition of the recording), with pauses and edge silence left empty
     rather than absorbed into neighbouring words.
+
+    The ``min_silence_seconds`` default (0.20 s) is grounded in the pause
+    literature: above typical stop-closure durations, between Praat's 0.1 s
+    silence-detector default and Goldman-Eisler's (1968) 0.25 s
+    articulatory-vs-hesitation-pause boundary.
     """
     audio = np.asarray(audio, dtype=np.float32)
     utt = phonemize(transcript, voice=voice)

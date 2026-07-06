@@ -46,8 +46,11 @@ Backlogged: a silence-aware neural model, and a VAD∩blank hybrid to fix VAD
 dropping short phones.
 
 **Status:** prototype on `feat/align-silence` (draft PR) — engine 263 + python 313,
-clippy/fmt clean. **Pending review:** confirm the `min_silence_seconds` default and
-the blank-default choice.
+clippy/fmt clean. `min_silence_seconds` default set to **0.20 s** (2026-07-06),
+grounded in the pause literature: above stop-closure durations, between Praat's
+0.1 s silence default and Goldman-Eisler's (1968) 0.25 s articulatory-vs-pause
+boundary. **Pending review:** confirm the blank-default choice; derive a
+corpus-tuned threshold later (empirically, via the S5 agreement engine).
 
 ## 2026-07-05 — Design: ASR + phone-level forced alignment (A1–A5)
 

@@ -88,8 +88,14 @@ recording — on TextGrid export these are Praat's empty intervals):
 
 ```python
 sadda.align.align(audio, 16000, transcript, model=model,
-                  detector="blank", min_silence_seconds=0.12)
+                  detector="blank", min_silence_seconds=0.20)
 ```
+
+The `min_silence_seconds` default (0.20 s) follows the pause literature — above
+typical stop-closure durations, between Praat's 0.1 s silence-detector default
+and Goldman-Eisler's (1968) 0.25 s articulatory-vs-pause boundary. Derive a
+value tuned to your own corpus later (the S5 agreement engine scores an aligner
+against a hand-corrected reference).
 
 - `detector="blank"` (default) marks long runs of the CTC **blank** as silence —
   it reuses the acoustic model's own posteriors, so it's consistent with the
