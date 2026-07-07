@@ -6,6 +6,39 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-07 — A5.2b: native model emissions + `align_bundle`
+
+The ONNX half of native alignment: run the acoustic model in Rust and write
+aligned tiers onto a bundle with provenance. Completes the engine's ability to
+align natively (the GUI in A5.3 just drives it on a worker thread).
+
+- **`Model::emissions(audio) -> [frames × classes]`** — the existing `models.rs`
+  ONNX harness (`embeddings`) + a per-frame **log-softmax** (a CTC net emits
+  logits). Plus `alignment_vocab()` (loads the manifest's `[alignment].vocab_file`),
+  `alignment_frame_rate()`, and the blank token.
+- **Manifest support** — new `input.normalize = "zero_mean_unit_var"` (the
+  wav2vec2 feature-extractor contract — the one real correctness subtlety: the
+  generic embedding harness fed raw samples, but wav2vec2 needs zero-mean/unit-var
+  input, so `emissions` would silently degrade without it) applied in `embeddings`;
+  new `[alignment]` block (`vocab_file`/`blank_token`/`frame_rate_hz`, defaults =
+  the wav2vec2-espeak values).
+- **`Project::write_alignment(bundle, &Alignment, …)`** — writes **Words /
+  Syllables / Phones** interval tiers, records an `ml_model` `processing_run`
+  (processor_id + params + `weights_checksum`), and stamps every interval with the
+  run id. The engine counterpart of the Python `import_alignment`.
+- **`Project::align_bundle(bundle, transcript, voice, model, min_silence_frames)`**
+  (behind the `ml` feature) — the full glue: `load_audio` → `g2p::phonemize` →
+  `model.emissions` → `align::align_transcript` → `write_alignment`.
+
+**Tested (no ONNX, runs in CI):** the normalization math, per-frame log-softmax
+(rows sum to 1), the `[alignment]` manifest parse + defaults, and a
+`write_alignment` round-trip (synthetic `Alignment` → bundle → read back tiers +
+the stamped `ml_model` provenance run). **ONNX-gated (not run in CI):** `emissions`
+and `align_bundle` — they need ONNX Runtime + the ~635 MB model. Faithful ports of
+`sadda.align.acoustic` (same normalization + log-softmax), but **not yet verified
+end-to-end against the real model** (couldn't fetch it here); A5.3 wires the fetch
+and I'll confirm Rust emissions match the Python reference then.
+
 ## 2026-07-07 — A5.2: native alignment orchestration (`align_transcript`)
 
 The "brain" of native forced alignment, in the engine: turn per-frame emissions +
