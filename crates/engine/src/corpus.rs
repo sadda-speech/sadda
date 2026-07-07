@@ -385,6 +385,18 @@ impl TierSpec {
     }
 }
 
+/// The three interval tiers a forced alignment writes onto a bundle
+/// (see [`Project::write_alignment`] / [`Project::align_bundle`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AlignmentTiers {
+    /// The Words tier id.
+    pub words: i64,
+    /// The Syllables tier id.
+    pub syllables: i64,
+    /// The Phones tier id.
+    pub phones: i64,
+}
+
 /// One interval annotation. Stored in `annotation_interval`.
 #[derive(Debug, Clone)]
 pub struct Interval {
@@ -4476,6 +4488,131 @@ impl Project {
         Ok(set)
     }
 
+    /// Writes a forced [`Alignment`](crate::align::Alignment) onto `bundle_id` as
+    /// three interval tiers — **Words**, **Syllables**, **Phones** — records an
+    /// `ml_model` [`processing_run`](ProcessingRunRow) (with `processor_id`,
+    /// `parameters`, and `weights_checksum`), and stamps every written interval
+    /// with that run's id. Empty labels (imputed silence / pause words) are
+    /// written unlabeled; modeled labels are kept. The GUI/engine counterpart of
+    /// the Python `import_alignment`. Returns the new tier ids.
+    pub fn write_alignment(
+        &self,
+        bundle_id: i64,
+        alignment: &crate::align::Alignment,
+        processor_id: &str,
+        parameters: Option<String>,
+        weights_checksum: Option<String>,
+    ) -> Result<AlignmentTiers> {
+        let words = self.add_tier(&TierSpec::new(bundle_id, "Words", TierType::Interval))?;
+        let syllables =
+            self.add_tier(&TierSpec::new(bundle_id, "Syllables", TierType::Interval))?;
+        let phones = self.add_tier(&TierSpec::new(bundle_id, "Phones", TierType::Interval))?;
+
+        let mut spec = ProcessingRunSpec::new(bundle_id, ProcessingRunKind::MlModel, processor_id);
+        spec.parameters = parameters;
+        spec.output_tier_ids = vec![words, syllables, phones];
+        spec.weights_checksum = weights_checksum;
+        let run_id = self.record_processing_run(&spec)?;
+
+        let interval = |tier_id: i64, start: f64, end: f64, label: Option<String>| IntervalSpec {
+            tier_id,
+            start_seconds: start,
+            end_seconds: end,
+            label,
+            processing_run_id: Some(run_id),
+            ..Default::default()
+        };
+        for w in &alignment.words {
+            let label = (!w.text.is_empty()).then(|| w.text.clone());
+            self.add_interval(&interval(words, w.start_seconds, w.end_seconds, label))?;
+        }
+        for s in &alignment.syllables {
+            self.add_interval(&interval(
+                syllables,
+                s.start_seconds,
+                s.end_seconds,
+                Some(s.label.clone()),
+            ))?;
+        }
+        for p in &alignment.phones {
+            let label = (!p.label.is_empty()).then(|| p.label.clone());
+            self.add_interval(&interval(phones, p.start_seconds, p.end_seconds, label))?;
+        }
+        Ok(AlignmentTiers {
+            words,
+            syllables,
+            phones,
+        })
+    }
+
+    /// Force-aligns `transcript` to `bundle_id`'s audio with a neural acoustic
+    /// `model`, natively — the engine counterpart of `sadda.align.align` for the
+    /// GUI. Phonemizes via espeak-ng ([`crate::g2p::phonemize`], `voice`), runs
+    /// the model's CTC [`emissions`](crate::models::Model::emissions), aligns with
+    /// [`align_transcript`](crate::align::align_transcript), and writes Words /
+    /// Syllables / Phones tiers with provenance ([`write_alignment`](Self::write_alignment)).
+    /// `min_silence_frames` carves blank-run silence (0 disables). Requires ONNX
+    /// Runtime and an `alignment`-kind model.
+    #[cfg(feature = "ml")]
+    pub fn align_bundle(
+        &self,
+        bundle_id: i64,
+        transcript: &str,
+        voice: &str,
+        model: &crate::models::Model,
+        min_silence_frames: usize,
+    ) -> Result<AlignmentTiers> {
+        let audio = self.load_audio(bundle_id)?;
+        let words: Vec<(String, String)> = crate::g2p::phonemize(transcript, voice)?
+            .into_iter()
+            .map(|w| (w.text, w.ipa))
+            .collect();
+
+        let vocab = model.alignment_vocab()?;
+        let blank = *vocab
+            .get(&model.manifest.alignment.blank_token)
+            .ok_or_else(|| {
+                EngineError::Align(format!(
+                    "blank token {:?} not in the model vocabulary",
+                    model.manifest.alignment.blank_token
+                ))
+            })?;
+        let frame_rate = model.alignment_frame_rate();
+
+        let logits = model.emissions(&audio)?;
+        let rows: Vec<Vec<f32>> = logits
+            .rows()
+            .into_iter()
+            .map(|r| r.iter().map(|&v| v as f32).collect())
+            .collect();
+        let refs: Vec<&[f32]> = rows.iter().map(|r| r.as_slice()).collect();
+
+        let alignment = crate::align::align_transcript(
+            &refs,
+            &words,
+            &vocab,
+            blank,
+            frame_rate,
+            min_silence_frames,
+            None,
+        )?;
+
+        let parameters = serde_json::json!({
+            "voice": voice,
+            "model": model.id(),
+            "model_version": model.version(),
+            "min_silence_frames": min_silence_frames,
+        })
+        .to_string();
+        self.write_alignment(
+            bundle_id,
+            &alignment,
+            "sadda.align.wav2vec2_espeak",
+            Some(parameters),
+            model.weights_checksum().map(str::to_string),
+        )
+    }
+
     /// Runs a `structured` criterion against a bundle: evaluates the rule and
     /// (re)writes its proposals onto the preview tier `"<target> (auto)"`,
     /// replacing any prior proposals. Returns the proposal count. `python`
@@ -7101,6 +7238,106 @@ mod tests {
         assert!(matches!(err, EngineError::Corpus(_)));
 
         let _ = std::fs::remove_file(&source_wav);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_alignment_creates_tiers_and_provenance() {
+        let root = unique_dir("write_alignment");
+        let _ = std::fs::remove_dir_all(&root);
+        let wav = std::env::temp_dir().join(format!("sadda_wa_{}.wav", std::process::id()));
+        write_short_wav(&wav, 16_000);
+        let project = Project::create(&root, "p").unwrap();
+        let bundle_id = project.add_bundle("b", &wav).unwrap();
+
+        use crate::align::{AlignedPhone, AlignedSyllable, AlignedWord, Alignment};
+        let phone = |label: &str, s: f64, e: f64, sil: bool| AlignedPhone {
+            label: label.to_string(),
+            start_seconds: s,
+            end_seconds: e,
+            score: -0.1,
+            is_silence: sil,
+        };
+        // leading pause, then "hi" (/h i/), then trailing pause; one syllable.
+        let phones = vec![
+            phone("", 0.0, 0.1, true),
+            phone("h", 0.1, 0.2, false),
+            phone("i", 0.2, 0.3, false),
+            phone("", 0.3, 0.4, true),
+        ];
+        let al = Alignment {
+            words: vec![
+                AlignedWord {
+                    text: String::new(),
+                    start_seconds: 0.0,
+                    end_seconds: 0.1,
+                    phones: vec![],
+                },
+                AlignedWord {
+                    text: "hi".into(),
+                    start_seconds: 0.1,
+                    end_seconds: 0.3,
+                    phones: phones[1..3].to_vec(),
+                },
+                AlignedWord {
+                    text: String::new(),
+                    start_seconds: 0.3,
+                    end_seconds: 0.4,
+                    phones: vec![],
+                },
+            ],
+            phones: phones.clone(),
+            syllables: vec![AlignedSyllable {
+                label: "hi".into(),
+                start_seconds: 0.1,
+                end_seconds: 0.3,
+            }],
+        };
+
+        let tiers = project
+            .write_alignment(
+                bundle_id,
+                &al,
+                "sadda.align.wav2vec2_espeak",
+                Some("{\"voice\":\"en-us\"}".into()),
+                Some("sha256:abc".into()),
+            )
+            .unwrap();
+
+        // Words: pause (unlabeled), "hi", pause (unlabeled).
+        let words = project.intervals(tiers.words).unwrap();
+        assert_eq!(
+            words.iter().map(|i| i.label.clone()).collect::<Vec<_>>(),
+            vec![None, Some("hi".to_string()), None]
+        );
+        // Phones: silence unlabeled, the two real phones labeled.
+        let phones_read = project.intervals(tiers.phones).unwrap();
+        assert_eq!(phones_read[0].label, None);
+        assert_eq!(
+            phones_read
+                .iter()
+                .filter_map(|i| i.label.clone())
+                .collect::<Vec<_>>(),
+            vec!["h", "i"]
+        );
+        // Syllable tier.
+        let syl = project.intervals(tiers.syllables).unwrap();
+        assert_eq!(syl.len(), 1);
+        assert_eq!(syl[0].label.as_deref(), Some("hi"));
+
+        // Provenance: one ml_model run, every interval stamped with its id.
+        let runs = project.processing_runs(bundle_id).unwrap();
+        assert_eq!(runs.len(), 1);
+        let run = &runs[0];
+        assert_eq!(run.kind, "ml_model");
+        assert_eq!(run.processor_id, "sadda.align.wav2vec2_espeak");
+        assert!(words.iter().all(|i| i.processing_run_id == Some(run.id)));
+        assert!(
+            phones_read
+                .iter()
+                .all(|i| i.processing_run_id == Some(run.id))
+        );
+
         let _ = std::fs::remove_dir_all(&root);
     }
 

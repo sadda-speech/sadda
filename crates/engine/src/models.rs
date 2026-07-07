@@ -17,6 +17,7 @@
 //! shared generic core with refdist; revisit after E12 once both
 //! registries are concrete. See the 2026-05-27 design DEVLOG entry.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -59,9 +60,35 @@ pub struct ModelManifest {
     /// Compute hints.
     #[serde(default)]
     pub compute: ModelCompute,
+    /// CTC forced-alignment metadata (only for `kind = "alignment"` models).
+    #[serde(default)]
+    pub alignment: ModelAlignment,
     /// Citation metadata.
     #[serde(default)]
     pub citation: ModelCitation,
+}
+
+/// `[alignment]` block — the CTC metadata a forced-alignment model needs
+/// beyond its ONNX file: the phone vocabulary, the blank token, and the
+/// emission frame rate. Only meaningful for `kind = "alignment"`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelAlignment {
+    /// Vocab file (JSON: `{phone: class_id}`) relative to the model dir.
+    pub vocab_file: String,
+    /// The CTC blank token — its vocab entry is the blank class id.
+    pub blank_token: String,
+    /// Emission frames per second (wav2vec2 CTC head: 50.0 at 16 kHz).
+    pub frame_rate_hz: f64,
+}
+
+impl Default for ModelAlignment {
+    fn default() -> Self {
+        Self {
+            vocab_file: "vocab.json".to_string(),
+            blank_token: "<pad>".to_string(),
+            frame_rate_hz: 50.0,
+        }
+    }
 }
 
 /// `[model]` block — the file and its format.
@@ -97,6 +124,11 @@ pub struct ModelInput {
     /// Defaults to `waveform` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub representation: Option<String>,
+    /// Optional input normalization applied to the `waveform` before inference.
+    /// `zero_mean_unit_var` centres and scales the waveform to zero mean / unit
+    /// variance (the wav2vec2 feature-extractor contract). Absent ⇒ none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalize: Option<String>,
     /// Expected sample rate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample_rate_hz: Option<u32>,
@@ -276,7 +308,11 @@ impl Model {
             .unwrap_or("waveform");
         let input = match rep {
             "waveform" => {
-                Tensor::from_array(([1usize, samples.len()], samples)).map_err(ort_err)?
+                let mut x = samples;
+                if self.manifest.input.normalize.as_deref() == Some("zero_mean_unit_var") {
+                    normalize_zero_mean_unit_var(&mut x);
+                }
+                Tensor::from_array(([1usize, x.len()], x)).map_err(ort_err)?
             }
             "log_mel" => {
                 let n_mels = self.manifest.input.n_mels.unwrap_or(80);
@@ -359,6 +395,63 @@ impl Model {
         Ok(ndarray::Array2::from_shape_fn((frames, dims), |(t, d)| {
             data[t * dims + d] as f64
         }))
+    }
+
+    /// Runs this **alignment** model over `audio` → per-frame CTC **log**-
+    /// probabilities `(frames × classes)`, ready for [`crate::align::forced_align`]
+    /// / [`crate::align::align_transcript`]. It is [`embeddings`](Self::embeddings)
+    /// (a CTC net emits logits) followed by a per-frame log-softmax — matching
+    /// `sadda.align.Wav2Vec2EspeakModel.emissions`. Pair with
+    /// [`alignment_vocab`](Self::alignment_vocab) / [`alignment_frame_rate`](Self::alignment_frame_rate).
+    pub fn emissions(&self, audio: &Audio) -> Result<ndarray::Array2<f64>> {
+        let mut logits = self.embeddings(audio)?;
+        log_softmax_rows(&mut logits);
+        Ok(logits)
+    }
+
+    /// The alignment vocabulary (`{phone: class_id}`) parsed from the manifest's
+    /// `[alignment].vocab_file`.
+    pub fn alignment_vocab(&self) -> Result<HashMap<String, usize>> {
+        let path = self.dir.join(&self.manifest.alignment.vocab_file);
+        let text = fs::read_to_string(&path)
+            .map_err(|e| model_err(format!("cannot read {}: {e}", path.display())))?;
+        let raw: HashMap<String, i64> = serde_json::from_str(&text)
+            .map_err(|e| model_err(format!("invalid vocab {}: {e}", path.display())))?;
+        Ok(raw.into_iter().map(|(k, v)| (k, v as usize)).collect())
+    }
+
+    /// Emission frames per second (`[alignment].frame_rate_hz`).
+    pub fn alignment_frame_rate(&self) -> f64 {
+        self.manifest.alignment.frame_rate_hz
+    }
+}
+
+/// Normalize a waveform in place to zero mean and unit variance — the wav2vec2
+/// feature-extractor contract (`(x - mean) / (std + 1e-7)`, population std to
+/// match numpy's default). A no-op on an empty buffer.
+fn normalize_zero_mean_unit_var(x: &mut [f32]) {
+    if x.is_empty() {
+        return;
+    }
+    let n = x.len() as f32;
+    let mean = x.iter().sum::<f32>() / n;
+    let var = x.iter().map(|&v| (v - mean).powi(2)).sum::<f32>() / n;
+    let denom = var.sqrt() + 1e-7;
+    for v in x.iter_mut() {
+        *v = (*v - mean) / denom;
+    }
+}
+
+/// Per-row log-softmax in place: `row -= logsumexp(row)`. Turns a frame of CTC
+/// logits into log-probabilities (`sadda.align`'s emission contract).
+fn log_softmax_rows(m: &mut ndarray::Array2<f64>) {
+    for mut row in m.rows_mut() {
+        let max = row.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let sum: f64 = row.iter().map(|&v| (v - max).exp()).sum();
+        let log_sum = max + sum.ln();
+        for v in row.iter_mut() {
+            *v -= log_sum;
+        }
     }
 }
 
@@ -650,6 +743,7 @@ fn fetch_hf(id: &str) -> Result<Model> {
             input: ModelInput::default(),
             output: ModelOutput::default(),
             compute: ModelCompute::default(),
+            alignment: ModelAlignment::default(),
             citation: ModelCitation::default(),
         },
         dir,
@@ -723,6 +817,7 @@ fn resolve_local(path: &Path) -> Result<Model> {
                 input: ModelInput::default(),
                 output: ModelOutput::default(),
                 compute: ModelCompute::default(),
+                alignment: ModelAlignment::default(),
                 citation: ModelCitation::default(),
             },
             dir,
@@ -768,6 +863,64 @@ pub fn vad_bundled(audio: &Audio) -> Result<Vec<VadFrame>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_zero_mean_unit_var_centres_and_scales() {
+        let mut x = vec![1.0f32, 2.0, 3.0, 4.0, 5.0];
+        normalize_zero_mean_unit_var(&mut x);
+        let n = x.len() as f32;
+        let mean = x.iter().sum::<f32>() / n;
+        let var = x.iter().map(|v| v * v).sum::<f32>() / n;
+        assert!(mean.abs() < 1e-5, "mean {mean}");
+        assert!((var - 1.0).abs() < 1e-3, "var {var}"); // unit variance (± the 1e-7 floor)
+        // matches numpy's (x - mean) / (std + 1e-7): first element is negative,
+        // symmetric around the centre.
+        assert!(x[0] < 0.0 && x[4] > 0.0 && (x[0] + x[4]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn log_softmax_rows_normalizes_each_frame() {
+        // exp of a log-softmax row sums to 1; a uniform row → ln(1/C) each.
+        let mut m = ndarray::arr2(&[[0.0_f64, 0.0, 0.0], [1.0, 2.0, 3.0]]);
+        log_softmax_rows(&mut m);
+        for row in m.rows() {
+            let sum: f64 = row.iter().map(|v| v.exp()).sum();
+            assert!((sum - 1.0).abs() < 1e-9, "row exp-sum {sum}");
+        }
+        // uniform row: each entry is ln(1/3).
+        for &v in m.row(0) {
+            assert!((v - (1.0f64 / 3.0).ln()).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn alignment_manifest_block_parses_with_defaults() {
+        let m = parse_model_manifest(
+            r#"
+id = "sadda/aligner"
+version = "1.0.0"
+[model]
+kind = "alignment"
+format = "onnx"
+file = "model.onnx"
+[input]
+representation = "waveform"
+normalize = "zero_mean_unit_var"
+[alignment]
+vocab_file = "vocab.json"
+blank_token = "<pad>"
+frame_rate_hz = 50.0
+"#,
+        )
+        .unwrap();
+        assert_eq!(m.input.normalize.as_deref(), Some("zero_mean_unit_var"));
+        assert_eq!(m.alignment.blank_token, "<pad>");
+        assert_eq!(m.alignment.frame_rate_hz, 50.0);
+        // an absent [alignment] block falls back to the wav2vec2 defaults.
+        let d = parse_model_manifest("id = \"x\"\nversion = \"1\"\n").unwrap();
+        assert_eq!(d.alignment.vocab_file, "vocab.json");
+        assert_eq!(d.alignment.frame_rate_hz, 50.0);
+    }
 
     const MANIFEST: &str = r#"
 id = "sadda/test-vad"
