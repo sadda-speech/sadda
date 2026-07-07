@@ -40,6 +40,10 @@
 //! contiguous partition of `0..T` (a full interval tier); silence is *empty*,
 //! not a gap.
 
+use std::collections::HashMap;
+
+use crate::error::EngineError;
+
 /// One interval of the aligned tier: either a phone or a stretch of silence.
 ///
 /// The returned spans are **contiguous** and cover `0..T` — a full partition, as
@@ -373,6 +377,203 @@ pub fn frame_to_seconds(frame: usize, frame_rate: f64) -> f64 {
     frame as f64 / frame_rate
 }
 
+/// One aligned phone: its label (empty for silence), time span, a confidence
+/// proxy, and whether it's silence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlignedPhone {
+    /// The phone label (empty string for a silence interval).
+    pub label: String,
+    /// Start time in seconds.
+    pub start_seconds: f64,
+    /// End time in seconds.
+    pub end_seconds: f64,
+    /// Mean emission log-probability over the span (alignment-confidence proxy).
+    pub score: f32,
+    /// Whether this is a detected-silence interval rather than a phone.
+    pub is_silence: bool,
+}
+
+/// One aligned syllable: its span and its phones joined into a label.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlignedSyllable {
+    /// The syllable's phone labels concatenated (e.g. `"loʊ"`).
+    pub label: String,
+    /// Start time in seconds.
+    pub start_seconds: f64,
+    /// End time in seconds.
+    pub end_seconds: f64,
+}
+
+/// One aligned word (empty `text` for an inter-word pause interval) and the
+/// phones inside it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlignedWord {
+    /// The word as written (empty for a pause interval).
+    pub text: String,
+    /// Start time in seconds.
+    pub start_seconds: f64,
+    /// End time in seconds.
+    pub end_seconds: f64,
+    /// The phones spanned by this word.
+    pub phones: Vec<AlignedPhone>,
+}
+
+/// A native forced alignment: contiguous Word and Phone tiers, plus a derived
+/// Syllable tier. The native (Rust) analog of `sadda.align.Alignment` — built by
+/// [`align_transcript`] for the GUI/engine path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Alignment {
+    /// The Word tier: a contiguous partition, pauses as empty-`text` words.
+    pub words: Vec<AlignedWord>,
+    /// The Phone tier: a contiguous partition, silence as empty-label phones.
+    pub phones: Vec<AlignedPhone>,
+    /// The Syllable tier, derived word-internally (SSP + Maximal Onset).
+    pub syllables: Vec<AlignedSyllable>,
+}
+
+/// Turn per-frame `emissions` + a phonemized transcript into an [`Alignment`].
+///
+/// The native counterpart of `sadda.align.align`'s orchestration (mirrors it so
+/// the GUI and Python paths agree): each word's IPA is tokenized against `vocab`
+/// (greedy longest-match, via [`crate::g2p::tokenize`]), the whole target runs
+/// through [`forced_align`], and the resulting spans become a contiguous **Word**
+/// tier (inter-word pauses as empty-`text` words) + **Phone** tier (silence as
+/// empty-label phones), with a **Syllable** tier derived per word
+/// ([`crate::syllable::syllabify`]).
+///
+/// - `emissions`: `T` frames of `C` **log**-probabilities (log-softmax, blank included).
+/// - `words`: `(text, ipa)` per word — `ipa` is the espeak-ng IPA (stress stripped).
+/// - `vocab`: the acoustic model's phone→class-id map; `blank`: the CTC blank id.
+/// - `frame_rate`: emission frames per second (e.g. 50.0).
+/// - `min_silence_frames` / `silence_mask`: passed through to [`forced_align`].
+#[allow(clippy::too_many_arguments)]
+pub fn align_transcript(
+    emissions: &[&[f32]],
+    words: &[(String, String)],
+    vocab: &HashMap<String, usize>,
+    blank: usize,
+    frame_rate: f64,
+    min_silence_frames: usize,
+    silence_mask: Option<&[bool]>,
+) -> Result<Alignment, EngineError> {
+    let id_to_phone: HashMap<usize, String> = vocab.iter().map(|(p, &i)| (i, p.clone())).collect();
+
+    // Tokenize each word's IPA and remember which word each target token belongs to.
+    let mut targets: Vec<usize> = Vec::new();
+    let mut word_of_token: Vec<usize> = Vec::new();
+    for (wi, (_text, ipa)) in words.iter().enumerate() {
+        for tok in crate::g2p::tokenize(ipa, vocab)? {
+            targets.push(tok);
+            word_of_token.push(wi);
+        }
+    }
+    if targets.is_empty() {
+        return Err(EngineError::Align(
+            "transcript produced no phones to align".to_string(),
+        ));
+    }
+
+    let spans = forced_align(emissions, &targets, blank, min_silence_frames, silence_mask)
+        .map_err(|e| EngineError::Align(format!("forced alignment failed: {e:?}")))?;
+
+    let to_s = |frame: usize| frame as f64 / frame_rate;
+
+    // Phone tier: contiguous; silence spans carry an empty label.
+    let phones: Vec<AlignedPhone> = spans
+        .iter()
+        .map(|s| AlignedPhone {
+            label: if s.is_silence {
+                String::new()
+            } else {
+                id_to_phone
+                    .get(&s.label)
+                    .cloned()
+                    .unwrap_or_else(|| s.label.to_string())
+            },
+            start_seconds: to_s(s.start_frame),
+            end_seconds: to_s(s.end_frame),
+            score: s.score,
+            is_silence: s.is_silence,
+        })
+        .collect();
+
+    // Word tier: a contiguous partition. Each word spans its phones; pauses
+    // between/around words are empty-`text` word intervals.
+    let mut bounds: HashMap<usize, (f64, f64)> = HashMap::new();
+    let mut per_word_phones: HashMap<usize, Vec<AlignedPhone>> = HashMap::new();
+    for (span, ph) in spans.iter().zip(phones.iter()) {
+        if span.is_silence || span.token >= word_of_token.len() {
+            continue;
+        }
+        let wi = word_of_token[span.token];
+        let entry = bounds
+            .entry(wi)
+            .or_insert((ph.start_seconds, ph.end_seconds));
+        entry.0 = entry.0.min(ph.start_seconds);
+        entry.1 = entry.1.max(ph.end_seconds);
+        per_word_phones.entry(wi).or_default().push(ph.clone());
+    }
+
+    let duration = phones.last().map(|p| p.end_seconds).unwrap_or(0.0);
+    let mut aligned_words: Vec<AlignedWord> = Vec::new();
+    let mut prev_end = 0.0;
+    for (wi, (text, _ipa)) in words.iter().enumerate() {
+        let Some(&(w_start, w_end)) = bounds.get(&wi) else {
+            continue;
+        };
+        if w_start > prev_end + 1e-9 {
+            aligned_words.push(AlignedWord {
+                text: String::new(),
+                start_seconds: prev_end,
+                end_seconds: w_start,
+                phones: Vec::new(),
+            });
+        }
+        aligned_words.push(AlignedWord {
+            text: text.clone(),
+            start_seconds: w_start,
+            end_seconds: w_end,
+            phones: per_word_phones.remove(&wi).unwrap_or_default(),
+        });
+        prev_end = w_end;
+    }
+    if duration > prev_end + 1e-9 {
+        aligned_words.push(AlignedWord {
+            text: String::new(),
+            start_seconds: prev_end,
+            end_seconds: duration,
+            phones: Vec::new(),
+        });
+    }
+
+    // Syllable tier: derived word-internally from each real word's phones.
+    let mut syllables: Vec<AlignedSyllable> = Vec::new();
+    for w in &aligned_words {
+        if w.text.is_empty() {
+            continue;
+        }
+        let real: Vec<&AlignedPhone> = w.phones.iter().filter(|p| !p.label.is_empty()).collect();
+        if real.is_empty() {
+            continue;
+        }
+        let labels: Vec<&str> = real.iter().map(|p| p.label.as_str()).collect();
+        for (start, end) in crate::syllable::syllabify(&labels) {
+            let group = &real[start..end];
+            syllables.push(AlignedSyllable {
+                label: group.iter().map(|p| p.label.as_str()).collect(),
+                start_seconds: group[0].start_seconds,
+                end_seconds: group[group.len() - 1].end_seconds,
+            });
+        }
+    }
+
+    Ok(Alignment {
+        words: aligned_words,
+        phones,
+        syllables,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,6 +594,84 @@ mod tests {
 
     fn as_slices(m: &[Vec<f32>]) -> Vec<&[f32]> {
         m.iter().map(|r| r.as_slice()).collect()
+    }
+
+    fn vocab(pairs: &[(&str, usize)]) -> HashMap<String, usize> {
+        pairs.iter().map(|&(k, v)| (k.to_string(), v)).collect()
+    }
+
+    #[test]
+    fn align_transcript_builds_word_phone_syllable_tiers() {
+        // "hello" /h ə l o ʊ/ over 3 frames each at 100 fps (blank = 0).
+        let v = vocab(&[("h", 1), ("ə", 2), ("l", 3), ("o", 4), ("ʊ", 5)]);
+        let m = emissions(&[1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5], 6);
+        let words = [("hello".to_string(), "həloʊ".to_string())];
+
+        let al = align_transcript(&as_slices(&m), &words, &v, 0, 100.0, 0, None).unwrap();
+
+        // Phone tier: the five phones, contiguous, 0.03 s each.
+        assert_eq!(
+            al.phones
+                .iter()
+                .map(|p| p.label.as_str())
+                .collect::<Vec<_>>(),
+            ["h", "ə", "l", "o", "ʊ"]
+        );
+        assert!((al.phones[0].start_seconds - 0.0).abs() < 1e-9);
+        assert!((al.phones[4].end_seconds - 0.15).abs() < 1e-9);
+        // Word tier: one word wrapping its phones.
+        assert_eq!(al.words.len(), 1);
+        assert_eq!(al.words[0].text, "hello");
+        assert_eq!(al.words[0].phones.len(), 5);
+        // Syllable tier: hə . loʊ (the o+ʊ diphthong is one nucleus).
+        assert_eq!(
+            al.syllables
+                .iter()
+                .map(|s| s.label.as_str())
+                .collect::<Vec<_>>(),
+            ["hə", "loʊ"]
+        );
+        assert!((al.syllables[1].start_seconds - 0.06).abs() < 1e-9);
+    }
+
+    #[test]
+    fn align_transcript_carves_edge_silence_as_empty_intervals() {
+        // Leading + trailing blank runs around "ba"; min_silence_frames = 2.
+        let v = vocab(&[("b", 1), ("a", 2)]);
+        let m = emissions(&[0, 0, 0, 1, 1, 2, 2, 0, 0, 0], 3);
+        let words = [("ba".to_string(), "ba".to_string())];
+
+        let al = align_transcript(&as_slices(&m), &words, &v, 0, 100.0, 2, None).unwrap();
+
+        // Edge silence → empty-label phones; the real phones keep their labels.
+        assert_eq!(al.phones.first().unwrap().label, "");
+        assert_eq!(al.phones.last().unwrap().label, "");
+        assert_eq!(
+            al.phones
+                .iter()
+                .filter(|p| !p.label.is_empty())
+                .map(|p| p.label.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "a"]
+        );
+        // Contiguous partition: each phone starts where the previous ended.
+        for pair in al.phones.windows(2) {
+            assert!((pair[0].end_seconds - pair[1].start_seconds).abs() < 1e-9);
+        }
+        // Word tier: empty pause, "ba", empty pause — the word doesn't absorb silence.
+        assert_eq!(
+            al.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(),
+            ["", "ba", ""]
+        );
+    }
+
+    #[test]
+    fn align_transcript_rejects_unknown_phone() {
+        let v = vocab(&[("b", 1)]);
+        let m = emissions(&[1, 1], 3);
+        let words = [("x".to_string(), "x".to_string())];
+        let err = align_transcript(&as_slices(&m), &words, &v, 0, 100.0, 0, None).unwrap_err();
+        assert!(matches!(err, EngineError::Align(_)));
     }
 
     #[test]

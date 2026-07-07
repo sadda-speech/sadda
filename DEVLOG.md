@@ -6,6 +6,33 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-07 — A5.2: native alignment orchestration (`align_transcript`)
+
+The "brain" of native forced alignment, in the engine: turn per-frame emissions +
+a phonemized transcript into a full `Alignment` (Word + Phone + Syllable tiers),
+reusing the pieces that already exist — `g2p::tokenize` (A5.1), `forced_align`, and
+`syllable::syllabify` (A3).
+
+`align::align_transcript(emissions, words, vocab, blank, frame_rate,
+min_silence_frames, silence_mask) -> Alignment` mirrors `sadda.align.align`'s
+orchestration exactly, so the GUI and Python paths produce the same tiers:
+tokenize each word's IPA → run the DP → contiguous **Phone** tier (silence as
+empty-label intervals) + **Word** tier (inter-word pauses as empty-`text` words)
++ per-word **Syllable** tier. New engine types `Alignment` / `AlignedWord` /
+`AlignedPhone` / `AlignedSyllable` (the native analog of the Python dataclasses).
+
+**Fully unit-tested with synthetic emissions** — the Rust analog of the Python
+mock-model tests (a block-favoured emission matrix): a two-syllable word →
+hə·loʊ, edge-silence carving → empty phone/word intervals, unknown-phone
+rejection. No ONNX needed, so it runs in CI.
+
+**Deferred to A5.2b** (needs the real ONNX model, so it's gated like the Python
+tests): `Model::emissions` (log-softmax over the existing `models.rs` ONNX
+harness — with one real subtlety, the wav2vec2 input needs zero-mean/unit-var
+normalization the generic harness doesn't do yet), `Project::align_bundle` (audio
+→ emissions → `align_transcript` → write tiers + provenance), and acoustic-model
+fetch (the `download` feature in the app). Then **A5.3** the GUI menu/panel.
+
 ## 2026-07-07 — A5 design + slice 1: native G2P in the engine
 
 Bringing forced alignment into the desktop app (egui). Design decided with the
