@@ -66,6 +66,12 @@ download = ["sadda[ml]"]
 # huggingface_hub. The espeak-ng G2P side needs no Python dep (it shells out to
 # the espeak-ng binary).
 align = ["sadda[ml]", "huggingface_hub>=0.20"]
+# `pip install sadda[asr]` adds automatic speech recognition (audio -> transcript)
+# via faster-whisper, a CTranslate2 reimplementation of OpenAI Whisper. Both are
+# MIT-licensed and torch-free at inference (CTranslate2 is a standalone C++ engine;
+# torch is only needed to *convert* models, and pre-converted models are fetched
+# from the HF Hub). Feeds the forced aligner's no-transcript path (`align_auto`).
+asr = ["faster-whisper>=1.0"]
 
 [project.urls]
 Homepage = "https://sadda-speech.github.io/sadda/"

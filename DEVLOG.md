@@ -6,6 +6,46 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-07 — A4: ASR (the no-transcript path) via faster-whisper
+
+Recognize a transcript from audio, then feed the forced aligner — for speech that
+arrives with no transcript.
+
+**Reframing (user correction, 2026-07-06):** the 2026-07-05 design called ASR "a
+convenience layer" on "most phoneticians have transcripts." Too strong — unprompted
+**conversational / naturalistic** recordings have no prompt, a common research mode,
+so ASR is a *primary* workflow. A4 is built accordingly: `sadda.asr` is its own
+first-class module (sibling of `sadda.tts`), not a corner of `sadda.align`.
+
+**Runtime decision.** Standard problem: efficient Whisper inference for embedding.
+Options: **faster-whisper** (CTranslate2 — MIT, ~4× faster than reference, int8,
+**torch-free at inference**); **ONNX-over-ORT** (would reuse sadda.ml's runtime, but
+autoregressive Whisper over raw ORT is a lot of fragile generation code *and* ONNX
+is weaker for transformers — worse perf for more work); **openai-whisper / transformers**
+(pull torch). **Chose faster-whisper** behind an opt-in `sadda[asr]` extra. Tradeoff
+accepted and flagged: a second inference engine (CTranslate2) distinct from ORT — but
+it's opt-in, torch-free, and MIT, and the ORT alternative isn't worth its cost.
+
+**Shape (mirrors the TTS backend pattern).** `sadda.asr`: an `ASRBackend` structural
+protocol (`transcribe(audio, sr) -> Transcription`) + a name→factory registry
+(`get_backend`/`register_backend`/`list_backends`, `$SADDA_ASR_BACKEND`), default
+`FasterWhisperBackend`. `Transcription` = text + coarse segments + language.
+`transcribe(audio, sr)` resamples to Whisper's 16 kHz via `Audio.resample` (reusing
+the resampler that landed with the align input-resampling work). Bridge:
+`sadda.align.align_auto(audio, sr, model=...)` = transcribe → align in one call (the
+recognize→align pipeline); for a review-before-align flow, call `transcribe` + `align`
+separately.
+
+**No new Rust (flagged three-surface departure, like TTS/MFA).** faster-whisper is an
+external engine; there's no engine algorithm to write. Python-only; the align GUI is
+still A5. **Deferred:** auto-deriving the alignment G2P `voice` from the recognized
+language (needs a language→espeak-voice map) — for now pass `voice=` explicitly.
+
+**Tests:** all seams ungated via a mock backend — protocol/registry, resample helper,
+not-installed error (faster-whisper absent → actionable `sadda[asr]` message), and the
+`align_auto` ASR→transcript→align orchestration (mock recognizer + mock acoustic model).
+Real faster-whisper is gated (heavy extra + model download).
+
 ## 2026-07-06 — A2: MFA gold-standard alignment passthrough
 
 The second aligner backend, per the "both engines" fork (neural default + MFA

@@ -34,6 +34,7 @@ __all__ = [
     "Alignment",
     "tokenize",
     "align",
+    "align_auto",
     "import_alignment",
 ]
 
@@ -300,3 +301,47 @@ def import_alignment(
             parent_annotation_id=parent,
         )
     return wt, pt
+
+
+# [docs:sadda.align.align_auto]
+@provisional
+def align_auto(
+    audio: np.ndarray,
+    sample_rate: int,
+    *,
+    model: AcousticModel,
+    asr_backend: Optional[object] = None,
+    language: Optional[str] = None,
+    voice: str = "en-us",
+    detector: Optional[str] = "blank",
+    min_silence_seconds: float = 0.20,
+) -> Alignment:
+    """Recognize a transcript with ASR, then force-align it — the no-transcript path.
+
+    For speech with no transcript to start from (unprompted conversational /
+    naturalistic recordings): runs :func:`sadda.asr.transcribe` (default
+    faster-whisper, needs ``pip install "sadda[asr]"``) to get the words, then
+    :func:`align`. ``asr_backend`` overrides the recognizer; ``language`` fixes
+    the spoken language (else it's detected).
+
+    ``voice`` is the espeak-ng G2P voice used for alignment — set it to match the
+    spoken language (auto-deriving it from the recognized language is a planned
+    refinement). For a review-before-align workflow, call
+    :func:`sadda.asr.transcribe` and :func:`align` separately instead.
+    """
+    from sadda import asr  # lazy: keeps sadda.align importable without the [asr] extra
+
+    transcript = asr.transcribe(
+        audio, sample_rate, backend=asr_backend, language=language
+    ).text
+    if not transcript:
+        raise ValueError("ASR produced an empty transcript; nothing to align")
+    return align(
+        audio,
+        sample_rate,
+        transcript,
+        model=model,
+        voice=voice,
+        detector=detector,
+        min_silence_seconds=min_silence_seconds,
+    )

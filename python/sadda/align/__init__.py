@@ -24,6 +24,7 @@ from .aligner import (
     TimedPhone,
     TimedWord,
     align,
+    align_auto,
     import_alignment,
     tokenize,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "Wav2Vec2EspeakModel",
     # alignment
     "align",
+    "align_auto",
     "tokenize",
     "Alignment",
     "TimedWord",

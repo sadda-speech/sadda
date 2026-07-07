@@ -51,14 +51,33 @@ Three stages, cleanly separated (which is why each is swappable and testable):
    Rust engine) places each target phone in time; words are grouped from their
    phones.
 
-## Bring your own transcript (for now)
+## With or without a transcript
 
-These backends are **alignment-first**: you supply the transcript. Plenty of
-speech data has none, though — unprompted conversational and naturalistic
-recordings especially — so automatic transcription (Whisper ASR) that produces a
-transcript to align is a first-class part of the roadmap (a later slice), not an
-afterthought. The transcript needn't be perfectly tokenized — punctuation is
-stripped, and each whitespace-separated word becomes one `TimedWord`.
+Alignment is **transcript-first**: you supply the words, and it finds where they
+fall. The transcript needn't be perfectly tokenized — punctuation is stripped,
+and each whitespace-separated word becomes one `TimedWord`.
+
+But plenty of speech has no transcript — unprompted conversational and
+naturalistic recordings especially. For those, recognize the words first with
+**ASR**, then align. `sadda.asr` (opt-in `pip install "sadda[asr]"`, default
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper)) does the recognizing:
+
+```python
+tr = sadda.asr.transcribe(audio, sample_rate)   # -> Transcription(text=..., language=...)
+alignment = sadda.align.align(audio, sample_rate, tr.text, model=model)
+```
+
+`align_auto` does both in one call (recognize → align) when you don't need to
+review the transcript first:
+
+```python
+alignment = sadda.align.align_auto(audio, sample_rate, model=model)
+```
+
+Set `voice=` to the spoken language for the alignment G2P (deriving it from the
+recognized language automatically is a planned refinement). For a human-in-the-loop
+workflow — recognize, correct the transcript, then align — call `sadda.asr.transcribe`
+and `align` separately.
 
 ## Languages
 
