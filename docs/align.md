@@ -37,6 +37,14 @@ and a flat `phones` list ([`TimedPhone`](api/align.md)) — each carrying
 `start_seconds`, `end_seconds`, and (for phones) an alignment-confidence `score`
 (`None` for backends that don't emit one, e.g. MFA).
 
+## In the desktop app
+
+The GUI exposes alignment natively (no Python): select a recording, then
+**Annotate ▸ Align…**, type the transcript and a language voice, and run. It
+phonemizes, runs the neural CTC aligner on a background thread (the first run
+downloads the model), and writes **Words / Syllables / Phones** tiers onto the
+bundle — the same result as `sadda.align.align`.
+
 ## How it works
 
 Three stages, cleanly separated (which is why each is swappable and testable):

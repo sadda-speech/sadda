@@ -6,6 +6,40 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-07 — A5.3: forced alignment in the GUI (completes A5 + the A-series)
+
+The last A-series slice: an **Annotate ▸ Align…** action that force-aligns a
+transcript to the selected recording, natively, and writes Words / Syllables /
+Phones tiers — no runtime Python.
+
+**Panel.** `AlignPanel` (mirrors the `CriteriaEditor` window idiom): a transcript
+box, an espeak-ng `voice`, a min-silence control, and Align. Gated on a loaded
+bundle; a spinner + status line while it runs.
+
+**Threading — the `Project` constraint.** `Project` isn't `Clone`/`Sync` and holds
+a single-writer lock, so (like the VAD lane) the worker touches **no** `Project`:
+it clones the audio envelope + the mpsc `tx` + the egui `Context`, spawns
+`compute_alignment` (espeak-ng G2P → `Model::emissions` → `align::align_transcript`
+— all off the UI thread, reusing A5.1/A5.2/A5.2b), and sends an
+`AnalysisResult::AlignmentDone`. `poll_analysis` (which owns the `Project`) then
+calls `write_alignment` and activates the new tiers. So the multi-second run — and
+the first-run model download — never freeze the UI, and the tier strip renders the
+result on the next frame (it re-reads tiers every frame).
+
+**Model resolution.** `resolve_align_model` fetches `model.onnx` + `vocab.json`
+from the HF Hub into the model cache on first use (the app's `download` feature,
+A5.2c), then stamps the `input.normalize` + `[alignment]` manifest the bare
+`hf://` loader omits — so `emissions` gets the wav2vec2 normalization it needs.
+
+**Verification.** Compile- + clippy-clean; the underlying pipeline is all verified
+engine code (align_transcript unit-tested A5.2; emissions numerically matched to
+the Python reference A5.2c). The GUI *interaction* + the real end-to-end run
+(egui under WSLg + the 635 MB model + ORT) are for hands-on confirmation — they
+can't be driven headlessly here.
+
+**A5 done → the A-series (A1–A5) is complete:** neural + MFA alignment, ASR,
+syllabification, and now a native GUI, across engine + Python + app.
+
 ## 2026-07-07 — A5.2c: verify the ONNX port + wire the model fetch
 
 De-risks A5.2b's ONNX-gated `Model::emissions` — the one part that couldn't run
