@@ -76,6 +76,7 @@ __all__ = [
     "schema_version",
     "spectrogram",
     "stft",
+    "syllabify",
     "version",
     "voiced_pitch",
 ]
@@ -2600,6 +2601,14 @@ def stft(samples: numpy.typing.NDArray[numpy.float32], frame_size: builtins.int,
     `n_freq_bins = frame_size / 2 + 1` (the unique half of the spectrum for
     real input). If `window` is omitted, a Hann window of length `frame_size`
     is used (matches `scipy.signal.stft`'s default).
+    """
+
+def syllabify(phones: typing.Sequence[builtins.str]) -> builtins.list[tuple[builtins.int, builtins.int]]:
+    r"""
+    Syllabify a sequence of IPA phone labels into `[start, end)` phone-index
+    ranges, one per syllable (Sonority Sequencing + Maximal Onset; see
+    `sadda_engine::syllable`). Pass one word's phones — syllabification is
+    word-internal.
     """
 
 def version() -> builtins.str:

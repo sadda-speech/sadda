@@ -22,10 +22,12 @@ from .acoustic import Wav2Vec2EspeakModel
 from .aligner import (
     Alignment,
     TimedPhone,
+    TimedSyllable,
     TimedWord,
     align,
     align_auto,
     import_alignment,
+    syllabify,
     tokenize,
 )
 from .g2p import Utterance, Word, phonemize, split_phones, strip_stress
@@ -51,6 +53,9 @@ __all__ = [
     "TimedWord",
     "TimedPhone",
     "import_alignment",
+    # syllabification (A3)
+    "syllabify",
+    "TimedSyllable",
     # MFA (gold-standard passthrough)
     "mfa_align",
     "mfa_align_corpus",

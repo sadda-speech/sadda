@@ -6,6 +6,44 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-07 — A3: syllabification (Phones → Syllables by rule)
+
+Derives a **Syllable** tier from the Phone tier — no model, per the design. Pure
+engine module (`crates/engine/src/syllable.rs`) + a thin Python surface.
+
+**Standard problem / approach.** Automatic syllabification. Textbook rule:
+**Sonority Sequencing Principle** (nuclei = sonority peaks) + **Maximal Onset
+Principle** (intervocalic consonants attach to the following onset as far as a
+rising-sonority onset allows) — Clements (1990, doi:10.1017/CBO9780511627736.017),
+Selkirk (1982). Alternatives weighed: SSP+MOP + a per-language **onset-legality
+table** (more accurate, needs phonotactic data per language), and **data-driven**
+syllabifiers (Bartlett et al. 2009 — best per-language, needs training corpora).
+
+**Decision: universal SSP+MOP for v1** — language-agnostic, deterministic, no
+data, fits the IPA-multilingual stance; a language-tunable sonority scale +
+legality table is the accuracy refinement (backlogged). **Honest limitations,
+documented:** pure sonority mis-splits `sC` onsets (`extra` → `ɛks.trə`, not
+English's `ɛk.strə`), and adjacent vowels merge to one nucleus (diphthong-
+friendly — necessary since A1's `split_phones` splits untied diphthongs like
+`oʊ` — but it under-splits true hiatus `ˈke.ɒs`).
+
+**Implementation.** `syllable::syllabify(phones) -> Vec<(start,end)>`: sonority
+by IPA base symbol (vowel > glide > rhotic > lateral > nasal > voiced fric >
+voiceless fric > voiced stop > voiceless stop); nuclei = maximal vowel runs (or
+a syllabicity-diacritic consonant); the boundary between two nuclei is the
+longest rising-sonority suffix of the intervocalic cluster (maximal onset).
+Python `sadda.align.syllabify(alignment) -> tuple[TimedSyllable, ...]` runs it
+word-internally, skipping empty/pause words — so it works on both neural and MFA
+alignments and never turns a modeled-silence phone into a syllable.
+
+**Surfaces.** Engine + Python (the align GUI is still A5, as with A1/A2). Cited
+in the engine registry (`sadda.align.syllabify` → Clements 1990).
+
+**Tests:** engine (sonority ordering, diphthong = one nucleus, maximal-onset vs
+coda split, syllabic consonant, monosyllable, no-nucleus); python (native index
+ranges + `syllabify` over hand-built alignments: two-syllable word, monosyllable,
+pause words skipped, no cross-word syllables). All ungated (pure rule).
+
 ## 2026-07-07 — A4: ASR (the no-transcript path) via faster-whisper
 
 Recognize a transcript from audio, then feed the forced aligner — for speech that

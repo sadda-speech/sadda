@@ -27,6 +27,7 @@ pub mod pitch_preset;
 pub mod preset;
 pub mod refdist;
 pub mod storage;
+pub mod syllable;
 pub mod timeline;
 pub mod units;
 

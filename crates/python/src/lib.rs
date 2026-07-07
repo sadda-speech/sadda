@@ -3467,6 +3467,16 @@ fn parse_textgrid_intervals(path: PathBuf) -> PyResult<Vec<NamedIntervalTier>> {
     Ok(out)
 }
 
+/// Syllabify a sequence of IPA phone labels into `[start, end)` phone-index
+/// ranges, one per syllable (Sonority Sequencing + Maximal Onset; see
+/// `sadda_engine::syllable`). Pass one word's phones — syllabification is
+/// word-internal.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn syllabify(phones: Vec<String>) -> Vec<(usize, usize)> {
+    sadda_engine::syllable::syllabify(&phones)
+}
+
 /// Header-only summary of a WAV file (see `sadda.probe_wav`): its size without
 /// the cost of decoding. Lets a caller gauge a file's in-memory footprint
 /// before loading it.
@@ -4540,6 +4550,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(load_wav, m)?)?;
     m.add_function(wrap_pyfunction!(probe_wav, m)?)?;
     m.add_function(wrap_pyfunction!(parse_textgrid_intervals, m)?)?;
+    m.add_function(wrap_pyfunction!(syllabify, m)?)?;
     m.add_function(wrap_pyfunction!(f0, m)?)?;
     m.add_function(wrap_pyfunction!(hann, m)?)?;
     m.add_function(wrap_pyfunction!(hamming, m)?)?;

@@ -8,9 +8,9 @@ time-aligned **Word** and **Phone** results.
 The phone→class-id step is a greedy longest-match of each word's IPA against the
 model's vocabulary (so multi-character vocab tokens like ``dʒ`` are matched
 whole), which is why G2P stays model-agnostic and the tokenization lives here.
-Syllable derivation is a later slice. :func:`align` returns a plain
-:class:`Alignment`; :func:`import_alignment` writes one onto a project's bundle
-as Word + Phone interval tiers (backend-agnostic — neural or MFA).
+:func:`align` returns a plain :class:`Alignment`; :func:`syllabify` derives a
+Syllable tier from it by rule, and :func:`import_alignment` writes one onto a
+project's bundle as Word + Phone interval tiers (backend-agnostic — neural or MFA).
 
 Stability tier: PROVISIONAL.
 """
@@ -31,10 +31,12 @@ from .model import AcousticModel
 __all__ = [
     "TimedPhone",
     "TimedWord",
+    "TimedSyllable",
     "Alignment",
     "tokenize",
     "align",
     "align_auto",
+    "syllabify",
     "import_alignment",
 ]
 
@@ -61,6 +63,21 @@ class TimedWord:
     """One aligned word: its span and the phones inside it."""
 
     text: str
+    start_seconds: float
+    end_seconds: float
+    phones: tuple[TimedPhone, ...]
+
+
+# [docs:sadda.align.TimedSyllable]
+@dataclass(frozen=True)
+class TimedSyllable:
+    """One syllable: its span and the phones inside it.
+
+    ``label`` is the syllable's phone labels concatenated (e.g. ``"loʊ"``).
+    Derived from the Phone tier by rule — see :func:`syllabify`.
+    """
+
+    label: str
     start_seconds: float
     end_seconds: float
     phones: tuple[TimedPhone, ...]
@@ -345,3 +362,35 @@ def align_auto(
         detector=detector,
         min_silence_seconds=min_silence_seconds,
     )
+
+
+# [docs:sadda.align.syllabify]
+@provisional
+def syllabify(alignment: Alignment) -> tuple[TimedSyllable, ...]:
+    """Derive a Syllable tier from an :class:`Alignment` (SSP + Maximal Onset).
+
+    Syllabifies each **word's** phones — syllabification is word-internal, so
+    pauses and empty/silence intervals between words are not part of any
+    syllable (empty-labelled words are skipped). Each syllable spans its phones
+    and is labelled with their concatenation. Works on any `Alignment` (neural
+    or MFA). See :mod:`sadda_engine::syllable` for the rule and its limitations
+    (universal sonority scale, no per-language onset-legality table yet).
+    """
+    out: list[TimedSyllable] = []
+    for w in alignment.words:
+        if not w.text:  # empty-labelled pause/silence word — nothing to syllabify
+            continue
+        real = [p for p in w.phones if p.label]
+        if not real:
+            continue
+        for start, end in _native.syllabify([p.label for p in real]):
+            group = real[start:end]
+            out.append(
+                TimedSyllable(
+                    label="".join(p.label for p in group),
+                    start_seconds=group[0].start_seconds,
+                    end_seconds=group[-1].end_seconds,
+                    phones=tuple(group),
+                )
+            )
+    return tuple(out)
