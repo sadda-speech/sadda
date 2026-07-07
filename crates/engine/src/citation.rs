@@ -117,6 +117,15 @@ pub fn citation_for(processor_id: &str) -> Option<Citation> {
             Some("10.21437/Interspeech.2022-60"),
             None,
         ),
+        "sadda.align.syllabify" => (
+            "Clements, G.N. (1990). The role of the sonority cycle in core \
+             syllabification. In J. Kingston & M.E. Beckman (eds.), Papers in \
+             Laboratory Phonology I, 283–333. Cambridge University Press. \
+             (Maximal Onset Principle: Selkirk, E.O. (1982). The syllable.)",
+            Some("10.1017/CBO9780511627736.017"),
+            // DOI yields the weblink.
+            None,
+        ),
         _ => return None,
     };
     Some(Citation {
@@ -158,6 +167,13 @@ mod tests {
         let c = citation_for("sadda.align.wav2vec2_espeak").expect("acoustic model is cited");
         assert!(c.reference.contains("Xu"));
         assert_eq!(c.doi.as_deref(), Some("10.21437/Interspeech.2022-60"));
+    }
+
+    #[test]
+    fn syllabify_cites_clements() {
+        let c = citation_for("sadda.align.syllabify").expect("syllabify is cited");
+        assert!(c.reference.contains("Clements"));
+        assert_eq!(c.doi.as_deref(), Some("10.1017/CBO9780511627736.017"));
     }
 
     #[test]

@@ -145,6 +145,35 @@ Word + Phone interval tiers (Phone as a child of Word) with
 word_tier, phone_tier = sadda.align.import_alignment(project, bundle_id, al)
 ```
 
+## Syllables
+
+`syllabify` derives a **Syllable** tier from an `Alignment` by rule — no model:
+
+```python
+al = sadda.align.align(audio, 16000, "hello", model=model)
+for syl in sadda.align.syllabify(al):
+    print(f"{syl.start_seconds:.2f}-{syl.end_seconds:.2f}  {syl.label}")
+# 0.00-0.20  hə
+# 0.20-0.60  loʊ
+```
+
+It applies the **Sonority Sequencing Principle** (syllable nuclei are sonority
+peaks) and the **Maximal Onset Principle** (intervocalic consonants attach to the
+following onset as far as a rising-sonority onset allows) — Clements
+([1990](https://doi.org/10.1017/CBO9780511627736.017)), Selkirk (1982).
+Syllabification is word-internal: each word's phones are syllabified on their
+own, and pauses/silence between words belong to no syllable.
+
+!!! warning "Universal v1 — known limitations"
+    This is a *language-agnostic* pass: one universal sonority scale and **no
+    per-language onset-legality table**. So it can't know a language's specific
+    legal clusters — pure sonority splits `extra` as `ɛks.trə` (because `s` is
+    more sonorous than the following `t`), where English, allowing `/str/` as an
+    onset, prefers `ɛk.strə` (the `sC`-cluster exception). It also merges adjacent
+    vowels into one nucleus (diphthong-friendly, but it under-splits true
+    **hiatus** like `ˈke.ɒs`). A language-tunable legality table is the planned
+    refinement.
+
 ## Silence and pauses
 
 Leading/trailing silence and inter-word pauses are detected and left as
