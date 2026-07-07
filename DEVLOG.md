@@ -6,6 +6,58 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-06 — A2: MFA gold-standard alignment passthrough
+
+The second aligner backend, per the "both engines" fork (neural default + MFA
+gold standard). MFA 3.x (HMM-GMM + speaker adaptation, ~15 ms boundary error) is
+a heavy conda/Kaldi tool, so this is a **passthrough**: shell out to the `mfa`
+CLI, import its TextGrid into the **same** `Alignment` the neural aligner returns,
+so the backends are interchangeable. Strictly opt-in (detect `mfa` on PATH →
+actionable error otherwise, the espeak/model-fetch pattern).
+
+**User-decided forks (both "both"):**
+- **Granularity → both.** `mfa_align(audio, transcript)` via MFA 3.0's
+  `mfa align_one` (fast single file, no corpus/db overhead) **and**
+  `mfa_align_corpus(dir)` via `mfa align` (batch + speaker adaptation) →
+  `{stem: Alignment}`.
+- **Return shape → both.** Functions return an `Alignment`; `import_alignment`
+  (new, **backend-agnostic** — works for neural A1 too) writes any `Alignment`
+  onto a bundle as Word + Phone interval tiers (Phone child-of-Word by time
+  containment).
+
+**Modeled vs imputed silence (user correction).** I'd first planned to map MFA
+silence to empty intervals like A1's detectors. Wrong: A1's blank/VAD *infer*
+silence (an absence → empty), but MFA *models* it in the HMM — a positive
+assertion — so its `sil`/`sp`/`spn` intervals keep their **labels** verbatim.
+Empty = "we didn't model it"; labelled = "the model says silence here". The two
+silence kinds now read differently on the tier (and survive `import_alignment`).
+
+**No new Rust algorithm (flagged three-surface departure, like TTS).** MFA is a
+subprocess; the only engine work is exposing the existing TextGrid reader to
+Python (`parse_textgrid_intervals`) to turn MFA output into an `Alignment`. So
+this is a Python slice + that one binding; the alignment GUI stays A5.
+
+**Bug found + fixed while wiring the parser:** the engine TextGrid tokenizer did
+`bytes[i] as char` when accumulating quoted strings — Latin-1-decoding multi-byte
+UTF-8, so **any IPA label was mangled** (`ɪ`'s two UTF-8 bytes `0xC9 0xAA` read as
+Latin-1 → `Éª`, so `aɪ` became `aÉª`). Latent across
+`import_textgrid` too (importing a Praat TextGrid with IPA would corrupt it),
+just never exercised since existing tiers were ASCII. Fixed to accumulate bytes +
+`String::from_utf8`; guarded by `ipa_labels_survive_parse_round_trip` (engine).
+
+**ASR is first-class (user correction, recorded).** The 2026-07-05 design called
+ASR "a convenience layer" on "most phoneticians have transcripts." Too strong —
+unprompted conversational/naturalistic recordings have no prompt, a legitimate and
+common research mode, so A4 (recognize → transcript → align) is a primary
+workflow. The alignment surfaces already accept a plain-text transcript an ASR
+front-end can feed.
+
+**Tests:** engine — IPA round-trip. python (all ungated via a canned MFA-style
+long_textgrid) — TextGrid→Alignment mapping, modeled silence stays labelled,
+missing-tier error, `import_alignment` round-trip into a bundle (hierarchical +
+flat), not-installed error. Real `mfa` integration is gated (skips without the
+binary + `SADDA_TEST_MFA_*`). `TimedPhone.score` is now `Optional` (`None` for MFA).
+
 ## 2026-07-06 — Forced-alignment input resampling (any-rate audio "just works")
 
 A1 shipped with a hard 16 kHz requirement: `Wav2Vec2EspeakModel.emissions`

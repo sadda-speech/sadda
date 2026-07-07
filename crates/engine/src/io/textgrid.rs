@@ -287,21 +287,28 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
             // Quoted string with Praat-style doubled-quote escaping.
             b'"' => {
                 i += 1;
-                let mut s = String::new();
+                // Accumulate the raw bytes and decode as UTF-8 at the end — the
+                // input is a valid `&str` and quotes/escapes are ASCII, so a
+                // quoted run is itself valid UTF-8. (Pushing `bytes[i] as char`
+                // would Latin-1-decode multi-byte chars and mangle IPA labels.)
+                let mut buf: Vec<u8> = Vec::new();
                 while i < bytes.len() {
                     if bytes[i] == b'"' {
                         // Lookahead for doubled quote.
                         if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
-                            s.push('"');
+                            buf.push(b'"');
                             i += 2;
                             continue;
                         }
                         i += 1;
                         break;
                     }
-                    s.push(bytes[i] as char);
+                    buf.push(bytes[i]);
                     i += 1;
                 }
+                let s = String::from_utf8(buf).map_err(|e| {
+                    EngineError::Corpus(format!("TextGrid: invalid UTF-8 in quoted string: {e}"))
+                })?;
                 tokens.push(Token::String(s));
             }
             // Praat positional-index `[<digits>]:` — skip as a unit so the
@@ -711,6 +718,41 @@ Object class = "TextGrid"
         let parsed = parse(&rendered).unwrap();
         if let TextGridTier::Interval(t) = &parsed.tiers[0] {
             assert_eq!(t.intervals[0].text, r#"she said "hi""#);
+        }
+    }
+
+    #[test]
+    fn ipa_labels_survive_parse_round_trip() {
+        // IPA (multi-byte UTF-8) labels must not be Latin-1-mangled by the
+        // tokenizer — sadda's phone tiers are IPA, and MFA/Praat TextGrids carry
+        // IPA directly. Guards the `bytes[i] as char` regression.
+        let labels = ["aɪ", "t͡ʃ", "ɜː", "sil"];
+        let tg = TextGridFile {
+            xmin: 0.0,
+            xmax: 4.0,
+            tiers: vec![TextGridTier::Interval(IntervalTier {
+                name: "phones".into(),
+                xmin: 0.0,
+                xmax: 4.0,
+                intervals: labels
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &t)| IntervalEntry {
+                        xmin: k as f64,
+                        xmax: (k + 1) as f64,
+                        text: t.into(),
+                    })
+                    .collect(),
+            })],
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_to(&tg, &mut buf).unwrap();
+        let parsed = parse(&String::from_utf8(buf).unwrap()).unwrap();
+        if let TextGridTier::Interval(t) = &parsed.tiers[0] {
+            let got: Vec<&str> = t.intervals.iter().map(|e| e.text.as_str()).collect();
+            assert_eq!(got, labels);
+        } else {
+            panic!("expected an interval tier");
         }
     }
 

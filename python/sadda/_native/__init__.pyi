@@ -70,6 +70,7 @@ __all__ = [
     "mfcc",
     "new_project",
     "open_project",
+    "parse_textgrid_intervals",
     "perturbation",
     "probe_wav",
     "schema_version",
@@ -2553,6 +2554,16 @@ def open_project(path: builtins.str | os.PathLike | pathlib.Path) -> Project:
     r"""
     Opens an existing sadda project at `path`. Applies any pending schema
     migrations first, writing a `corpus.db.bak.<old_version>` backup.
+    """
+
+def parse_textgrid_intervals(path: builtins.str | os.PathLike | pathlib.Path) -> builtins.list[tuple[builtins.str, builtins.list[tuple[builtins.float, builtins.float, builtins.str]]]]:
+    r"""
+    Parse a Praat TextGrid file into its interval tiers, as a list of
+    `(tier_name, [(start_seconds, end_seconds, label), ...])`. Point tiers are
+    skipped (forced-alignment output is interval-only). Labels are preserved
+    verbatim — the empty string and modeled-silence marks (`sil`/`sp`) included.
+    Reuses the engine's TextGrid reader; used to turn an external aligner's
+    (e.g. MFA) TextGrid output into a `sadda.align.Alignment`.
     """
 
 def perturbation(audio: Audio, *, pitch_floor_hz: builtins.float = 75.0, pitch_ceiling_hz: builtins.float = 600.0) -> PerturbationReport:

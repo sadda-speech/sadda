@@ -19,8 +19,16 @@ Stability tier: PROVISIONAL.
 from __future__ import annotations
 
 from .acoustic import Wav2Vec2EspeakModel
-from .aligner import Alignment, TimedPhone, TimedWord, align, tokenize
+from .aligner import (
+    Alignment,
+    TimedPhone,
+    TimedWord,
+    align,
+    import_alignment,
+    tokenize,
+)
 from .g2p import Utterance, Word, phonemize, split_phones, strip_stress
+from .mfa import alignment_from_textgrid, mfa_align, mfa_align_corpus
 from .model import AcousticModel, Emissions
 
 __all__ = [
@@ -40,4 +48,9 @@ __all__ = [
     "Alignment",
     "TimedWord",
     "TimedPhone",
+    "import_alignment",
+    # MFA (gold-standard passthrough)
+    "mfa_align",
+    "mfa_align_corpus",
+    "alignment_from_textgrid",
 ]

@@ -3438,6 +3438,35 @@ fn probe_wav(path: PathBuf) -> PyResult<PyAudioProbe> {
     Ok(PyAudioProbe { inner })
 }
 
+/// One interval row: `(start_seconds, end_seconds, label)`.
+type IntervalRow = (f64, f64, String);
+/// A named interval tier and its rows: `(tier_name, [row, ...])`.
+type NamedIntervalTier = (String, Vec<IntervalRow>);
+
+/// Parse a Praat TextGrid file into its interval tiers, as a list of
+/// `(tier_name, [(start_seconds, end_seconds, label), ...])`. Point tiers are
+/// skipped (forced-alignment output is interval-only). Labels are preserved
+/// verbatim — the empty string and modeled-silence marks (`sil`/`sp`) included.
+/// Reuses the engine's TextGrid reader; used to turn an external aligner's
+/// (e.g. MFA) TextGrid output into a `sadda.align.Alignment`.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn parse_textgrid_intervals(path: PathBuf) -> PyResult<Vec<NamedIntervalTier>> {
+    let file = sadda_engine::io::textgrid::read(&path).map_err(engine_err_to_py)?;
+    let mut out = Vec::new();
+    for tier in file.tiers {
+        if let sadda_engine::io::textgrid::TextGridTier::Interval(t) = tier {
+            let rows = t
+                .intervals
+                .into_iter()
+                .map(|e| (e.xmin, e.xmax, e.text))
+                .collect();
+            out.push((t.name, rows));
+        }
+    }
+    Ok(out)
+}
+
 /// Header-only summary of a WAV file (see `sadda.probe_wav`): its size without
 /// the cost of decoding. Lets a caller gauge a file's in-memory footprint
 /// before loading it.
@@ -4510,6 +4539,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(schema_version, m)?)?;
     m.add_function(wrap_pyfunction!(load_wav, m)?)?;
     m.add_function(wrap_pyfunction!(probe_wav, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_textgrid_intervals, m)?)?;
     m.add_function(wrap_pyfunction!(f0, m)?)?;
     m.add_function(wrap_pyfunction!(hann, m)?)?;
     m.add_function(wrap_pyfunction!(hamming, m)?)?;

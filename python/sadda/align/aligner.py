@@ -8,8 +8,9 @@ time-aligned **Word** and **Phone** results.
 The phone→class-id step is a greedy longest-match of each word's IPA against the
 model's vocabulary (so multi-character vocab tokens like ``dʒ`` are matched
 whole), which is why G2P stays model-agnostic and the tokenization lives here.
-Syllable derivation and writing these onto a project's tiers are later slices;
-this returns a plain :class:`Alignment` result.
+Syllable derivation is a later slice. :func:`align` returns a plain
+:class:`Alignment`; :func:`import_alignment` writes one onto a project's bundle
+as Word + Phone interval tiers (backend-agnostic — neural or MFA).
 
 Stability tier: PROVISIONAL.
 """
@@ -27,18 +28,30 @@ from sadda._stability import provisional
 from .g2p import phonemize
 from .model import AcousticModel
 
-__all__ = ["TimedPhone", "TimedWord", "Alignment", "tokenize", "align"]
+__all__ = [
+    "TimedPhone",
+    "TimedWord",
+    "Alignment",
+    "tokenize",
+    "align",
+    "import_alignment",
+]
 
 
 # [docs:sadda.align.TimedPhone]
 @dataclass(frozen=True)
 class TimedPhone:
-    """One aligned phone with its time span and confidence."""
+    """One aligned phone with its time span and (optional) confidence.
+
+    ``score`` is the aligner's per-phone confidence where it provides one (the
+    neural DP does); it is ``None`` for backends that don't emit one (e.g. MFA's
+    TextGrid output).
+    """
 
     label: str
     start_seconds: float
     end_seconds: float
-    score: float
+    score: Optional[float] = None
 
 
 # [docs:sadda.align.TimedWord]
@@ -228,3 +241,62 @@ def align(
         words.append(TimedWord(text="", start_seconds=prev_end, end_seconds=duration, phones=()))
 
     return Alignment(words=tuple(words), phones=phones)
+
+
+# [docs:sadda.align.import_alignment]
+@provisional
+def import_alignment(
+    project,
+    bundle_id: int,
+    alignment: Alignment,
+    *,
+    word_tier: str = "words",
+    phone_tier: str = "phones",
+    hierarchical: bool = True,
+) -> tuple[int, int]:
+    """Write an :class:`Alignment` into a bundle as Word + Phone interval tiers.
+
+    Backend-agnostic — takes the output of either the neural :func:`align` or the
+    MFA :func:`sadda.align.mfa.mfa_align`, so "align, then annotate/edit" is one
+    step. Creates two interval tiers on ``bundle_id``; when ``hierarchical`` the
+    Phone tier is a child of the Word tier and each phone links to the word
+    interval that contains it (words partition the recording contiguously, so
+    every phone maps to exactly one).
+
+    Empty labels — the neural aligner's *imputed* silence — are written as
+    unlabeled intervals; *modeled* silence keeps its label (e.g. MFA
+    ``sil``/``sp``), so the two silence kinds stay distinguishable on the tier.
+    Returns ``(word_tier_id, phone_tier_id)``.
+    """
+    wt = project.add_tier(bundle_id, word_tier, "interval")
+    pt = project.add_tier(
+        bundle_id, phone_tier, "interval", parent_id=wt if hierarchical else None
+    )
+    # Word intervals; remember each span + id so phones can parent to their word.
+    word_spans: list[tuple[float, float, int]] = []
+    for w in alignment.words:
+        wid = project.add_interval(
+            wt, w.start_seconds, w.end_seconds, label=w.text or None
+        )
+        word_spans.append((w.start_seconds, w.end_seconds, wid))
+
+    def _containing_word(mid: float) -> Optional[int]:
+        for start, end, wid in word_spans:
+            if start <= mid < end:
+                return wid
+        return word_spans[-1][2] if word_spans else None
+
+    for p in alignment.phones:
+        parent = (
+            _containing_word((p.start_seconds + p.end_seconds) / 2.0)
+            if hierarchical
+            else None
+        )
+        project.add_interval(
+            pt,
+            p.start_seconds,
+            p.end_seconds,
+            label=p.label or None,
+            parent_annotation_id=parent,
+        )
+    return wt, pt
