@@ -6,6 +6,50 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-07 — A5 design + slice 1: native G2P in the engine
+
+Bringing forced alignment into the desktop app (egui). Design decided with the
+user, then the first (foundational) slice.
+
+**Architecture fork — how the GUI runs the aligner.** A recon of `crates/app` +
+`crates/engine` found the app already holds the load-bearing pieces natively:
+a generic Rust ONNX harness (`models.rs`, the `ort` path VAD uses) that can emit
+CTC logits, the `forced_align` DP (`align.rs`, pure Rust), the GUI "run → write
+tiers → they render" pattern (`run_criterion`), an off-UI-thread worker pattern
+(`analysis_tx`/`poll_analysis`), and provenance recording. Options:
+- **(A) Finish orchestration in Rust** — port espeak-ng G2P + the IPA↔vocab
+  tokenizer (the only genuinely missing native piece), add `log_softmax` to the
+  ONNX output, wrap as `Project::align_bundle`, drive from a menu on a worker
+  thread. Self-contained native binary, no runtime Python dependency.
+- **(B) Embed Python** — the app already links CPython, so call the tested
+  `sadda.align`/`mfa`/`asr`/`syllabify` in-process. All backends at once, no
+  reimplementation — but the shipped desktop binary would then need a configured
+  Python env with `sadda[align,asr]` importable at runtime.
+
+**Decision: (A), neural-first** (user-confirmed). sadda ships as a native app run
+on varied hardware; a runtime Python-env dependency (B) is a real
+distribution/reliability tax, and the A-series design already justified the third
+surface on the DP living in the engine. MFA (an external subprocess anyway) and
+ASR get GUI surfaces in later slices; syllables come nearly free (the syllabifier
+is already pure-engine).
+
+**Slice plan.** **A5.1** (this) engine G2P; **A5.2** `Model::emissions`
+(log-softmax over the ONNX harness) + `Project::align_bundle` (G2P → emissions →
+`forced_align` → Word/Phone/Syllable tiers + provenance) + acoustic-model fetch
+(add the `download` feature to the app); **A5.3** the GUI "Align…" menu + panel +
+worker-thread wiring.
+
+**A5.1 — engine `g2p` module.** Ports `python/sadda/align/g2p.py` +
+`sadda.align.tokenize` to Rust so the native path produces the *same* alignment
+target: `phonemize(text, voice)` shells `espeak-ng -q --ipa` per word (edge
+punctuation stripped, stress marks removed), and `tokenize(ipa, vocab)` does the
+greedy longest-match against a model vocab (multi-char tokens like `dʒ` win).
+Key simplification found while porting: the aligner tokenizes the IPA **string**,
+so `split_phones` (and its Unicode-category tables) is *not* needed on the target
+path — it's pure string work, no new crate deps. New `EngineError::Align`
+variant. Tests: `strip_stress`/`tokenize`/edge-punct pure; `phonemize` gated on
+espeak-ng presence (early-returns when absent, mirroring the Python skipif).
+
 ## 2026-07-07 — A3: syllabification (Phones → Syllables by rule)
 
 Derives a **Syllable** tier from the Phone tier — no model, per the design. Pure
