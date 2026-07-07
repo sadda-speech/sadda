@@ -16,7 +16,10 @@ path = "src/main.rs"
 # E11: `ml` on for the app too (the VAD measure-track lane). load-dynamic
 # keeps the binary lean; the app starts fine without ONNX Runtime and the
 # VAD lane shows a hint instead of crashing if it isn't present.
-sadda-engine = { path = "../engine", features = ["ml"] }
+# `download` (implies `ml`) lets the app fetch acoustic models via the engine's
+# `hf://` resolver for native forced alignment (A5); the fetch stays dormant
+# until network is explicitly allowed. `ml` alone still runs a locally-present model.
+sadda-engine = { path = "../engine", features = ["ml", "download"] }
 # `persistence` enables the eframe Storage trait the welcome screen's
 # recent-projects list and the window-state restore both ride on.
 eframe = { version = "0.34", features = ["persistence"] }

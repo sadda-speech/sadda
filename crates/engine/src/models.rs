@@ -893,6 +893,54 @@ mod tests {
         }
     }
 
+    /// Cross-check that Rust `Model::emissions` matches the Python
+    /// `Wav2Vec2EspeakModel.emissions` reference bit-for-bit (within f32/f64
+    /// rounding), over a synthetic CTC ONNX model. `#[ignore]` + env-gated so CI
+    /// never runs it (needs ORT + a prepared dir); run locally with:
+    /// `ORT_DYLIB_PATH=… SADDA_XCHECK_DIR=… cargo test -p sadda-engine --features ml
+    /// emissions_match_python_reference -- --ignored --nocapture`. The dir is built
+    /// by the harness in the A5.2c DEVLOG entry (`xcheck/build.py`).
+    #[test]
+    #[ignore]
+    fn emissions_match_python_reference() {
+        let Ok(dir) = std::env::var("SADDA_XCHECK_DIR") else {
+            return;
+        };
+        let model = Model::from_dir(&dir).unwrap();
+        let audio = crate::Audio::from_wav_path(format!("{dir}/audio.wav")).unwrap();
+        let em = model.emissions(&audio).unwrap();
+
+        let text = std::fs::read_to_string(format!("{dir}/reference_emissions.json")).unwrap();
+        let refj: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let shape: Vec<usize> = refj["shape"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as usize)
+            .collect();
+        let data: Vec<f64> = refj["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+        assert_eq!(
+            (em.nrows(), em.ncols()),
+            (shape[0], shape[1]),
+            "shape mismatch"
+        );
+        let max_diff = data
+            .iter()
+            .enumerate()
+            .map(|(i, &r)| (em[[i / shape[1], i % shape[1]]] - r).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(max_diff < 1e-3, "max emission diff {max_diff:e}");
+        eprintln!(
+            "emissions match Python reference: max |Δ| = {max_diff:e} over {} values",
+            data.len()
+        );
+    }
+
     #[test]
     fn alignment_manifest_block_parses_with_defaults() {
         let m = parse_model_manifest(

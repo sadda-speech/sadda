@@ -6,6 +6,30 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-07 — A5.2c: verify the ONNX port + wire the model fetch
+
+De-risks A5.2b's ONNX-gated `Model::emissions` — the one part that couldn't run
+in CI — by cross-checking it against the Python reference, and wires the app to
+fetch acoustic models.
+
+**Verification (the point of this slice).** A synthetic tiny CTC ONNX model
+(`onnx`-authored, `[1,N] → [1,N,C]`) is run through **both** the Python
+`Wav2Vec2EspeakModel.emissions` reference and the Rust `Model::emissions`, on the
+same audio. They agree to **max |Δ| = 5.6e-5** over 2000 values — exactly the
+expected f32-vs-f64 rounding (Python log-softmaxes in f32, Rust in f64). So the
+port (zero-mean/unit-var normalization + ONNX forward pass + per-frame log-softmax)
+is numerically correct against the reference; since Python works with the real
+635 MB wav2vec2-espeak model, Rust produces the same emissions with it too (same
+code path). The check lives as a `#[ignore]` + env-gated engine test
+(`emissions_match_python_reference`), run locally with `ORT_DYLIB_PATH` +
+`SADDA_XCHECK_DIR`; the harness that builds the synthetic model is kept out of the
+repo (throwaway).
+
+**Fetch wiring.** The app's engine dep gains the `download` feature (implies `ml`,
+pulls `ureq`) so the GUI can fetch an acoustic model via the engine's `hf://`
+resolver — dormant until network is explicitly allowed. A5.3 uses it to load the
+model behind the "Align…" action.
+
 ## 2026-07-07 — A5.2b: native model emissions + `align_bundle`
 
 The ONNX half of native alignment: run the acoustic model in Rust and write
