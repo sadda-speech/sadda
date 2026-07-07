@@ -12,6 +12,7 @@ pub mod corpus;
 pub mod criteria;
 pub mod dsp;
 pub mod error;
+pub mod g2p;
 pub mod io;
 pub mod live;
 /// E11 ML inference (ONNX Runtime). Behind the `ml` feature; ONNX Runtime

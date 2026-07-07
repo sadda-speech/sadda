@@ -67,6 +67,9 @@ pub(crate) fn engine_err_to_py(e: sadda_engine::EngineError) -> PyErr {
         sadda_engine::EngineError::Preset(msg) => {
             PyValueError::new_err(format!("preset error: {msg}"))
         }
+        sadda_engine::EngineError::Align(msg) => {
+            PyValueError::new_err(format!("alignment error: {msg}"))
+        }
     }
 }
 

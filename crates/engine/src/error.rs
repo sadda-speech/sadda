@@ -43,6 +43,12 @@ pub enum EngineError {
     #[error("preset error: {0}")]
     Preset(String),
 
+    /// A forced-alignment operation failed (A-series): the `espeak-ng` G2P
+    /// binary is missing or errored, or a phonemized phone isn't in the acoustic
+    /// model's vocabulary. Distinct from [`EngineError::Ml`] (the ONNX side).
+    #[error("align error: {0}")]
+    Align(String),
+
     /// An ML-inference operation failed (E11): ONNX Runtime not loadable
     /// (`ORT_DYLIB_PATH` unset / wrong version), a model failed to load,
     /// or inference errored. Surfaced only with the `ml` feature.
