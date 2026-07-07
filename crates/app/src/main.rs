@@ -480,6 +480,8 @@ struct SaddaApp {
     rubric_editor: Option<RubricEditor>,
     /// Open criteria-editor window (slice S2), or `None` when closed.
     criteria_editor: Option<CriteriaEditor>,
+    /// Open forced-alignment panel (A5), or `None` when closed.
+    align_panel: Option<AlignPanel>,
     /// Open targets panel (slice S4a — campaign work units), or `None`.
     targets_panel: Option<TargetsPanel>,
     /// Open campaign QA dashboard (slice S6a), or `None`.
@@ -1346,6 +1348,33 @@ struct CriteriaEditor {
     description: String,
     /// Last run/accept/reject result, shown in the window.
     status_msg: Option<String>,
+}
+
+/// State for the forced-alignment panel (A5): the user types a transcript and a
+/// language voice; running it phonemizes, runs the neural acoustic model, and
+/// writes Words / Syllables / Phones tiers onto the selected bundle.
+#[derive(Default)]
+struct AlignPanel {
+    /// The transcript to align (what was said).
+    transcript: String,
+    /// espeak-ng G2P voice / language id (e.g. `"en-us"`, `"de"`).
+    voice: String,
+    /// Minimum pause treated as silence, in seconds.
+    min_silence_seconds: f64,
+    /// A run is in flight on the worker thread.
+    running: bool,
+    /// Last status / error line.
+    status_msg: Option<String>,
+}
+
+impl AlignPanel {
+    fn new() -> Self {
+        Self {
+            voice: "en-us".to_string(),
+            min_silence_seconds: 0.20,
+            ..Default::default()
+        }
+    }
 }
 
 /// State for the targets panel (slice S4a): the campaign work-unit list for the
@@ -2254,6 +2283,7 @@ impl SaddaApp {
             label_edit: None,
             rubric_editor: None,
             criteria_editor: None,
+            align_panel: None,
             targets_panel: None,
             dashboard: None,
             notebook: None,
@@ -6880,6 +6910,53 @@ impl SaddaApp {
                         self.active_tracks = Some(tracks);
                     }
                 }
+                AnalysisResult::AlignmentDone {
+                    bundle_id,
+                    voice,
+                    result,
+                } => {
+                    let status = match result {
+                        Ok(alignment) => {
+                            let params =
+                                format!("{{\"voice\":{voice:?},\"model\":\"{ALIGN_MODEL_REPO}\"}}");
+                            let written =
+                                if let AppState::ProjectLoaded { project, .. } = &self.app_state {
+                                    project.write_alignment(
+                                        bundle_id,
+                                        &alignment,
+                                        "sadda.align.wav2vec2_espeak",
+                                        Some(params),
+                                        None,
+                                    )
+                                } else {
+                                    Err(sadda_engine::EngineError::Align(
+                                        "project closed before the alignment finished".to_string(),
+                                    ))
+                                };
+                            match written {
+                                Ok(tiers) => {
+                                    for id in [tiers.words, tiers.syllables, tiers.phones] {
+                                        if !self.active_tier_ids.contains(&id) {
+                                            self.active_tier_ids.push(id);
+                                        }
+                                    }
+                                    let n = alignment
+                                        .words
+                                        .iter()
+                                        .filter(|w| !w.text.is_empty())
+                                        .count();
+                                    format!("Aligned {n} words.")
+                                }
+                                Err(e) => format!("Alignment write failed: {e}"),
+                            }
+                        }
+                        Err(e) => format!("Alignment failed: {e}"),
+                    };
+                    if let Some(panel) = self.align_panel.as_mut() {
+                        panel.running = false;
+                        panel.status_msg = Some(status);
+                    }
+                }
             }
         }
     }
@@ -7117,6 +7194,91 @@ enum AnalysisResult {
         config: MeasureTrackConfig,
         tracks: MeasureTrackCache,
     },
+    /// A forced alignment finished on the worker thread (A5). The UI thread
+    /// writes the tiers onto the bundle (it holds the single-writer `Project`).
+    AlignmentDone {
+        bundle_id: i64,
+        voice: String,
+        result: Result<sadda_engine::align::Alignment, String>,
+    },
+}
+
+/// The default hosted acoustic model for native forced alignment.
+const ALIGN_MODEL_REPO: &str = "sadda-speech/wav2vec2-espeak-ctc";
+
+/// Resolve the neural alignment model, fetching `model.onnx` + `vocab.json` from
+/// the HF Hub into the model cache on first use (needs the `download` feature +
+/// network). The bare `hf://` loader synthesizes a manifest without the
+/// alignment metadata, so we stamp `input.normalize` (the wav2vec2 contract) and
+/// the `[alignment]` block that `emissions` / `align_transcript` need.
+fn resolve_align_model() -> Result<sadda_engine::models::Model, String> {
+    use sadda_engine::models::{ModelAlignment, load_model};
+    let mut model =
+        load_model(&format!("hf://{ALIGN_MODEL_REPO}/model.onnx")).map_err(|e| e.to_string())?;
+    // Fetch vocab.json into the same cache dir (same repo/rev → same directory).
+    load_model(&format!("hf://{ALIGN_MODEL_REPO}/vocab.json")).map_err(|e| e.to_string())?;
+    model.manifest.model.kind = "alignment".to_string();
+    model.manifest.input.representation = Some("waveform".to_string());
+    model.manifest.input.normalize = Some("zero_mean_unit_var".to_string());
+    model.manifest.input.sample_rate_hz = Some(16_000);
+    model.manifest.alignment = ModelAlignment {
+        vocab_file: "vocab.json".to_string(),
+        blank_token: "<pad>".to_string(),
+        frame_rate_hz: 50.0,
+    };
+    Ok(model)
+}
+
+/// Force-align `transcript` to the cached bundle audio — the worker-thread half
+/// of the GUI "Align…" action (no `Project`: model + DP only, like the VAD lane).
+/// Loads the model, phonemizes (espeak-ng), runs CTC emissions, and aligns.
+/// Returns the in-memory [`Alignment`]; the UI thread commits it to tiers.
+fn compute_alignment(
+    env: &EnvelopeCache,
+    transcript: &str,
+    voice: &str,
+    min_silence_seconds: f64,
+) -> Result<sadda_engine::align::Alignment, String> {
+    let words: Vec<(String, String)> = sadda_engine::g2p::phonemize(transcript, voice)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|w| (w.text, w.ipa))
+        .collect();
+    if words.is_empty() {
+        return Err("transcript produced no words to align".to_string());
+    }
+
+    let model = resolve_align_model()?;
+    let audio = sadda_engine::Audio {
+        samples: env.mono_samples.as_ref().clone(),
+        sample_rate: env.sample_rate,
+        channels: 1,
+    };
+    let vocab = model.alignment_vocab().map_err(|e| e.to_string())?;
+    let blank = *vocab
+        .get(&model.manifest.alignment.blank_token)
+        .ok_or("blank token not in the model vocabulary")?;
+    let frame_rate = model.alignment_frame_rate();
+    let min_silence_frames = (min_silence_seconds * frame_rate).round().max(0.0) as usize;
+
+    let logits = model.emissions(&audio).map_err(|e| e.to_string())?;
+    let rows: Vec<Vec<f32>> = logits
+        .rows()
+        .into_iter()
+        .map(|r| r.iter().map(|&v| v as f32).collect())
+        .collect();
+    let refs: Vec<&[f32]> = rows.iter().map(|r| r.as_slice()).collect();
+
+    sadda_engine::align::align_transcript(
+        &refs,
+        &words,
+        &vocab,
+        blank,
+        frame_rate,
+        min_silence_frames,
+        None,
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn compute_spectrogram_image(
@@ -9525,6 +9687,7 @@ impl eframe::App for SaddaApp {
         self.label_edit_window(ui.ctx());
         self.rubric_editor_window(ui.ctx());
         self.criteria_editor_window(ui.ctx());
+        self.align_panel_window(ui.ctx());
         self.mfcc_param_editor_window(ui.ctx());
         self.f0_param_editor_window(ui.ctx());
         self.formant_param_editor_window(ui.ctx());
@@ -9958,6 +10121,107 @@ impl SaddaApp {
         });
     }
 
+    /// The forced-alignment panel (A5): transcript + voice → Words / Syllables /
+    /// Phones tiers. The model + DP run on a worker thread (`compute_alignment`);
+    /// `poll_analysis` commits the result to tiers on this (the DB-owning) thread.
+    fn align_panel_window(&mut self, ctx: &egui::Context) {
+        if self.align_panel.is_none() {
+            return;
+        }
+        let bundle_id = self.selected_bundle_id;
+        let audio_ready =
+            self.active_envelope.as_ref().map(|e| e.bundle_id) == bundle_id && bundle_id.is_some();
+        let mut keep_open = true;
+        let mut run = false;
+
+        egui::Window::new("Align")
+            .open(&mut keep_open)
+            .resizable(true)
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                let panel = self.align_panel.as_mut().expect("checked above");
+                ui.label("Transcript — the words spoken in this recording:");
+                ui.add(
+                    egui::TextEdit::multiline(&mut panel.transcript)
+                        .desired_rows(4)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("the quick brown fox …"),
+                );
+                ui.horizontal(|ui| {
+                    ui.label("Voice:");
+                    ui.add(egui::TextEdit::singleline(&mut panel.voice).desired_width(70.0))
+                        .on_hover_text("espeak-ng language id, e.g. en-us, de, cmn");
+                    ui.label("Min. silence (s):");
+                    ui.add(
+                        egui::DragValue::new(&mut panel.min_silence_seconds)
+                            .speed(0.01)
+                            .range(0.0..=2.0),
+                    );
+                });
+
+                let can_run = audio_ready
+                    && !panel.transcript.trim().is_empty()
+                    && !panel.voice.trim().is_empty()
+                    && !panel.running;
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(can_run, egui::Button::new("Align"))
+                        .on_disabled_hover_text("Enter a transcript and select a loaded recording")
+                        .clicked()
+                    {
+                        run = true;
+                    }
+                    if panel.running {
+                        ui.spinner();
+                        ui.label("Aligning… (first run downloads the model)");
+                    }
+                });
+                if let Some(msg) = &panel.status_msg {
+                    ui.separator();
+                    ui.label(egui::RichText::new(msg).weak());
+                }
+                ui.label(
+                    egui::RichText::new(
+                        "espeak-ng G2P + the neural CTC aligner → Words / Syllables / Phones tiers.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            });
+
+        if !keep_open {
+            self.align_panel = None;
+            return;
+        }
+
+        if run {
+            let Some(env) = self.active_envelope.as_ref() else {
+                return;
+            };
+            let env = env.clone();
+            let bid = env.bundle_id;
+            let tx = self.analysis_tx.clone();
+            let ctx = ctx.clone();
+            let (transcript, voice, min_sil) = {
+                let p = self.align_panel.as_ref().expect("open");
+                (p.transcript.clone(), p.voice.clone(), p.min_silence_seconds)
+            };
+            if let Some(p) = self.align_panel.as_mut() {
+                p.running = true;
+                p.status_msg = None;
+            }
+            std::thread::spawn(move || {
+                let result = compute_alignment(&env, &transcript, &voice, min_sil);
+                let _ = tx.send(AnalysisResult::AlignmentDone {
+                    bundle_id: bid,
+                    voice,
+                    result,
+                });
+                ctx.request_repaint();
+            });
+        }
+    }
+
     fn annotate_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("Annotate", |ui| {
             let project_open = matches!(self.app_state, AppState::ProjectLoaded { .. });
@@ -9988,6 +10252,20 @@ impl SaddaApp {
                     let mut ed = CriteriaEditor::default();
                     ed.reset_to_new();
                     self.criteria_editor = Some(ed);
+                }
+            }
+            let bundle_selected = project_open && self.selected_bundle_id.is_some();
+            if ui
+                .add_enabled(bundle_selected, egui::Button::new("Align…"))
+                .on_disabled_hover_text("Select a bundle first")
+                .on_hover_text(
+                    "Force-align a transcript to the selected recording (Words / Syllables / Phones)",
+                )
+                .clicked()
+            {
+                ui.close();
+                if self.align_panel.is_none() {
+                    self.align_panel = Some(AlignPanel::new());
                 }
             }
             if ui
