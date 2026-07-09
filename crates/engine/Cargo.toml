@@ -36,6 +36,11 @@ arrow = { version = "58", default-features = false }
 # raster bake (G0 — moved engine-side so headless figure export can bake
 # without the GUI). Same crate the app used.
 colorous = "1"
+# G1 figure export (io::figure): base64 embeds the Doulos SIL font + the
+# spectrogram raster PNG into self-contained SVG figures; `png` encodes the
+# baked RGBA raster. Both tiny + pure-Rust, already in the lock tree.
+base64 = "0.22"
+png = "0.17"
 # E11 ML inference (feature = "ml"). load-dynamic: no build-time ORT
 # download/link; the runtime ONNX Runtime is resolved at load time.
 ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = ["load-dynamic", "ndarray"] }
