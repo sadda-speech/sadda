@@ -389,6 +389,11 @@ struct SaddaApp {
     live_spectrogram: Option<SpectrogramCache>,
     live_spec_pending: bool,
     live_spec_last: Option<std::time::Instant>,
+    /// True while the View ▸ UI-scale slider is being actively dragged. The
+    /// applied zoom factor is held frozen during the drag so the (zoomed) menu
+    /// doesn't relayout and slide the slider track out from under the cursor;
+    /// the new scale is committed on release.
+    ui_scale_dragging: bool,
     /// D10: cached measure-track analysis (f0 / formants / intensity)
     /// for the selected bundle + current `MeasureTrackConfig`.
     /// Recomputed only when the bundle or the config changes.
@@ -2254,6 +2259,7 @@ impl SaddaApp {
             live_spectrogram: None,
             live_spec_pending: false,
             live_spec_last: None,
+            ui_scale_dragging: false,
             active_tracks: None,
             live_tracks: None,
             signal_cache: SignalCache::new(signal_cache_budget_bytes()),
@@ -3216,6 +3222,7 @@ impl SaddaApp {
 
         let mut conflicts: Vec<TierConflict> = Vec::new();
         let mut committed = 0usize;
+        let mut last_created: Option<AnnotationSelection> = None;
         let mut first_err: Option<String> = None;
         {
             let AppState::ProjectLoaded { project, .. } = &self.app_state else {
@@ -3233,14 +3240,21 @@ impl SaddaApp {
                             let times: Vec<f64> = existing.iter().map(|p| p.time_seconds).collect();
                             let hits = colliding_points(lo, &times, POINT_COLLISION_TOL_SECONDS);
                             if hits.is_empty() {
-                                if let Err(e) = project.add_point(&sadda_engine::PointSpec {
+                                match project.add_point(&sadda_engine::PointSpec {
                                     tier_id: tier.id,
                                     time_seconds: lo,
                                     ..Default::default()
                                 }) {
-                                    first_err.get_or_insert(format!("{e}"));
-                                } else {
-                                    committed += 1;
+                                    Err(e) => {
+                                        first_err.get_or_insert(format!("{e}"));
+                                    }
+                                    Ok(id) => {
+                                        committed += 1;
+                                        last_created = Some(AnnotationSelection::Point {
+                                            tier_id: tier.id,
+                                            annotation_id: id,
+                                        });
+                                    }
                                 }
                             } else {
                                 conflicts.push(TierConflict {
@@ -3258,15 +3272,22 @@ impl SaddaApp {
                                 .collect();
                             let hits = overlapping_intervals((lo, hi), &spans);
                             if hits.is_empty() {
-                                if let Err(e) = project.add_interval(&sadda_engine::IntervalSpec {
+                                match project.add_interval(&sadda_engine::IntervalSpec {
                                     tier_id: tier.id,
                                     start_seconds: lo,
                                     end_seconds: hi,
                                     ..Default::default()
                                 }) {
-                                    first_err.get_or_insert(format!("{e}"));
-                                } else {
-                                    committed += 1;
+                                    Err(e) => {
+                                        first_err.get_or_insert(format!("{e}"));
+                                    }
+                                    Ok(id) => {
+                                        committed += 1;
+                                        last_created = Some(AnnotationSelection::Interval {
+                                            tier_id: tier.id,
+                                            annotation_id: id,
+                                        });
+                                    }
                                 }
                             } else {
                                 conflicts.push(TierConflict {
@@ -3287,6 +3308,16 @@ impl SaddaApp {
         if conflicts.is_empty() {
             if committed > 0 {
                 self.set_info(format!("Added to {committed} tier(s)."));
+                // Consume the selection so a follow-up Enter edits the new
+                // annotation instead of re-committing the same span — which
+                // now overlaps what we just added and would pop a spurious
+                // conflict prompt. When exactly one tier was involved, select
+                // the new annotation so Enter opens its label editor, mirroring
+                // the drag-create path (`commit_draft_edit`).
+                self.timeline.clear_selection();
+                if committed == 1 {
+                    self.selected_annotation = last_created;
+                }
             }
         } else {
             self.pending_commit = Some(PendingCommit {
@@ -6836,11 +6867,16 @@ impl SaddaApp {
             }
         }
         let env = lv.envelope();
-        // Wait for at least a window's worth of audio before the first STFT.
-        if env.mono_samples.len() < 512 {
+        let cfg = self.persisted.spectrogram;
+        // Wait for at least a full analysis window's worth of audio before the
+        // first STFT. Guarding on the actual window length (not a fixed 512)
+        // keeps `compute_spectrogram_image`'s "too short for window" error from
+        // popping into the banner mid-recording, while the capture is still
+        // shorter than one window.
+        let window_samples = ((cfg.window_ms / 1000.0) * env.sample_rate as f32).round() as usize;
+        if env.mono_samples.len() < window_samples.max(1) {
             return;
         }
-        let cfg = self.persisted.spectrogram;
         self.live_spec_last = Some(now);
         self.live_spec_pending = true;
         let tx = self.analysis_tx.clone();
@@ -9288,8 +9324,13 @@ impl eframe::App for SaddaApp {
         // Accessibility: apply the persisted UI zoom factor. Idempotent
         // and cheap — egui only relays out when the value actually
         // changes — so setting it every frame keeps it in force without
-        // tracking dirtiness ourselves.
-        ui.ctx().set_zoom_factor(self.persisted.ui_scale);
+        // tracking dirtiness ourselves. Held frozen while the UI-scale slider
+        // is being dragged: applying the new zoom mid-drag would relayout the
+        // (zoomed) View menu and slide the slider track out from under the
+        // cursor. The value still updates live; the zoom lands on release.
+        if !self.ui_scale_dragging {
+            ui.ctx().set_zoom_factor(self.persisted.ui_scale);
+        }
 
         // Drive the playback-cursor advance before any pane
         // renders, so they all see the same `timeline.cursor` this
@@ -10648,11 +10689,14 @@ impl SaddaApp {
             );
             ui.horizontal(|ui| {
                 ui.label("UI scale");
-                ui.add(
+                let resp = ui.add(
                     egui::Slider::new(&mut self.persisted.ui_scale, 0.8..=2.0)
                         .step_by(0.1)
                         .suffix("×"),
                 );
+                // Freeze the applied zoom while dragging (see `set_zoom_factor`
+                // above) so the menu doesn't relayout under the cursor.
+                self.ui_scale_dragging = resp.dragged();
             });
             ui.separator();
             // S3: structural signal-pane visibility. These three had no
