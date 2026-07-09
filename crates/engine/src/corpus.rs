@@ -5775,7 +5775,7 @@ impl Project {
                 |f, d| matrix[[f, d]] as f32,
                 n_frames,
                 n_dims,
-                opts.colormap,
+                opts.heatmap_cmap(),
                 &format!("d{}", n_dims.saturating_sub(1)),
                 "d0",
             ) {

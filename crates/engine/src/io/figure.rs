@@ -1391,6 +1391,20 @@ pub struct FigureExportOptions {
     pub dynamic_range_db: f32,
     /// Spectrogram colormap.
     pub colormap: crate::dsp::ColormapKind,
+    /// Heatmap (MFCC / embedding) colormap; `None` reuses [`Self::colormap`].
+    pub heatmap_colormap: Option<crate::dsp::ColormapKind>,
+    /// Pitch floor in Hz for the f0 tracker; `None` uses the config default.
+    pub f0_min_hz: Option<f32>,
+    /// Pitch ceiling in Hz for the f0 tracker; `None` uses the config default.
+    pub f0_max_hz: Option<f32>,
+}
+
+impl FigureExportOptions {
+    /// The colormap for heatmap lanes — the explicit override, else the
+    /// spectrogram colormap.
+    pub(crate) fn heatmap_cmap(&self) -> crate::dsp::ColormapKind {
+        self.heatmap_colormap.unwrap_or(self.colormap)
+    }
 }
 
 impl Default for FigureExportOptions {
@@ -1420,6 +1434,9 @@ impl Default for FigureExportOptions {
             hop_ms: 5.0,
             dynamic_range_db: 70.0,
             colormap: crate::dsp::ColormapKind::Viridis,
+            heatmap_colormap: None,
+            f0_min_hz: None,
+            f0_max_hz: None,
         }
     }
 }
@@ -1532,7 +1549,7 @@ fn build_heatmap_lanes(
             |f, c| arr[[f, c]],
             n_frames,
             n_mfcc,
-            opts.colormap,
+            opts.heatmap_cmap(),
             &format!("c{}", n_mfcc.saturating_sub(1)),
             "c0",
         ) {
@@ -1605,11 +1622,14 @@ fn build_measure_lanes(
         // Boersma (octave cost + Viterbi path-finding) rather than raw
         // autocorrelation — the latter's octave-doubling errors inflated the
         // data-driven f0 axis.
-        let frames = crate::pitch::pitch(
-            &audio,
-            &crate::pitch::PitchConfig::default(),
-            crate::pitch::PitchMethod::Boersma,
-        );
+        let mut config = crate::pitch::PitchConfig::default();
+        if let Some(lo) = opts.f0_min_hz {
+            config.min_freq_hz = lo;
+        }
+        if let Some(hi) = opts.f0_max_hz {
+            config.max_freq_hz = hi;
+        }
+        let frames = crate::pitch::pitch(&audio, &config, crate::pitch::PitchMethod::Boersma);
         // Voiced runs → segments (break the contour across unvoiced frames).
         let mut segments: Vec<Vec<(f64, f64)>> = Vec::new();
         let mut cur: Vec<(f64, f64)> = Vec::new();

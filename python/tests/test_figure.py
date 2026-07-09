@@ -117,6 +117,24 @@ def test_export_figure_mfcc_tikz_writes_heatmap_sidecar() -> None:
         assert (Path(td) / "hm-heatmap0.png").exists()
 
 
+def test_figure_heatmap_colormap_and_f0_range() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        proj, bundle = _project_with_annotated_bundle(Path(td))
+        out = Path(td) / "knobs.svg"
+        # A distinct heatmap colormap + a bounded pitch range — both accepted.
+        proj.export_figure(
+            bundle,
+            out,
+            mfcc=True,
+            f0=True,
+            f0_min_hz=90.0,
+            f0_max_hz=350.0,
+            style=sadda.FigureStyle(colormap="viridis", heatmap_colormap="magma"),
+        )
+        assert out.exists()
+        assert ">MFCC</text>" in out.read_text()
+
+
 def test_figure_style_object_applies_dimensions() -> None:
     with tempfile.TemporaryDirectory() as td:
         proj, bundle = _project_with_annotated_bundle(Path(td))

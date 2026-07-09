@@ -45,6 +45,14 @@ Picking off the figure-export backlog refinements. Running log:
   narrower width, shorter spectrogram) renders correctly; new `FigureStyle` +
   dimension test.
 
+- **Per-heatmap colormap + f0 range knobs** (cheap wins on the config object).
+  `FigureStyle.heatmap_colormap` gives the MFCC/embedding heatmaps a colormap
+  distinct from the spectrogram's (falls back to `colormap` when unset) —
+  verified: a viridis spectrogram over a magma MFCC. `export_figure(f0_min_hz=,
+  f0_max_hz=)` bound the pitch tracker (`PitchConfig.min/max_freq_hz`). Engine
+  `heatmap_cmap()` helper + `f0_min_hz`/`f0_max_hz` options; wired through
+  Python + GUI (GUI passes `None`).
+
 ## 2026-07-08 — G4: heatmap lanes (MFCC) + style knobs — completes the G-series
 
 The last G-series slice: an **MFCC heatmap lane** and the first **style knobs**,

@@ -2740,6 +2740,9 @@ impl SaddaApp {
             hop_ms: sc.hop_ms,
             dynamic_range_db: sc.dynamic_range_db,
             colormap: sc.colormap,
+            heatmap_colormap: None,
+            f0_min_hz: None,
+            f0_max_hz: None,
         };
         let AppState::ProjectLoaded { project, .. } = &self.app_state else {
             return;
@@ -2806,6 +2809,9 @@ impl SaddaApp {
             hop_ms: sc.hop_ms,
             dynamic_range_db: sc.dynamic_range_db,
             colormap: sc.colormap,
+            heatmap_colormap: None,
+            f0_min_hz: None,
+            f0_max_hz: None,
         };
         let AppState::ProjectLoaded { project, .. } = &self.app_state else {
             return;

@@ -3398,15 +3398,16 @@ impl PyProject {
     /// the signal lanes; `f0` / `formants` / `intensity` add measure-track lanes
     /// and `mfcc` adds an MFCC heatmap lane (all off by default), each computed
     /// from the audio; `embedding_tier_id` adds a heatmap of that
-    /// `continuous_vector` tier's `(frames × dims)` matrix. `window_ms` /
-    /// `hop_ms` / `dynamic_range_db` set the spectrogram analysis. Visual style
+    /// `continuous_vector` tier's `(frames × dims)` matrix. `f0_min_hz` /
+    /// `f0_max_hz` bound the pitch tracker; `window_ms` / `hop_ms` /
+    /// `dynamic_range_db` set the spectrogram analysis. Visual style
     /// — dimensions, font size, colours, and the colormap — is a
     /// [`FigureStyle`] object passed as `style` (all its fields default when
     /// unset). `title` is an optional caption.
     #[pyo3(signature = (bundle_id, path, *, format="svg", tier_ids=None, title=None,
         waveform=true, spectrogram=true, f0=false, formants=false, intensity=false,
-        mfcc=false, embedding_tier_id=None, window_ms=25.0, hop_ms=5.0,
-        dynamic_range_db=70.0, style=None))]
+        mfcc=false, embedding_tier_id=None, f0_min_hz=None, f0_max_hz=None,
+        window_ms=25.0, hop_ms=5.0, dynamic_range_db=70.0, style=None))]
     #[allow(clippy::too_many_arguments)]
     fn export_figure(
         &self,
@@ -3422,20 +3423,28 @@ impl PyProject {
         intensity: bool,
         mfcc: bool,
         embedding_tier_id: Option<i64>,
+        f0_min_hz: Option<f32>,
+        f0_max_hz: Option<f32>,
         window_ms: f32,
         hop_ms: f32,
         dynamic_range_db: f32,
         style: Option<PyFigureStyle>,
     ) -> PyResult<()> {
         let style = style.unwrap_or_default();
-        let colormap_name = style.colormap.as_deref().unwrap_or("viridis");
-        let colormap =
-            sadda_engine::dsp::ColormapKind::from_name(colormap_name).ok_or_else(|| {
+        let resolve_cmap = |name: &str| {
+            sadda_engine::dsp::ColormapKind::from_name(name).ok_or_else(|| {
                 PyValueError::new_err(format!(
-                    "unknown colormap {colormap_name:?}; expected one of \
-                 viridis, magma, hot, cividis, greyscale"
+                    "unknown colormap {name:?}; expected one of \
+                     viridis, magma, hot, cividis, greyscale"
                 ))
-            })?;
+            })
+        };
+        let colormap = resolve_cmap(style.colormap.as_deref().unwrap_or("viridis"))?;
+        let heatmap_colormap = style
+            .heatmap_colormap
+            .as_deref()
+            .map(resolve_cmap)
+            .transpose()?;
         let default_width = sadda_engine::io::figure::FigureStyle::default().width;
         let opts = sadda_engine::io::figure::FigureExportOptions {
             title,
@@ -3460,6 +3469,9 @@ impl PyProject {
             hop_ms,
             dynamic_range_db,
             colormap,
+            heatmap_colormap,
+            f0_min_hz,
+            f0_max_hz,
         };
         self.inner
             .export_figure(bundle_id, path, format, tier_ids.as_deref(), &opts)
@@ -4663,9 +4675,12 @@ struct PyFigureStyle {
     /// Tier-row height in px.
     #[pyo3(get, set)]
     tier_height: Option<f64>,
-    /// Spectrogram + heatmap colormap (viridis / magma / hot / cividis / greyscale).
+    /// Spectrogram colormap (viridis / magma / hot / cividis / greyscale).
     #[pyo3(get, set)]
     colormap: Option<String>,
+    /// Heatmap (MFCC / embedding) colormap; falls back to `colormap` when unset.
+    #[pyo3(get, set)]
+    heatmap_colormap: Option<String>,
     /// Background colour (CSS, e.g. "#ffffff").
     #[pyo3(get, set)]
     background: Option<String>,
@@ -4683,8 +4698,8 @@ impl PyFigureStyle {
     #[new]
     #[pyo3(signature = (*, width=None, font_size=None, waveform_height=None,
         spectrogram_height=None, measure_height=None, heatmap_height=None,
-        tier_height=None, colormap=None, background=None, stroke=None,
-        waveform_fill=None))]
+        tier_height=None, colormap=None, heatmap_colormap=None, background=None,
+        stroke=None, waveform_fill=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         width: Option<f64>,
@@ -4695,6 +4710,7 @@ impl PyFigureStyle {
         heatmap_height: Option<f64>,
         tier_height: Option<f64>,
         colormap: Option<String>,
+        heatmap_colormap: Option<String>,
         background: Option<String>,
         stroke: Option<String>,
         waveform_fill: Option<String>,
@@ -4708,6 +4724,7 @@ impl PyFigureStyle {
             heatmap_height,
             tier_height,
             colormap,
+            heatmap_colormap,
             background,
             stroke,
             waveform_fill,
