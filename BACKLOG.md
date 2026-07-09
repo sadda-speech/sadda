@@ -185,8 +185,20 @@ _Designed 2026-07-01 (see DEVLOG design entry). `FigureSpec` IR in
   sidecar (TikZ can't inline a raster). `Project::export_figure` `"tikz"` branch
   (no feature gate) + Python + GUI. Verified by a real `xelatex` compile. —
   _added 2026-07-01_
-- [ ] **G3 — measure lanes in figures** — f0 / formants / intensity / VAD as
-  stacked rows, both backends. — _added 2026-07-01_
+- [x] **G3 — measure lanes in figures** _(done 2026-07-08, feat/figure-export-g0)_ —
+  f0 (contour, unvoiced breaks) / formants (dots) / intensity (dB contour) as
+  stacked rows in the `MeasureLane` IR, computed by `build_measure_lanes` (pitch
+  /formants/intensity DSP), rendered in both SVG/PDF and TikZ; boundary lines
+  cross them. Opt-in; three surfaces (`f0=`/`formants=`/`intensity=` + GUI via
+  `visible_lanes()`). **VAD deferred** — needs the ml/model path (see below). —
+  _added 2026-07-01_
+- [ ] **Figure measure-lane follow-ups** — (1) **VAD lane** (the G3 measure the
+  neural path made too heavy to fold in — needs `ml` + model; render as a
+  0/1 step or shaded speech regions). (2) **f0 octave robustness** in figures —
+  `build_measure_lanes` uses `pitch::autocorrelation` (prone to octave-doubling,
+  which inflates the data-driven y-range); switch to `autocorrelation_boersma`
+  (octave cost + Viterbi). (3) expose the measure DSP params (pitch floor/ceiling,
+  formant count/ceiling) to the figure API instead of defaults. — _added 2026-07-08_
 - [ ] **G4 — heatmap lanes + style knobs** — MFCC + embedding rasters; expose
   colormap/palette/font/dimension overrides across Python + GUI (completes the
   "whole signal column" default). — _added 2026-07-01_

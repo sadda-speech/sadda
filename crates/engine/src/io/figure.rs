@@ -57,10 +57,39 @@ pub struct FigureSpec {
     pub waveform: Option<WaveformLane>,
     /// Optional spectrogram raster (embedded as a PNG `<image>`).
     pub spectrogram: Option<SpectrogramLane>,
+    /// Measure-track lanes (f0 / formants / intensity …), each its own stacked
+    /// row between the spectrogram and the tiers.
+    pub measures: Vec<MeasureLane>,
     /// Annotation-tier rows, drawn top-to-bottom in the given order.
     pub tiers: Vec<FigureTier>,
     /// Sizing, fonts, and colours.
     pub style: FigureStyle,
+}
+
+/// A stacked measure-track lane — one or more time-series (f0, the formants,
+/// intensity, …) drawn over the lane's own y-axis, in its own row.
+pub struct MeasureLane {
+    /// Lane name, drawn in the left margin (e.g. `"f0"`, `"formants"`).
+    pub name: String,
+    /// y-axis unit label (e.g. `"Hz"`, `"dB"`; empty for none).
+    pub unit: String,
+    /// The value extent mapped to the lane's vertical span, `(min, max)`.
+    pub y_range: (f64, f64),
+    /// One or more series drawn in the lane (e.g. F1…F5 as separate series).
+    pub series: Vec<MeasureSeries>,
+}
+
+/// One time-series in a [`MeasureLane`].
+pub struct MeasureSeries {
+    /// Polyline segments — each an unbroken run of `(time_seconds, value)`
+    /// points; gaps (e.g. f0 unvoiced frames) split into separate segments so
+    /// the line doesn't bridge them.
+    pub segments: Vec<Vec<(f64, f64)>>,
+    /// Draw discrete dots (the convention for formants) rather than connecting
+    /// the points into a line.
+    pub dots: bool,
+    /// CSS stroke/fill colour; falls back to the style stroke when `None`.
+    pub color: Option<String>,
 }
 
 /// A waveform lane as a **min/max envelope** — one `(min, max)` amplitude pair
@@ -133,6 +162,8 @@ pub struct FigureStyle {
     pub waveform_height: f64,
     /// Height of the spectrogram lane, if drawn.
     pub spectrogram_height: f64,
+    /// Height of each measure-track lane row (f0 / formants / intensity).
+    pub measure_height: f64,
     /// Height of each tier row.
     pub tier_height: f64,
     /// Left margin reserved for y-axis + tier-name labels.
@@ -159,6 +190,7 @@ impl Default for FigureStyle {
             width: 800.0,
             waveform_height: 90.0,
             spectrogram_height: 220.0,
+            measure_height: 80.0,
             tier_height: 34.0,
             margin_left: 64.0,
             margin_right: 12.0,
@@ -189,8 +221,10 @@ struct FigureLayout {
     wave_y: Option<f64>,
     /// Top y of the spectrogram lane, if present.
     spec_y: Option<f64>,
+    /// Top y of each measure lane, in order.
+    measure_ys: Vec<f64>,
     /// Bottom y of the signal-panel region (tiers start here; boundary lines
-    /// end here).
+    /// end here — they cross the waveform, spectrogram, and measure lanes).
     panels_bottom: f64,
     /// Top y of each tier row, in order.
     tier_tops: Vec<f64>,
@@ -223,6 +257,11 @@ impl FigureLayout {
             y += s.spectrogram_height;
             top
         });
+        let mut measure_ys = Vec::with_capacity(spec.measures.len());
+        for _ in &spec.measures {
+            measure_ys.push(y);
+            y += s.measure_height;
+        }
         let panels_bottom = y;
 
         let mut tier_tops = Vec::with_capacity(spec.tiers.len());
@@ -240,6 +279,7 @@ impl FigureLayout {
             panels_top,
             wave_y,
             spec_y,
+            measure_ys,
             panels_bottom,
             tier_tops,
             axis_y,
@@ -273,6 +313,7 @@ pub fn to_svg(spec: &FigureSpec) -> String {
         panels_top,
         wave_y,
         spec_y,
+        ref measure_ys,
         panels_bottom,
         ref tier_tops,
         axis_y,
@@ -328,6 +369,19 @@ pub fn to_svg(spec: &FigureSpec) -> String {
             s.spectrogram_height,
             plot_x0,
             plot_w,
+            s,
+        ));
+    }
+
+    // Measure lanes (f0 / formants / intensity).
+    for (lane, &top) in spec.measures.iter().zip(measure_ys) {
+        out.push_str(&measure_svg(
+            lane,
+            top,
+            s.measure_height,
+            plot_x0,
+            plot_x1,
+            &x_of,
             s,
         ));
     }
@@ -482,6 +536,69 @@ pub fn to_tikz(spec: &FigureSpec, raster_ref: Option<&str>) -> String {
             lay.plot_x0 - 6.0,
             ty(top + s.spectrogram_height / 2.0),
         ));
+    }
+
+    // Measure lanes (f0 / formants / intensity).
+    for (lane, &top) in spec.measures.iter().zip(&lay.measure_ys) {
+        let (lo, hi) = lane.y_range;
+        let vspan = (hi - lo).max(f64::MIN_POSITIVE);
+        let my = |v: f64| ty(top + (1.0 - (v - lo) / vspan) * s.measure_height);
+        b.push_str(&format!(
+            "\\node[anchor=east,font=\\small] at ({:.1},{:.1}) {{{}}};\n",
+            lay.plot_x0 - 6.0,
+            ty(top + s.measure_height / 2.0),
+            tex_escape(&lane.name),
+        ));
+        b.push_str(&format!(
+            "\\draw[figstroke,line width=0.4pt] ({:.1},{:.1}) -- ({:.1},{:.1});\n",
+            lay.plot_x0,
+            ty(top),
+            lay.plot_x1,
+            ty(top),
+        ));
+        b.push_str(&tikz_ylabel(
+            lay.plot_x0,
+            ty(top + s.font_size),
+            &measure_top_label(hi, &lane.unit),
+        ));
+        b.push_str(&tikz_ylabel(
+            lay.plot_x0,
+            ty(top + s.measure_height),
+            &fmt_num(lo),
+        ));
+        for series in &lane.series {
+            let col = series
+                .color
+                .as_deref()
+                .map(hex_rgb)
+                .unwrap_or_else(|| hex_rgb(&s.stroke));
+            b.push_str(&format!("\\definecolor{{figseries}}{{HTML}}{{{col}}}\n"));
+            for seg in &series.segments {
+                if series.dots {
+                    for &(t, v) in seg {
+                        let x = lay.x_of(t);
+                        if x >= lay.plot_x0 && x <= lay.plot_x1 {
+                            b.push_str(&format!(
+                                "\\fill[figseries] ({:.1},{:.1}) circle (1.0pt);\n",
+                                x,
+                                my(v),
+                            ));
+                        }
+                    }
+                } else if seg.len() >= 2 {
+                    b.push_str("\\draw[figseries,line width=0.7pt] ");
+                    for (i, &(t, v)) in seg.iter().enumerate() {
+                        b.push_str(&format!(
+                            "{}({:.1},{:.1})",
+                            if i == 0 { "" } else { " -- " },
+                            lay.x_of(t).clamp(lay.plot_x0, lay.plot_x1),
+                            my(v),
+                        ));
+                    }
+                    b.push_str(";\n");
+                }
+            }
+        }
     }
 
     // Boundary lines through the signal panels (interval tiers only).
@@ -804,6 +921,79 @@ fn spectrogram_svg(
     out
 }
 
+fn measure_svg(
+    lane: &MeasureLane,
+    top: f64,
+    height: f64,
+    plot_x0: f64,
+    plot_x1: f64,
+    x_of: &dyn Fn(f64) -> f64,
+    s: &FigureStyle,
+) -> String {
+    let (lo, hi) = lane.y_range;
+    let span = (hi - lo).max(f64::MIN_POSITIVE);
+    let y_of = |v: f64| top + (1.0 - (v - lo) / span) * height;
+
+    let mut out = String::new();
+    // Lane name + top frame line.
+    out.push_str(&format!(
+        "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"{:.1}\" text-anchor=\"end\" fill=\"{}\">{}</text>\n",
+        plot_x0 - 6.0,
+        top + height / 2.0 + s.font_size * 0.35,
+        s.font_size * 0.85,
+        s.stroke,
+        xml_escape(&lane.name),
+    ));
+    out.push_str(&format!(
+        "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"0.5\"/>\n",
+        plot_x0, top, plot_x1, top, s.stroke
+    ));
+    // y-axis extent labels — the unit rides on the top (max) label so it can't
+    // collide with the lane name at mid-height.
+    out.push_str(&y_label(
+        plot_x0,
+        top + s.font_size,
+        &measure_top_label(hi, &lane.unit),
+        s,
+    ));
+    out.push_str(&y_label(plot_x0, top + height, &fmt_num(lo), s));
+    // Series.
+    for series in &lane.series {
+        let color = series.color.as_deref().unwrap_or(&s.stroke);
+        for seg in &series.segments {
+            if series.dots {
+                for &(t, v) in seg {
+                    let x = x_of(t);
+                    if x < plot_x0 || x > plot_x1 {
+                        continue;
+                    }
+                    out.push_str(&format!(
+                        "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"1.3\" fill=\"{}\"/>\n",
+                        x,
+                        y_of(v),
+                        color,
+                    ));
+                }
+            } else if seg.len() >= 2 {
+                let mut d = String::from("M");
+                for (i, &(t, v)) in seg.iter().enumerate() {
+                    d.push_str(&format!(
+                        "{} {:.1},{:.1}",
+                        if i == 0 { "" } else { " L" },
+                        x_of(t).clamp(plot_x0, plot_x1),
+                        y_of(v),
+                    ));
+                }
+                out.push_str(&format!(
+                    "<path d=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"1\"/>\n",
+                    d, color
+                ));
+            }
+        }
+    }
+    out
+}
+
 fn boundary_lines_svg(
     spec: &FigureSpec,
     y_top: f64,
@@ -1001,6 +1191,17 @@ pub fn spectrogram_png(spec: &FigureSpec) -> Option<Vec<u8>> {
     Some(rgba_to_png(&sg.rgba, sg.width, sg.height))
 }
 
+/// The top (max) y-axis label for a measure lane: the value plus its unit
+/// (e.g. `"500 Hz"`), so the unit rides here instead of a separate mid-height
+/// label that would collide with the lane name.
+fn measure_top_label(hi: f64, unit: &str) -> String {
+    if unit.is_empty() {
+        fmt_num(hi)
+    } else {
+        format!("{} {unit}", fmt_num(hi))
+    }
+}
+
 /// Formats a number for an axis label: up to 3 significant decimals, trailing
 /// zeros trimmed, so `0.5` not `0.500` and `1200` not `1200.000`.
 fn fmt_num(v: f64) -> String {
@@ -1030,6 +1231,12 @@ pub struct FigureExportOptions {
     pub include_waveform: bool,
     /// Draw the spectrogram raster.
     pub include_spectrogram: bool,
+    /// Draw the f0 (pitch) measure lane.
+    pub include_f0: bool,
+    /// Draw the formants measure lane.
+    pub include_formants: bool,
+    /// Draw the intensity measure lane.
+    pub include_intensity: bool,
     /// Overall figure width in px.
     pub width: f64,
     /// STFT window length in milliseconds.
@@ -1048,6 +1255,11 @@ impl Default for FigureExportOptions {
             title: None,
             include_waveform: true,
             include_spectrogram: true,
+            // Measure lanes are opt-in: a plain figure is waveform + spectrogram
+            // + tiers unless a lane is explicitly requested.
+            include_f0: false,
+            include_formants: false,
+            include_intensity: false,
             width: FigureStyle::default().width,
             window_ms: 25.0,
             hop_ms: 5.0,
@@ -1107,14 +1319,141 @@ pub fn build_spec(
         None
     };
 
+    let measures = build_measure_lanes(samples, sample_rate, opts);
+
     FigureSpec {
         title: opts.title.clone(),
         time_range: (0.0, duration.max(f64::MIN_POSITIVE)),
         waveform,
         spectrogram,
+        measures,
         tiers,
         style,
     }
+}
+
+/// Computes the requested measure lanes (f0 / formants / intensity) from audio
+/// via the engine's DSP, each with a data-driven y-axis. Lanes that come back
+/// empty (e.g. a fully unvoiced clip) are dropped.
+fn build_measure_lanes(
+    samples: &[f32],
+    sample_rate: u32,
+    opts: &FigureExportOptions,
+) -> Vec<MeasureLane> {
+    let mut lanes = Vec::new();
+    if sample_rate == 0 || samples.is_empty() {
+        return lanes;
+    }
+
+    if opts.include_f0 {
+        let audio = crate::audio::Audio::from_samples(samples.to_vec(), sample_rate, 1);
+        let frames = crate::pitch::autocorrelation(&audio, &crate::pitch::PitchConfig::default());
+        // Voiced runs → segments (break the contour across unvoiced frames).
+        let mut segments: Vec<Vec<(f64, f64)>> = Vec::new();
+        let mut cur: Vec<(f64, f64)> = Vec::new();
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for fr in &frames {
+            let v = fr.frequency_hz.value() as f64;
+            if fr.voicing >= 0.5 && v > 0.0 {
+                cur.push((fr.time_seconds, v));
+                lo = lo.min(v);
+                hi = hi.max(v);
+            } else if !cur.is_empty() {
+                segments.push(std::mem::take(&mut cur));
+            }
+        }
+        if !cur.is_empty() {
+            segments.push(cur);
+        }
+        if segments.iter().any(|s| !s.is_empty()) {
+            let (lo, hi) = if lo.is_finite() && hi > lo {
+                ((lo * 0.9).floor(), (hi * 1.1).ceil())
+            } else {
+                (75.0, 500.0)
+            };
+            lanes.push(MeasureLane {
+                name: "f0".to_string(),
+                unit: "Hz".to_string(),
+                y_range: (lo, hi),
+                series: vec![MeasureSeries {
+                    segments,
+                    dots: false,
+                    color: Some("#2b6cb0".to_string()),
+                }],
+            });
+        }
+    }
+
+    if opts.include_formants {
+        let frames =
+            crate::dsp::formants(samples, sample_rate, &crate::dsp::FormantsConfig::default());
+        let n_formants = frames
+            .iter()
+            .map(|f| f.frequencies.len())
+            .max()
+            .unwrap_or(0);
+        let mut series = Vec::new();
+        let mut hi = 0.0_f64;
+        for i in 0..n_formants {
+            let pts: Vec<(f64, f64)> = frames
+                .iter()
+                .filter_map(|f| {
+                    f.frequencies
+                        .get(i)
+                        .map(|h| (f.time_seconds, h.value() as f64))
+                })
+                .filter(|&(_, v)| v > 0.0)
+                .collect();
+            for &(_, v) in &pts {
+                hi = hi.max(v);
+            }
+            if !pts.is_empty() {
+                series.push(MeasureSeries {
+                    segments: vec![pts],
+                    dots: true,
+                    color: Some("#c0392b".to_string()),
+                });
+            }
+        }
+        if !series.is_empty() {
+            lanes.push(MeasureLane {
+                name: "formants".to_string(),
+                unit: "Hz".to_string(),
+                y_range: (0.0, (hi * 1.05).ceil().max(1.0)),
+                series,
+            });
+        }
+    }
+
+    if opts.include_intensity {
+        let frames = crate::dsp::intensity(samples, sample_rate, 0.03, 0.01);
+        let pts: Vec<(f64, f64)> = frames
+            .iter()
+            .map(|f| (f.time_seconds, f.db_fs.value() as f64))
+            .filter(|&(_, v)| v.is_finite())
+            .collect();
+        if pts.len() >= 2 {
+            let lo = pts.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+            let hi = pts.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+            let (lo, hi) = if hi > lo {
+                (lo, hi)
+            } else {
+                (lo - 1.0, lo + 1.0)
+            };
+            lanes.push(MeasureLane {
+                name: "intensity".to_string(),
+                unit: "dB".to_string(),
+                y_range: (lo.floor(), hi.ceil()),
+                series: vec![MeasureSeries {
+                    segments: vec![pts],
+                    dots: false,
+                    color: Some("#2f855a".to_string()),
+                }],
+            });
+        }
+    }
+
+    lanes
 }
 
 /// Computes a [`SpectrogramLane`] from audio, or `None` if the signal is too
@@ -1251,6 +1590,16 @@ mod tests {
                 height: 3,
                 max_freq_hz: 8000.0,
             }),
+            measures: vec![MeasureLane {
+                name: "f0".to_string(),
+                unit: "Hz".to_string(),
+                y_range: (75.0, 300.0),
+                series: vec![MeasureSeries {
+                    segments: vec![vec![(0.1, 120.0), (0.2, 140.0), (0.3, 130.0)]],
+                    dots: false,
+                    color: Some("#2b6cb0".to_string()),
+                }],
+            }],
             tiers: vec![
                 FigureTier {
                     name: "phones".to_string(),
@@ -1347,6 +1696,7 @@ mod tests {
                 height: 2,
                 max_freq_hz: 5000.0,
             }),
+            measures: vec![],
             tiers: vec![],
             style: FigureStyle::default(),
         };
@@ -1495,6 +1845,36 @@ mod tests {
         let spec = build_spec(&samples, 16_000, vec![], &opts);
         assert!(spec.spectrogram.is_none());
         assert!(spec.waveform.is_some());
+        // Measure lanes are opt-in — none by default.
+        assert!(spec.measures.is_empty());
+    }
+
+    #[test]
+    fn build_spec_computes_measure_lanes_and_renders_them() {
+        // 0.3 s, 150 Hz sine → a voiced f0 lane + an intensity lane.
+        let sr = 16_000u32;
+        let n = (sr as f64 * 0.3) as usize;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (std::f32::consts::TAU * 150.0 * i as f32 / sr as f32).sin() * 0.6)
+            .collect();
+        let opts = FigureExportOptions {
+            include_f0: true,
+            include_formants: true,
+            include_intensity: true,
+            ..FigureExportOptions::default()
+        };
+        let spec = build_spec(&samples, sr, vec![], &opts);
+        let names: Vec<&str> = spec.measures.iter().map(|m| m.name.as_str()).collect();
+        // Intensity is deterministic from any signal.
+        assert!(names.contains(&"intensity"), "got {names:?}");
+        // A clean 150 Hz sine should track as voiced f0.
+        assert!(names.contains(&"f0"), "got {names:?}");
+        // The lanes render (names + a polyline) in both backends.
+        let svg = to_svg(&spec);
+        assert!(svg.contains(">intensity</text>"));
+        assert!(svg.contains(">f0</text>"));
+        let tikz = to_tikz(&spec, None);
+        assert!(tikz.contains("{intensity}"));
     }
 
     #[test]

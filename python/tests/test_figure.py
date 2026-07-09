@@ -71,6 +71,17 @@ def test_export_figure_writes_self_contained_svg() -> None:
         assert ">praat</text>" in svg  # title
 
 
+def test_export_figure_with_measure_lanes() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        proj, bundle = _project_with_annotated_bundle(Path(td))
+        out = Path(td) / "measures.svg"
+        proj.export_figure(bundle, out, f0=True, formants=True, intensity=True)
+        svg = out.read_text()
+        # The intensity lane is deterministic; f0 tracks on the sine clip.
+        assert ">intensity</text>" in svg
+        assert ">f0</text>" in svg
+
+
 def test_export_figure_respects_include_flags() -> None:
     with tempfile.TemporaryDirectory() as td:
         proj, bundle = _project_with_annotated_bundle(Path(td))

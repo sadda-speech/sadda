@@ -6,6 +6,44 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-08 — G3: measure lanes (f0 / formants / intensity, both backends)
+
+Stacked measure-track rows on the figure: **f0** (pitch contour), **formants**
+(dots), and **intensity** (dB contour), between the spectrogram and the tiers,
+across engine + Python + GUI, in both the SVG/PDF and TikZ backends.
+
+**IR.** `FigureSpec` gains `measures: Vec<MeasureLane>`; a `MeasureLane` carries
+a name, unit, data-driven `y_range`, and one-or-more `MeasureSeries` (polyline
+**segments** so f0 breaks across unvoiced frames rather than bridging them; a
+`dots` flag for formants; a per-series colour). `FigureLayout` places measure
+rows between spectrogram and tiers and extends the panel region so **boundary
+lines cross the measure lanes too** (Praat-like).
+
+**Computation.** `build_measure_lanes` runs the engine DSP headlessly:
+`pitch::autocorrelation` (voiced runs → segments), `dsp::formants` (per-formant
+dot series), `dsp::intensity` (dB contour), each with a data-driven axis; empty
+lanes (e.g. fully unvoiced) drop out. Measures are **opt-in** (a plain figure
+stays waveform + spectrogram + tiers).
+
+**Surfaces.** Python `export_figure(f0=…, formants=…, intensity=…)`; GUI figure
+export + clipboard read the flags from `visible_lanes()` (so a figure mirrors
+the on-screen measure lanes). **VAD deferred** — it needs the neural ml/model
+path, unlike these pure-DSP measures; queued.
+
+**Layout bug caught by looking.** First render collided the lane-name and unit
+labels in the narrow left margin (garbled "f0"/"Hz"). Fixed by moving the unit
+onto the top numeric label (`"500 Hz"`) and keeping the name alone at mid-height.
+Re-rendered: f0 contour (with unvoiced breaks), formant dots, intensity line all
+read cleanly.
+
+**Verification.** Engine 16 figure tests (incl. measure computation + render);
+Python 9 (SVG measure lanes); a real **xelatex** compile of a TikZ figure *with*
+measures; 303 python + workspace `clippy -D warnings` + `fmt` clean.
+
+**Next:** G4 — heatmap lanes (MFCC + embedding rasters) + style knobs (colormap/
+palette/font/dimension overrides across Python + GUI). Also queued: f0 octave
+robustness (use `autocorrelation_boersma`), VAD lane.
+
 ## 2026-07-08 — G2: TikZ backend (standalone .tex + raster sidecar, three surfaces)
 
 Second G-series backend: export the figure as a **standalone TikZ/LaTeX

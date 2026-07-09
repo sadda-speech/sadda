@@ -3395,13 +3395,14 @@ impl PyProject {
     /// since TikZ can't embed a raster). `tier_ids` selects which interval/point
     /// tiers to draw, in that
     /// order (default: all drawable tiers). `waveform` / `spectrogram` toggle
-    /// the signal lanes; `window_ms` / `hop_ms` / `dynamic_range_db` /
-    /// `colormap` control the spectrogram (colormap ∈ viridis, magma, hot,
-    /// cividis, greyscale). `width` is the figure width in px; `title` is an
-    /// optional caption.
+    /// the signal lanes; `f0` / `formants` / `intensity` add measure-track lanes
+    /// (off by default), each computed from the audio with a data-driven y-axis;
+    /// `window_ms` / `hop_ms` / `dynamic_range_db` / `colormap` control the
+    /// spectrogram (colormap ∈ viridis, magma, hot, cividis, greyscale). `width`
+    /// is the figure width in px; `title` is an optional caption.
     #[pyo3(signature = (bundle_id, path, *, format="svg", tier_ids=None, title=None,
-        waveform=true, spectrogram=true, width=800.0, window_ms=25.0, hop_ms=5.0,
-        dynamic_range_db=70.0, colormap="viridis"))]
+        waveform=true, spectrogram=true, f0=false, formants=false, intensity=false,
+        width=800.0, window_ms=25.0, hop_ms=5.0, dynamic_range_db=70.0, colormap="viridis"))]
     #[allow(clippy::too_many_arguments)]
     fn export_figure(
         &self,
@@ -3412,6 +3413,9 @@ impl PyProject {
         title: Option<String>,
         waveform: bool,
         spectrogram: bool,
+        f0: bool,
+        formants: bool,
+        intensity: bool,
         width: f64,
         window_ms: f32,
         hop_ms: f32,
@@ -3428,6 +3432,9 @@ impl PyProject {
             title,
             include_waveform: waveform,
             include_spectrogram: spectrogram,
+            include_f0: f0,
+            include_formants: formants,
+            include_intensity: intensity,
             width,
             window_ms,
             hop_ms,
