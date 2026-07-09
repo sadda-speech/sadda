@@ -37,6 +37,7 @@ __all__ = [
     "DerivedSignal",
     "ExperimentalAPIWarning",
     "ExportSummary",
+    "FigureStyle",
     "ImportSummary",
     "Instrument",
     "Interval",
@@ -114,6 +115,10 @@ Reference = stable(_native.Reference)
 
 # B3 surface — dense-tier Parquet sidecar registration.
 DerivedSignal = stable(_native.DerivedSignal)
+
+# G-series surface — publication figure export style (Project.export_figure).
+# New and evolving with the figure exporter, so provisional.
+FigureStyle = provisional(_native.FigureStyle)
 
 # S1 surface (Phase 4) — annotation rubric: guidelines, the status
 # vocabulary, and per-tier controlled vocabularies. New and evolving with the

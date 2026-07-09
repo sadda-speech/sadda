@@ -29,6 +29,22 @@ Picking off the figure-export backlog refinements. Running log:
   structured 8-dim embedding renders as the expected diagonal band (`d0`→`d7`),
   and it sidecars into TikZ via the same generalised path.
 
+- **Style config object + fuller style knobs.** `export_figure` had grown to 19
+  kwargs; adding more style knobs as flat kwargs didn't scale (user call:
+  refactor to a config object first). Introduced a **`FigureStyle` pyclass**
+  (`sadda.FigureStyle(width=…, font_size=…, spectrogram_height=…, colormap=…,
+  stroke=…, …)`) passed as `style=`; the flat `width` / `font_size` / `colormap`
+  kwargs moved into it (spectrogram *analysis* params — `window_ms` / `hop_ms` /
+  `dynamic_range_db` — stay kwargs, being analysis not style), dropping the
+  signature to 16 and making new knobs additive. Engine `FigureExportOptions`
+  gained `Option` overrides for every `FigureStyle` field (per-lane heights,
+  background/stroke/waveform-fill colours), applied in `build_spec`. Opted the
+  pyclass into `FromPyObject` (`from_py_object`) for the by-value extract. GUI
+  passes `None` overrides (no style controls yet — a separate enhancement).
+  Verified: a custom style (blue waveform, greyscale spectrogram, off-white bg,
+  narrower width, shorter spectrogram) renders correctly; new `FigureStyle` +
+  dimension test.
+
 ## 2026-07-08 — G4: heatmap lanes (MFCC) + style knobs — completes the G-series
 
 The last G-series slice: an **MFCC heatmap lane** and the first **style knobs**,

@@ -1365,8 +1365,24 @@ pub struct FigureExportOptions {
     pub embedding_tier_id: Option<i64>,
     /// Overall figure width in px.
     pub width: f64,
-    /// Base font-size override in px (style knob); `None` keeps the default.
+    /// Base font-size override in px; `None` keeps the default.
     pub font_size: Option<f64>,
+    /// Waveform-lane height override in px; `None` keeps the default.
+    pub waveform_height: Option<f64>,
+    /// Spectrogram-lane height override in px; `None` keeps the default.
+    pub spectrogram_height: Option<f64>,
+    /// Measure-lane height override in px; `None` keeps the default.
+    pub measure_height: Option<f64>,
+    /// Heatmap-lane height override in px; `None` keeps the default.
+    pub heatmap_height: Option<f64>,
+    /// Tier-row height override in px; `None` keeps the default.
+    pub tier_height: Option<f64>,
+    /// Background colour override (CSS); `None` keeps the default.
+    pub background: Option<String>,
+    /// Stroke colour override (CSS); `None` keeps the default.
+    pub stroke: Option<String>,
+    /// Waveform-fill colour override (CSS); `None` keeps the default.
+    pub waveform_fill: Option<String>,
     /// STFT window length in milliseconds.
     pub window_ms: f32,
     /// STFT hop length in milliseconds.
@@ -1392,6 +1408,14 @@ impl Default for FigureExportOptions {
             embedding_tier_id: None,
             width: FigureStyle::default().width,
             font_size: None,
+            waveform_height: None,
+            spectrogram_height: None,
+            measure_height: None,
+            heatmap_height: None,
+            tier_height: None,
+            background: None,
+            stroke: None,
+            waveform_fill: None,
             window_ms: 25.0,
             hop_ms: 5.0,
             dynamic_range_db: 70.0,
@@ -1422,11 +1446,22 @@ pub fn build_spec(
     } else {
         0.0
     };
-    let default_style = FigureStyle::default();
+    let d = FigureStyle::default();
     let style = FigureStyle {
         width: opts.width,
-        font_size: opts.font_size.unwrap_or(default_style.font_size),
-        ..default_style
+        waveform_height: opts.waveform_height.unwrap_or(d.waveform_height),
+        spectrogram_height: opts.spectrogram_height.unwrap_or(d.spectrogram_height),
+        measure_height: opts.measure_height.unwrap_or(d.measure_height),
+        heatmap_height: opts.heatmap_height.unwrap_or(d.heatmap_height),
+        tier_height: opts.tier_height.unwrap_or(d.tier_height),
+        margin_left: d.margin_left,
+        margin_right: d.margin_right,
+        margin_top: d.margin_top,
+        axis_height: d.axis_height,
+        font_size: opts.font_size.unwrap_or(d.font_size),
+        stroke: opts.stroke.clone().unwrap_or(d.stroke),
+        waveform_fill: opts.waveform_fill.clone().unwrap_or(d.waveform_fill),
+        background: opts.background.clone().unwrap_or(d.background),
     };
 
     let waveform = if opts.include_waveform && !samples.is_empty() {

@@ -95,8 +95,7 @@ def test_export_figure_whole_signal_column() -> None:
             formants=True,
             intensity=True,
             mfcc=True,
-            font_size=15.0,
-            colormap="magma",
+            style=sadda.FigureStyle(font_size=15.0, colormap="magma", spectrogram_height=260),
         )
         svg = out.read_text()
         assert ">MFCC</text>" in svg
@@ -116,6 +115,21 @@ def test_export_figure_mfcc_tikz_writes_heatmap_sidecar() -> None:
         assert "hm-heatmap0.png" in tex
         assert (Path(td) / "hm-spectrogram.png").exists()
         assert (Path(td) / "hm-heatmap0.png").exists()
+
+
+def test_figure_style_object_applies_dimensions() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        proj, bundle = _project_with_annotated_bundle(Path(td))
+        out = Path(td) / "styled.svg"
+        proj.export_figure(
+            bundle,
+            out,
+            style=sadda.FigureStyle(width=1000, spectrogram_height=300, background="#f7f7f7"),
+        )
+        svg = out.read_text()
+        # Width + background flow through to the SVG.
+        assert 'width="1000"' in svg
+        assert "#f7f7f7" in svg
 
 
 def test_export_figure_embedding_heatmap_from_tier() -> None:
@@ -197,4 +211,4 @@ def test_export_figure_rejects_unknown_colormap() -> None:
         proj, bundle = _project_with_annotated_bundle(Path(td))
         out = Path(td) / "fig.svg"
         with pytest.raises(ValueError, match="unknown colormap"):
-            proj.export_figure(bundle, out, colormap="not-a-map")
+            proj.export_figure(bundle, out, style=sadda.FigureStyle(colormap="not-a-map"))
