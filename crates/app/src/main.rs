@@ -2701,12 +2701,13 @@ impl SaddaApp {
         }
     }
 
-    /// Exports a publication figure (G1) of the active bundle to `path` as SVG.
-    /// The figure mirrors **what's on screen**: which signal lanes to draw come
-    /// from [`crate::state::PersistedState::visible_lanes`], the spectrogram
+    /// Exports a publication figure (G1) of the active bundle to `path` in
+    /// `format` (`"svg"` or `"pdf"`). The figure mirrors **what's on screen**:
+    /// which signal lanes to draw come from
+    /// [`crate::state::PersistedState::visible_lanes`], the spectrogram
     /// parameters + colormap from the current `spectrogram` config, and the
     /// tiers from those not hidden in the tier strip.
-    fn export_figure_for_active_bundle(&mut self, path: PathBuf) {
+    fn export_figure_for_active_bundle(&mut self, path: PathBuf, format: &str) {
         let Some(bundle_id) = self.selected_bundle_id else {
             return;
         };
@@ -2740,7 +2741,7 @@ impl SaddaApp {
         } else {
             Some(Vec::new())
         };
-        let result = project.export_figure(bundle_id, &path, "svg", tier_ids.as_deref(), &opts);
+        let result = project.export_figure(bundle_id, &path, format, tier_ids.as_deref(), &opts);
         match result {
             Ok(()) => {
                 self.error = None;
@@ -10524,7 +10525,20 @@ impl SaddaApp {
                     {
                         ui.close();
                         if let Some(path) = self.suggest_export_path("svg") {
-                            self.export_figure_for_active_bundle(path);
+                            self.export_figure_for_active_bundle(path, "svg");
+                        }
+                    }
+                    if ui
+                        .button("Publication figure (PDF)…")
+                        .on_hover_text(
+                            "Export the same figure as a self-contained PDF (vector, \
+                             journal-ready)",
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        if let Some(path) = self.suggest_export_path("pdf") {
+                            self.export_figure_for_active_bundle(path, "pdf");
                         }
                     }
                 });

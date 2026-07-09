@@ -5626,18 +5626,42 @@ impl Project {
         tier_ids: Option<&[i64]>,
         opts: &crate::io::figure::FigureExportOptions,
     ) -> Result<()> {
-        if !format.eq_ignore_ascii_case("svg") {
+        let fmt = format.to_ascii_lowercase();
+        // "pdf" is only a valid request when the `figure-pdf` feature is on;
+        // otherwise it falls through to the unsupported-format error below.
+        let is_svg = fmt == "svg";
+        let is_pdf = fmt == "pdf" && cfg!(feature = "figure-pdf");
+        if !is_svg && !is_pdf {
+            let pdf_hint = if cfg!(feature = "figure-pdf") {
+                "\"svg\" or \"pdf\""
+            } else {
+                "\"svg\" (this build has no PDF support)"
+            };
             return Err(EngineError::Corpus(format!(
-                "figure export format {format:?} is not supported yet (only \"svg\"); \
-                 PDF and TikZ arrive in later slices"
+                "figure export format {format:?} is not supported; expected {pdf_hint}. \
+                 TikZ arrives in a later slice"
             )));
         }
         let audio = self.load_audio(bundle_id)?;
         let samples: Vec<f32> = audio.mono_samples().collect();
         let tiers = self.gather_figure_tiers(bundle_id, tier_ids)?;
         let spec = crate::io::figure::build_spec(&samples, audio.sample_rate, tiers, opts);
-        let svg = crate::io::figure::to_svg(&spec);
-        std::fs::write(path.as_ref(), svg)
+
+        let bytes: Vec<u8> = if is_svg {
+            crate::io::figure::to_svg(&spec).into_bytes()
+        } else {
+            #[cfg(feature = "figure-pdf")]
+            {
+                crate::io::figure::to_pdf(&spec).map_err(EngineError::Corpus)?
+            }
+            // Unreachable when the feature is off: `is_pdf` is false there, so
+            // the guard above already returned. Keeps the match total.
+            #[cfg(not(feature = "figure-pdf"))]
+            {
+                unreachable!("pdf export requires the figure-pdf feature")
+            }
+        };
+        std::fs::write(path.as_ref(), bytes)
             .map_err(|e| EngineError::Corpus(format!("figure export write failed: {e}")))?;
         Ok(())
     }

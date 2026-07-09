@@ -28,7 +28,7 @@ path = "src/bin/stub_gen.rs"
 # SADDA_ALLOW_NETWORK (gated in engine::models), so the default install
 # stays network-free. The desktop app deliberately does NOT enable this
 # (see crates/app/Cargo.toml): the GUI stays network-free by construction.
-sadda-engine = { path = "../engine", features = ["download"] }
+sadda-engine = { path = "../engine", features = ["download", "figure-pdf"] }
 # NOTE: extension-module is enabled via pyproject.toml's [tool.maturin]
 # section when building the wheel; keeping it off here avoids unifying it
 # across the workspace (which would break crates/script-engine's

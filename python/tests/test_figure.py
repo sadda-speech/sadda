@@ -93,12 +93,23 @@ def test_export_figure_tier_selection() -> None:
         assert ">events</text>" not in svg
 
 
-def test_export_figure_rejects_unsupported_format() -> None:
+def test_export_figure_pdf_is_self_contained() -> None:
     with tempfile.TemporaryDirectory() as td:
         proj, bundle = _project_with_annotated_bundle(Path(td))
         out = Path(td) / "fig.pdf"
+        proj.export_figure(bundle, out, format="pdf", title="praat")
+        assert out.exists()
+        data = out.read_bytes()
+        assert data.startswith(b"%PDF-")  # a real PDF
+        assert len(data) > 1000
+
+
+def test_export_figure_rejects_unsupported_format() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        proj, bundle = _project_with_annotated_bundle(Path(td))
+        out = Path(td) / "fig.tex"
         with pytest.raises(Exception, match="not supported"):
-            proj.export_figure(bundle, out, format="pdf")
+            proj.export_figure(bundle, out, format="tikz")
 
 
 def test_export_figure_rejects_unknown_colormap() -> None:

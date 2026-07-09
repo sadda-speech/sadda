@@ -3388,8 +3388,9 @@ impl PyProject {
     ///
     /// `format` is `"svg"` (a self-contained SVG with the Doulos SIL font and
     /// the spectrogram raster embedded, so it renders identically anywhere and
-    /// IPA labels stay real, selectable text); PDF and TikZ arrive in later
-    /// slices. `tier_ids` selects which interval/point tiers to draw, in that
+    /// IPA labels stay real, selectable text) or `"pdf"` (a self-contained
+    /// vector PDF; its text is flattened to outlines). TikZ arrives in a later
+    /// slice. `tier_ids` selects which interval/point tiers to draw, in that
     /// order (default: all drawable tiers). `waveform` / `spectrogram` toggle
     /// the signal lanes; `window_ms` / `hop_ms` / `dynamic_range_db` /
     /// `colormap` control the spectrogram (colormap ∈ viridis, magma, hot,

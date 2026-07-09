@@ -6,6 +6,45 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-08 — G1.1: figure export to PDF (svg2pdf, feature-gated)
+
+The fast-follow to G1: the figure exporter now also writes **PDF**, across all
+three surfaces.
+
+**Engine.** `io::figure::to_pdf` renders `to_svg` then converts via **svg2pdf
+0.13** (usvg/resvg family, pure Rust — no system deps). usvg flattens the
+figure's `<text>` to outlines (so the PDF needs no font to *view*, at the cost
+of non-selectable text — the SVG keeps editable text) and decodes the embedded
+spectrogram PNG. The bundled Doulos SIL is loaded into usvg's fontdb directly so
+`Doulos SIL` always resolves. `Project::export_figure` gained the `"pdf"` branch;
+unknown formats (and `"pdf"` on a build without the feature) return an actionable
+error.
+
+**Feature-gated.** New engine feature **`figure-pdf`** (pulls `svg2pdf`), OFF by
+default so a bare `sadda-engine` stays lean, ON in the shipping artifacts (the
+app + the Python wheel). `cargo test`'s feature unification builds the engine
+with it, so the `to_pdf` test runs in CI.
+
+**Surfaces.** Python `export_figure(format="pdf")` just works; GUI adds File ▸
+Export ▸ **Publication figure (PDF)…** beside the SVG item (both share one
+helper).
+
+**Font subsetting — a useful finding.** svg2pdf's `subsetter` reduces the
+embedded font to only the used glyphs: a figure that is a **1.2 MB SVG** becomes
+a **25 KB PDF**, and — the thing I was wary of — the **IPA glyphs (ɹ, ɑ, ː)
+survive the subsetting intact** (verified by rasterising the PDF). That
+de-risks the queued SVG-subsetting refinement: the subsetter handles IPA
+correctly.
+
+**Verification.** Engine 11 figure tests (incl. `to_pdf` → valid `%PDF-`);
+Python 6 (incl. a self-contained-PDF assertion); workspace + `figure-pdf`
+`clippy -D warnings` + `fmt` clean; 562 workspace tests + 301 Python green.
+Visually validated: a sweep figure exported to PDF renders waveform +
+spectrogram + `p ɹ ɑː t` correctly.
+
+**Next:** figure-to-clipboard (rides on the resvg dep this added) · G2 TikZ · G3
+measure lanes · G4 heatmaps + style knobs · SVG font subsetting.
+
 ## 2026-07-08 — G1: first shippable publication figure (FigureSpec → SVG, three surfaces)
 
 The user-facing payoff of the figure-export strand: export a journal-ready

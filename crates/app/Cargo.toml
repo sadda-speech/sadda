@@ -19,7 +19,7 @@ path = "src/main.rs"
 # `download` (implies `ml`) lets the app fetch acoustic models via the engine's
 # `hf://` resolver for native forced alignment (A5); the fetch stays dormant
 # until network is explicitly allowed. `ml` alone still runs a locally-present model.
-sadda-engine = { path = "../engine", features = ["ml", "download"] }
+sadda-engine = { path = "../engine", features = ["ml", "download", "figure-pdf"] }
 # `persistence` enables the eframe Storage trait the welcome screen's
 # recent-projects list and the window-state restore both ride on.
 eframe = { version = "0.34", features = ["persistence"] }

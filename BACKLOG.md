@@ -160,11 +160,19 @@ _Designed 2026-07-01 (see DEVLOG design entry). `FigureSpec` IR in
   tested. **Deferred from G1:** PDF (see G1.1); the per-element checkbox dialog
   (menu exports the visible set for now); SVG font subsetting (full embed →
   ~1.2 MB SVGs). — _added 2026-07-01_
-- [ ] **G1.1 — figure export to PDF** — SVG→PDF via `svg2pdf` (feature-gated so
-  the base engine/wheel stay lean; the usvg/resvg tree is heavy). Wire the
-  `format="pdf"` path in `Project::export_figure` (today it raises an actionable
-  error) + Python + a GUI format choice. svg2pdf/krilla subsets embedded fonts,
-  so the PDF stays small even though the SVG embeds the full font. — _added 2026-07-08_
+- [x] **G1.1 — figure export to PDF** _(done 2026-07-08, feat/figure-export-g0)_ —
+  `io::figure::to_pdf` via **svg2pdf 0.13** behind the engine `figure-pdf` feature
+  (ON in the app + wheel, OFF for a bare engine). `Project::export_figure` `"pdf"`
+  branch + Python `format="pdf"` + GUI "Publication figure (PDF)…". svg2pdf
+  subsets the embedded font → **25 KB PDF vs 1.2 MB SVG**, IPA glyphs preserved.
+  — _added 2026-07-08_
+- [ ] **Figure → clipboard (GUI)** — a File ▸ Export ▸ "Copy figure to clipboard"
+  action for quick data-vis sharing (paste into Slack/docs/email). Must be a
+  **raster** (clipboard SVG is unsupported by most targets): `to_svg` → `resvg`
+  render to an RGBA pixmap → `arboard::set_image`. Rides on the resvg/usvg tree
+  G1.1 already pulled in (via svg2pdf's `resvg` feature) + a new `arboard` dep;
+  ~30 lines. GUI-only (image-clipboard isn't a natural Python workflow). Verify
+  image-clipboard works under WSLg on the target box. — _added 2026-07-08_
 - [ ] **G1 refinements — SVG font subsetting + per-element export dialog** —
   (1) subset the embedded Doulos SIL to the glyphs a figure uses (tens of KB vs
   the current full-font ~1.2 MB embed); validate no IPA glyph/diacritic is

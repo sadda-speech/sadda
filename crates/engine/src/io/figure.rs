@@ -298,6 +298,31 @@ pub fn to_svg(spec: &FigureSpec) -> String {
     out
 }
 
+/// Serializes a [`FigureSpec`] to a **PDF** (via SVG → `svg2pdf`). Requires the
+/// `figure-pdf` feature (the app and Python wheel enable it).
+///
+/// `usvg` flattens the figure's `<text>` to vector outlines — so the PDF is
+/// fully self-contained (no font dependency to *view*) at the cost of the text
+/// no longer being selectable, unlike the SVG — and decodes the embedded
+/// spectrogram PNG. The bundled Doulos SIL is loaded into the font database
+/// directly so `Doulos SIL` always resolves, independent of the consumer's
+/// `@font-face` handling.
+#[cfg(feature = "figure-pdf")]
+pub fn to_pdf(spec: &FigureSpec) -> Result<Vec<u8>, String> {
+    use svg2pdf::usvg;
+    let svg = to_svg(spec);
+    let mut options = usvg::Options::default();
+    options.fontdb_mut().load_font_data(DOULOS_SIL_TTF.to_vec());
+    let tree = usvg::Tree::from_str(&svg, &options)
+        .map_err(|e| format!("figure PDF: SVG parse failed: {e}"))?;
+    svg2pdf::to_pdf(
+        &tree,
+        svg2pdf::ConversionOptions::default(),
+        svg2pdf::PageOptions::default(),
+    )
+    .map_err(|e| format!("figure PDF: conversion failed: {e}"))
+}
+
 /// Emits the `<defs>` block embedding the Doulos SIL font via a base64
 /// `@font-face`, so every `<text>` renders in it without an external file.
 fn embed_font_defs() -> String {
@@ -949,6 +974,14 @@ mod tests {
         assert!(svg.contains(">events</text>"));
         assert!(svg.contains(">praat</text>")); // title
         assert!(svg.contains("Hz")); // spectrogram freq axis
+    }
+
+    #[cfg(feature = "figure-pdf")]
+    #[test]
+    fn to_pdf_produces_a_valid_pdf() {
+        let pdf = to_pdf(&sample_spec()).expect("pdf conversion");
+        assert!(pdf.starts_with(b"%PDF-"), "output should be a PDF");
+        assert!(pdf.len() > 1000, "PDF looks too small to be real");
     }
 
     #[test]
