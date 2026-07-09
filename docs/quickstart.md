@@ -106,7 +106,7 @@ times, freqs, voicing = sadda.dsp.voiced_pitch(
     frame_size_seconds=0.030,
     hop_size_seconds=0.010,
     min_freq_hz=75.0,
-    max_freq_hz=500.0,
+    max_freq_hz=600.0,
 )
 
 formants = sadda.dsp.formants(audio, n_formants=4)

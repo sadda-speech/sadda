@@ -100,7 +100,7 @@ impl PyPitchParams {
     /// octave-robust tracker. (Named constructor parallel to
     /// `MfccParams.librosa`; method-specific knobs keep Praat's defaults.)
     #[staticmethod]
-    #[pyo3(signature = (frame_size_seconds=0.030, hop_size_seconds=0.010, min_freq_hz=75.0, max_freq_hz=500.0, voicing_threshold=0.45))]
+    #[pyo3(signature = (frame_size_seconds=0.030, hop_size_seconds=0.010, min_freq_hz=75.0, max_freq_hz=600.0, voicing_threshold=0.45))]
     fn boersma(
         frame_size_seconds: f32,
         hop_size_seconds: f32,
@@ -120,7 +120,7 @@ impl PyPitchParams {
 
     /// de Cheveigné & Kawahara 2002 YIN.
     #[staticmethod]
-    #[pyo3(signature = (frame_size_seconds=0.030, hop_size_seconds=0.010, min_freq_hz=75.0, max_freq_hz=500.0, voicing_threshold=0.45))]
+    #[pyo3(signature = (frame_size_seconds=0.030, hop_size_seconds=0.010, min_freq_hz=75.0, max_freq_hz=600.0, voicing_threshold=0.45))]
     fn yin(
         frame_size_seconds: f32,
         hop_size_seconds: f32,
@@ -140,7 +140,7 @@ impl PyPitchParams {
 
     /// Mauch & Dixon 2014 pYIN (librosa's default).
     #[staticmethod]
-    #[pyo3(signature = (frame_size_seconds=0.030, hop_size_seconds=0.010, min_freq_hz=75.0, max_freq_hz=500.0, voicing_threshold=0.45))]
+    #[pyo3(signature = (frame_size_seconds=0.030, hop_size_seconds=0.010, min_freq_hz=75.0, max_freq_hz=600.0, voicing_threshold=0.45))]
     fn pyin(
         frame_size_seconds: f32,
         hop_size_seconds: f32,
@@ -160,7 +160,7 @@ impl PyPitchParams {
 
     /// Camacho & Harris 2008 SWIPE′.
     #[staticmethod]
-    #[pyo3(signature = (frame_size_seconds=0.030, hop_size_seconds=0.010, min_freq_hz=75.0, max_freq_hz=500.0, voicing_threshold=0.45))]
+    #[pyo3(signature = (frame_size_seconds=0.030, hop_size_seconds=0.010, min_freq_hz=75.0, max_freq_hz=600.0, voicing_threshold=0.45))]
     fn swipe(
         frame_size_seconds: f32,
         hop_size_seconds: f32,

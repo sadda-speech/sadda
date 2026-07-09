@@ -25,7 +25,7 @@
 //! - [`yin`] — de Cheveigné & Kawahara 2002. Difference function +
 //!   CMNDF + absolute threshold. Simple baseline; the canonical
 //!   non-autocorrelation tracker.
-//! - [`pyin`] — Mauch & Dixon 2014, librosa's default. Probabilistic
+//! - [`pyin`] — Mauch & Dixon 2014, the tracker librosa popularized. Probabilistic
 //!   YIN with a beta-prior distribution over thresholds plus an HMM
 //!   smoothing pass (semitone-distance transition + voicing-toggle
 //!   cost). The modern Python-DSP audience expectation. Validated
@@ -121,8 +121,14 @@ pub enum PitchMethod {
 /// Configuration for the pitch trackers.
 ///
 /// The `boersma_*` fields are only read by [`PitchMethod::Boersma`]; the
-/// other methods ignore them. Defaults match Praat 6.x's
-/// `Sound: To Pitch (ac)…` parameters.
+/// other methods ignore them. The floor (75 Hz), ceiling (600 Hz), and every
+/// `boersma_*` cost match Praat 6.x's `Sound: To Pitch (ac)…` defaults
+/// (verified against the Praat manual). The frame/hop are sadda's own fixed,
+/// cross-method window rather than Praat's floor-derived values: Praat's `(ac)`
+/// auto-derives a 3-period analysis window (≈ 3/floor) and a 0.75/floor time
+/// step from the pitch floor, whereas sadda uses a single fixed frame/hop
+/// shared by every tracker (the default 10 ms hop coincides with Praat's
+/// 0.75/floor at the default 75 Hz floor).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PitchConfig {
     /// Analysis frame length in seconds.
@@ -168,22 +174,24 @@ pub struct PitchConfig {
     /// weights are summed per unique τ to produce the per-frame
     /// probability distribution. Default 100 (matches librosa's pyin).
     pub pyin_n_thresholds: usize,
-    /// pYIN: HMM transition penalty (cost per semitone) between two
-    /// voiced bins. Higher = smoother f0 contour, more octave-jump
-    /// resistance. Default 0.5 — chosen so a one-semitone step costs
-    /// the same as the Boersma `octave_jump_cost` at one semitone.
+    /// pYIN: standard deviation (in semitones) of the Gaussian that scores the
+    /// frequency transition between two voiced bins; smaller σ = smoother f0
+    /// contour. Default 0.5. sadda parameterizes the frequency transition as a
+    /// Gaussian on semitone distance — the same idiom as its Boersma Viterbi
+    /// tracker — rather than porting librosa's `max_transition_rate` (a cap on
+    /// semitones-per-second, coupled to the frame rate); a direct σ reuses
+    /// sadda's shared semitone-distance HMM machinery.
     pub pyin_transition_semitone_cost: f32,
-    /// pYIN: HMM cost of toggling between the voiced and unvoiced
-    /// states between consecutive frames. Default 0.05 — librosa's
-    /// pYIN keeps `switch_prob` small so the smoother prefers staying
-    /// in the same voicing state.
+    /// pYIN: HMM cost of toggling between the voiced and unvoiced states
+    /// between consecutive frames, read as a switch probability. Default 0.01,
+    /// matching librosa's pYIN `switch_prob` default.
     pub pyin_voiced_unvoiced_cost: f32,
     /// pYIN: number of semitone bins between [`PitchConfig::min_freq_hz`]
     /// and [`PitchConfig::max_freq_hz`] for the HMM state space.
-    /// Default 20 bins per semitone (librosa's pyin default = `bins_per_semitone=12`
-    /// times a 12-semitone band). A finer grid gives sharper Viterbi
-    /// decoding at the cost of HMM runtime; the default is a moderate
-    /// trade-off.
+    /// Default 20 bins per semitone — a finer grid than librosa's pyin, whose
+    /// `resolution=0.1` semitone works out to ~10 bins per semitone. A finer
+    /// grid gives sharper Viterbi decoding at the cost of HMM runtime; the
+    /// default is a moderate trade-off.
     pub pyin_bins_per_semitone: usize,
 }
 
@@ -193,7 +201,7 @@ impl Default for PitchConfig {
             frame_size_seconds: 0.030,
             hop_size_seconds: 0.010,
             min_freq_hz: 75.0,
-            max_freq_hz: 500.0,
+            max_freq_hz: 600.0,
             voicing_threshold: 0.45,
             boersma_max_candidates: 15,
             boersma_silence_threshold: 0.03,
@@ -203,7 +211,7 @@ impl Default for PitchConfig {
             yin_threshold: 0.1,
             pyin_n_thresholds: 100,
             pyin_transition_semitone_cost: 0.5,
-            pyin_voiced_unvoiced_cost: 0.05,
+            pyin_voiced_unvoiced_cost: 0.01,
             pyin_bins_per_semitone: 20,
         }
     }
@@ -1209,8 +1217,8 @@ fn yin_pick_lag(cmndf: &[f32], min_lag: usize, max_lag: usize, threshold: f32) -
 }
 
 /// Estimates f0 using Mauch & Dixon 2014 pYIN — probabilistic YIN with
-/// HMM smoothing. librosa's default; the modern Python-DSP audience
-/// expectation.
+/// HMM smoothing. The tracker librosa's `pyin` popularized, and the modern
+/// Python-DSP audience expectation.
 ///
 /// **Pipeline:**
 /// 1. Per frame: compute CMNDF (same as YIN).
@@ -1238,10 +1246,22 @@ fn yin_pick_lag(cmndf: &[f32], min_lag: usize, max_lag: usize, threshold: f32) -
 ///    of (voicing, bin) per frame. Voicing strength reported = the
 ///    summed voiced probability at the chosen bin in the emission row.
 ///
-/// Defaults match librosa.pyin's recommended values:
-/// `n_thresholds = 100`, `pyin_voiced_unvoiced_cost = 0.05` (switch
-/// probability), `pyin_transition_semitone_cost = 0.5` (Gaussian σ in
-/// semitones), `pyin_bins_per_semitone = 20`.
+/// This is a reimplementation of the Mauch & Dixon algorithm, close to
+/// librosa.pyin but not a bit-for-bit port. It shares librosa's beta(2, 18)
+/// threshold prior, `n_thresholds = 100`, and (as of the params alignment) its
+/// `switch_prob = 0.01`. Since this is offered *as* pYIN, faithfully matching
+/// librosa is the goal; two defaults still differ and are pending alignment:
+///
+/// - **Frequency-transition model.** sadda scores frequency transitions with a
+///   Gaussian on semitone distance (σ = `pyin_transition_semitone_cost = 0.5`),
+///   reusing its Boersma Viterbi tracker's idiom, rather than porting librosa's
+///   `max_transition_rate` cap — a different parameterization of the same
+///   "penalize big jumps" idea.
+/// - **Grid resolution.** `pyin_bins_per_semitone = 20` is a finer state grid
+///   than librosa's `resolution = 0.1` semitone (~10 bins/semitone).
+///
+/// Validated against librosa goldens to within a small median-f0 tolerance
+/// (the `pitch_yin_pyin` test), not bit-for-bit.
 pub fn pyin(audio: &Audio, config: &PitchConfig) -> Vec<PitchFrame> {
     let mono: Vec<f32> = audio.mono_samples().collect();
     let sample_rate = audio.sample_rate as f32;
