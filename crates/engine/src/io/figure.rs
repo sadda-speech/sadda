@@ -1533,17 +1533,21 @@ fn build_measure_lanes(
 
     if opts.include_f0 {
         let audio = crate::audio::Audio::from_samples(samples.to_vec(), sample_rate, 1);
-        let frames = crate::pitch::autocorrelation(&audio, &crate::pitch::PitchConfig::default());
+        // Boersma (octave cost + Viterbi path-finding) rather than raw
+        // autocorrelation — the latter's octave-doubling errors inflated the
+        // data-driven f0 axis.
+        let frames = crate::pitch::pitch(
+            &audio,
+            &crate::pitch::PitchConfig::default(),
+            crate::pitch::PitchMethod::Boersma,
+        );
         // Voiced runs → segments (break the contour across unvoiced frames).
         let mut segments: Vec<Vec<(f64, f64)>> = Vec::new();
         let mut cur: Vec<(f64, f64)> = Vec::new();
-        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
         for fr in &frames {
             let v = fr.frequency_hz.value() as f64;
             if fr.voicing >= 0.5 && v > 0.0 {
                 cur.push((fr.time_seconds, v));
-                lo = lo.min(v);
-                hi = hi.max(v);
             } else if !cur.is_empty() {
                 segments.push(std::mem::take(&mut cur));
             }
@@ -1552,8 +1556,16 @@ fn build_measure_lanes(
             segments.push(cur);
         }
         if segments.iter().any(|s| !s.is_empty()) {
-            let (lo, hi) = if lo.is_finite() && hi > lo {
-                ((lo * 0.9).floor(), (hi * 1.1).ceil())
+            // Robust axis: the 5th–95th percentile of voiced f0 (padded), so a
+            // stray octave-error frame can't blow the range up. Falls back to a
+            // speech-typical window when there are too few points.
+            let mut voiced: Vec<f64> = segments.iter().flatten().map(|&(_, v)| v).collect();
+            voiced.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let (lo, hi) = if voiced.len() >= 8 {
+                let pct = |p: f64| voiced[((voiced.len() - 1) as f64 * p).round() as usize];
+                let lo = (pct(0.05) * 0.9).floor();
+                let hi = (pct(0.95) * 1.1).ceil();
+                if hi > lo { (lo, hi) } else { (75.0, 500.0) }
             } else {
                 (75.0, 500.0)
             };
@@ -2065,6 +2077,14 @@ mod tests {
         assert!(names.contains(&"intensity"), "got {names:?}");
         // A clean 150 Hz sine should track as voiced f0.
         assert!(names.contains(&"f0"), "got {names:?}");
+        // The robust (percentile) axis brackets 150 Hz rather than blowing up on
+        // an octave-error frame.
+        let f0 = spec.measures.iter().find(|m| m.name == "f0").unwrap();
+        assert!(
+            f0.y_range.0 <= 150.0 && f0.y_range.1 >= 150.0 && f0.y_range.1 < 400.0,
+            "f0 axis {:?} should bracket 150 Hz tightly",
+            f0.y_range
+        );
         // The lanes render (names + a polyline) in both backends.
         let svg = to_svg(&spec);
         assert!(svg.contains(">intensity</text>"));

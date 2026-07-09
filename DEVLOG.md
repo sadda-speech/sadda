@@ -6,6 +6,18 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-09 — Figure refinements (post-G-series)
+
+Picking off the figure-export backlog refinements. Running log:
+
+- **f0 octave robustness.** `build_measure_lanes` now tracks f0 with
+  **Boersma** (`pitch(..., PitchMethod::Boersma)` — octave cost + Viterbi)
+  instead of raw autocorrelation, and computes the lane's y-axis from the
+  **5th–95th percentile** of voiced values (padded) rather than raw min/max — so
+  a stray octave-error frame can't blow the axis up. Verified on a clean harmonic
+  voice: a 130–170 Hz contour now yields a tight ~70–198 Hz axis (was inflated
+  before). Engine test asserts the axis brackets 150 Hz.
+
 ## 2026-07-08 — G4: heatmap lanes (MFCC) + style knobs — completes the G-series
 
 The last G-series slice: an **MFCC heatmap lane** and the first **style knobs**,
