@@ -174,8 +174,15 @@ _Designed 2026-07-01 (see DEVLOG design entry). `FigureSpec` IR in
   verified; the `set_image` link isn't). — _added 2026-07-08_
 - [ ] **G1 refinements — SVG font subsetting + per-element export dialog** —
   (1) subset the embedded Doulos SIL to the glyphs a figure uses (tens of KB vs
-  the current full-font ~1.2 MB embed); validate no IPA glyph/diacritic is
-  dropped. (2) A proper export dialog with per-element include checkboxes
+  the current full-font ~1.2 MB embed). **Blocked on tooling (investigated
+  2026-07-09):** the in-tree `subsetter` (0.2.6, via svg2pdf) *drops the cmap*
+  by design — it's PDF-oriented, where glyphs are referenced by id — so its
+  output can't back an SVG `<text>` (no char→glyph map). Needs either a
+  cmap-preserving/web-font subsetter (new dep, e.g. a `fonttools`-style subset)
+  or outlining `<text>` to `<path>` (rejected — loses the editable-text
+  property the full embed was chosen for). PDF/TikZ are unaffected (svg2pdf
+  already subsets; TikZ uses a system font). Revisit if SVG size becomes a real
+  complaint. (2) A proper export dialog with per-element include checkboxes
   (waveform/spectrogram/each tier) + width/colormap/title, defaulting from
   `visible_lanes()`, replacing the current "export what's visible" menu item. —
   _added 2026-07-08_
