@@ -2751,6 +2751,69 @@ impl SaddaApp {
         }
     }
 
+    /// Renders the active bundle's figure (the on-screen lanes, per
+    /// [`Self::export_figure_for_active_bundle`]) to a raster and puts it on the
+    /// system clipboard as an image — for quick sharing (paste into a chat, doc,
+    /// or slide) without a save-file round-trip. Clipboard images must be
+    /// raster, not SVG, so this rasterises the same figure the exporter builds.
+    fn copy_figure_to_clipboard(&mut self) {
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return;
+        };
+        let lanes = self.persisted.visible_lanes();
+        let sc = self.persisted.spectrogram;
+        let hidden = self.persisted.hidden_tier_ids.clone();
+        let opts = sadda_engine::io::figure::FigureExportOptions {
+            title: None,
+            include_waveform: lanes.waveform,
+            include_spectrogram: lanes.spectrogram,
+            width: sadda_engine::io::figure::FigureStyle::default().width,
+            window_ms: sc.window_ms,
+            hop_ms: sc.hop_ms,
+            dynamic_range_db: sc.dynamic_range_db,
+            colormap: sc.colormap,
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        let tier_ids: Option<Vec<i64>> = if lanes.tier_strip {
+            Some(
+                project
+                    .tiers(Some(bundle_id))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|t| !hidden.contains(&t.id))
+                    .map(|t| t.id)
+                    .collect(),
+            )
+        } else {
+            Some(Vec::new())
+        };
+        let rendered = project.render_figure_rgba(bundle_id, tier_ids.as_deref(), &opts);
+        let (w, h, rgba) = match rendered {
+            Ok(v) => v,
+            Err(e) => {
+                self.set_error(format!("Copy figure failed: {e}"));
+                return;
+            }
+        };
+        // Hand the bitmap to the OS clipboard.
+        let result = arboard::Clipboard::new().and_then(|mut cb| {
+            cb.set_image(arboard::ImageData {
+                width: w as usize,
+                height: h as usize,
+                bytes: std::borrow::Cow::Owned(rgba),
+            })
+        });
+        match result {
+            Ok(()) => {
+                self.error = None;
+                self.set_info("Copied figure to clipboard".to_string());
+            }
+            Err(e) => self.set_error(format!("Copy figure failed: {e}")),
+        }
+    }
+
     /// Pops a save-file dialog defaulting to the project's
     /// `exports/` directory + the active bundle's name + the
     /// requested extension. Returns `None` if the user cancels.
@@ -10540,6 +10603,17 @@ impl SaddaApp {
                         if let Some(path) = self.suggest_export_path("pdf") {
                             self.export_figure_for_active_bundle(path, "pdf");
                         }
+                    }
+                    if ui
+                        .button("Copy figure to clipboard")
+                        .on_hover_text(
+                            "Render the on-screen figure to an image and copy it — paste \
+                             into a chat, doc, or slide",
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        self.copy_figure_to_clipboard();
                     }
                 });
                 if !export_enabled {

@@ -5642,10 +5642,7 @@ impl Project {
                  TikZ arrives in a later slice"
             )));
         }
-        let audio = self.load_audio(bundle_id)?;
-        let samples: Vec<f32> = audio.mono_samples().collect();
-        let tiers = self.gather_figure_tiers(bundle_id, tier_ids)?;
-        let spec = crate::io::figure::build_spec(&samples, audio.sample_rate, tiers, opts);
+        let spec = self.figure_spec_for_bundle(bundle_id, tier_ids, opts)?;
 
         let bytes: Vec<u8> = if is_svg {
             crate::io::figure::to_svg(&spec).into_bytes()
@@ -5714,6 +5711,42 @@ impl Project {
             });
         }
         Ok(out)
+    }
+
+    /// Builds a [`crate::io::figure::FigureSpec`] for `bundle_id` — loads the
+    /// audio, gathers the drawable tiers, and assembles the lanes. Shared by
+    /// [`Self::export_figure`] and [`Self::render_figure_rgba`].
+    fn figure_spec_for_bundle(
+        &self,
+        bundle_id: i64,
+        tier_ids: Option<&[i64]>,
+        opts: &crate::io::figure::FigureExportOptions,
+    ) -> Result<crate::io::figure::FigureSpec> {
+        let audio = self.load_audio(bundle_id)?;
+        let samples: Vec<f32> = audio.mono_samples().collect();
+        let tiers = self.gather_figure_tiers(bundle_id, tier_ids)?;
+        Ok(crate::io::figure::build_spec(
+            &samples,
+            audio.sample_rate,
+            tiers,
+            opts,
+        ))
+    }
+
+    /// Rasterises a publication figure of `bundle_id` to an `(width, height,
+    /// rgba)` bitmap (straight RGBA8, row-major) — for the GUI's
+    /// figure→clipboard action, where the clipboard needs a raster, not SVG.
+    /// Requires the engine `figure-pdf` feature (the app enables it). Same
+    /// lanes / tiers / options as [`Self::export_figure`].
+    #[cfg(feature = "figure-pdf")]
+    pub fn render_figure_rgba(
+        &self,
+        bundle_id: i64,
+        tier_ids: Option<&[i64]>,
+        opts: &crate::io::figure::FigureExportOptions,
+    ) -> Result<(u32, u32, Vec<u8>)> {
+        let spec = self.figure_spec_for_bundle(bundle_id, tier_ids, opts)?;
+        crate::io::figure::to_rgba(&spec).map_err(EngineError::Corpus)
     }
 
     /// Imports an ELAN `.eaf` into `bundle_id`. Each EAF tier becomes a

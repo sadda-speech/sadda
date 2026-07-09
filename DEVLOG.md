@@ -6,6 +6,38 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-08 — Figure → clipboard (GUI): rasterise + copy for quick sharing
+
+A small GUI convenience riding on the resvg tree G1.1 pulled in: **File ▸ Export
+▸ Copy figure to clipboard** puts a bitmap of the on-screen figure on the system
+clipboard, so it pastes straight into a chat / doc / slide with no save-file
+round-trip.
+
+**Why raster.** The clipboard can't reliably carry SVG (most paste targets want
+a bitmap), so the figure is rasterised: `io::figure::to_rgba` renders `to_svg`
+via **resvg** into a straight-RGBA8 bitmap; `Project::render_figure_rgba` builds
+the spec (shared with `export_figure` via a new `figure_spec_for_bundle` helper)
+and rasterises. The app hands the bytes to `arboard::Clipboard::set_image`.
+Both engine bits are behind the `figure-pdf` feature (renamed in spirit to cover
+all rich figure output); the copy action mirrors the SVG/PDF export's "what's on
+screen" defaults.
+
+**Bug caught by looking.** First cut built `resvg` with `default-features =
+false, features = ["text"]` — which silently **dropped the spectrogram** (the
+embedded PNG `<image>` needs resvg's `raster-images` feature to decode). The
+PDF path had hidden it, since svg2pdf's own `image` feature handled the raster.
+Dumping the RGBA to a PNG showed the blank spectrogram lane; adding
+`raster-images` fixed it. Re-verified: the bitmap now has waveform + viridis
+spectrogram + `p ɹ ɑː t` — and resvg renders the IPA correctly from the loaded
+Doulos font.
+
+**Caveat.** The RGBA render is verified (engine test + eyeballed PNG); the actual
+OS clipboard hand-off (`arboard::set_image`) needs a hands-on check under WSLg —
+image-clipboard behaviour there is the untested link.
+
+**Verification.** Engine 12 figure tests (incl. `to_rgba` dimensions/opacity);
+workspace `clippy -D warnings` + `fmt` clean.
+
 ## 2026-07-08 — G1.1: figure export to PDF (svg2pdf, feature-gated)
 
 The fast-follow to G1: the figure exporter now also writes **PDF**, across all

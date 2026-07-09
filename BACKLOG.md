@@ -166,13 +166,12 @@ _Designed 2026-07-01 (see DEVLOG design entry). `FigureSpec` IR in
   branch + Python `format="pdf"` + GUI "Publication figure (PDF)…". svg2pdf
   subsets the embedded font → **25 KB PDF vs 1.2 MB SVG**, IPA glyphs preserved.
   — _added 2026-07-08_
-- [ ] **Figure → clipboard (GUI)** — a File ▸ Export ▸ "Copy figure to clipboard"
-  action for quick data-vis sharing (paste into Slack/docs/email). Must be a
-  **raster** (clipboard SVG is unsupported by most targets): `to_svg` → `resvg`
-  render to an RGBA pixmap → `arboard::set_image`. Rides on the resvg/usvg tree
-  G1.1 already pulled in (via svg2pdf's `resvg` feature) + a new `arboard` dep;
-  ~30 lines. GUI-only (image-clipboard isn't a natural Python workflow). Verify
-  image-clipboard works under WSLg on the target box. — _added 2026-07-08_
+- [x] **Figure → clipboard (GUI)** _(done 2026-07-08, feat/figure-export-g0)_ —
+  File ▸ Export ▸ Copy figure to clipboard. `io::figure::to_rgba` (resvg) +
+  `Project::render_figure_rgba` (behind `figure-pdf`) + `arboard::set_image`.
+  Needed resvg's `raster-images` feature so the spectrogram PNG decodes. **Still
+  to confirm hands-on:** the OS clipboard hand-off under WSLg (RGBA render is
+  verified; the `set_image` link isn't). — _added 2026-07-08_
 - [ ] **G1 refinements — SVG font subsetting + per-element export dialog** —
   (1) subset the embedded Doulos SIL to the glyphs a figure uses (tens of KB vs
   the current full-font ~1.2 MB embed); validate no IPA glyph/diacritic is

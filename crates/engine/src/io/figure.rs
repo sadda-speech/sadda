@@ -323,6 +323,34 @@ pub fn to_pdf(spec: &FigureSpec) -> Result<Vec<u8>, String> {
     .map_err(|e| format!("figure PDF: conversion failed: {e}"))
 }
 
+/// Rasterises a [`FigureSpec`] to an `(width, height, rgba)` bitmap (via SVG →
+/// `resvg`). Requires the `figure-pdf` feature. Used by the GUI's
+/// figure→clipboard action (clipboard images must be raster, not SVG).
+///
+/// The bytes are straight (un-premultiplied) RGBA8, row-major; the figure's own
+/// opaque background means alpha is `255` throughout, so premultiplied and
+/// straight coincide.
+#[cfg(feature = "figure-pdf")]
+pub fn to_rgba(spec: &FigureSpec) -> Result<(u32, u32, Vec<u8>), String> {
+    use resvg::tiny_skia;
+    use resvg::usvg;
+    let svg = to_svg(spec);
+    let mut options = usvg::Options::default();
+    options.fontdb_mut().load_font_data(DOULOS_SIL_TTF.to_vec());
+    let tree = usvg::Tree::from_str(&svg, &options)
+        .map_err(|e| format!("figure raster: SVG parse failed: {e}"))?;
+    let size = tree.size().to_int_size();
+    let (w, h) = (size.width(), size.height());
+    let mut pixmap =
+        tiny_skia::Pixmap::new(w, h).ok_or_else(|| "figure raster: invalid size".to_string())?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
+    Ok((w, h, pixmap.take()))
+}
+
 /// Emits the `<defs>` block embedding the Doulos SIL font via a base64
 /// `@font-face`, so every `<text>` renders in it without an external file.
 fn embed_font_defs() -> String {
@@ -982,6 +1010,19 @@ mod tests {
         let pdf = to_pdf(&sample_spec()).expect("pdf conversion");
         assert!(pdf.starts_with(b"%PDF-"), "output should be a PDF");
         assert!(pdf.len() > 1000, "PDF looks too small to be real");
+    }
+
+    #[cfg(feature = "figure-pdf")]
+    #[test]
+    fn to_rgba_rasterises_to_the_svg_dimensions() {
+        let spec = sample_spec();
+        let (w, h, rgba) = to_rgba(&spec).expect("raster");
+        assert!(w > 0 && h > 0);
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        // The figure has an opaque white background → every pixel opaque.
+        assert!(rgba.chunks_exact(4).all(|px| px[3] == 255));
+        // Width matches the style width (the SVG viewBox width).
+        assert_eq!(w, spec.style.width as u32);
     }
 
     #[test]

@@ -22,12 +22,13 @@ ml = ["dep:ort", "dep:libloading"]
 # models to run them) and pulls `ureq` (rustls TLS, fully sync, no async
 # runtime). See the 2026-05-27 E12 network-spike DEVLOG entry.
 download = ["ml", "dep:ureq"]
-# G1.1 figure export to PDF (io::figure::to_pdf). Pulls svg2pdf (usvg/resvg
-# tree — pure Rust, no runtime/system deps, but a heavy compile), so it's OFF
-# by default to keep a bare `sadda-engine` lean. The shipping artifacts (the
-# app + the Python wheel) turn it on; without it, PDF export returns an
-# actionable error.
-figure-pdf = ["dep:svg2pdf"]
+# G1.1 figure export to PDF + G-series figure rasterisation (io::figure::to_pdf
+# / to_rgba). Pulls the svg2pdf + resvg tree (usvg-based, pure Rust, no runtime
+# /system deps, but a heavy compile), so it's OFF by default to keep a bare
+# `sadda-engine` lean. The shipping artifacts (the app + the Python wheel) turn
+# it on; without it, PDF export returns an actionable error and the raster path
+# is absent. (Named for its first use; also gates SVG→RGBA for figure→clipboard.)
+figure-pdf = ["dep:svg2pdf", "dep:resvg"]
 # Throwaway perf-spike code (compositional-DSP benchmark in dsp::mfcc::spike +
 # benches/). OFF by default so it is NEVER compiled into the app or wheel;
 # enabled only by `just bench`. Holdout-code convention — see DEVLOG / CONTRIBUTING.
@@ -51,6 +52,12 @@ png = "0.17"
 # usvg flattens the figure's <text> to paths and decodes the embedded PNG
 # raster. Off by default — see the `figure-pdf` feature.
 svg2pdf = { version = "0.13", optional = true, default-features = false, features = ["text", "image"] }
+# SVG → RGBA rasterisation for figure→clipboard (feature = "figure-pdf"). Same
+# usvg/tiny-skia tree svg2pdf pulls in; re-exports usvg + tiny_skia so no extra
+# direct deps. `raster-images` is required so the embedded spectrogram PNG
+# `<image>` actually decodes (without it the spectrogram lane silently drops).
+# Version tracks svg2pdf's usvg (0.45).
+resvg = { version = "0.45", optional = true, default-features = false, features = ["text", "raster-images"] }
 # E11 ML inference (feature = "ml"). load-dynamic: no build-time ORT
 # download/link; the runtime ONNX Runtime is resolved at load time.
 ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = ["load-dynamic", "ndarray"] }

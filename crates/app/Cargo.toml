@@ -26,6 +26,10 @@ eframe = { version = "0.34", features = ["persistence"] }
 egui_plot = "0.35"
 rfd = "0.17"
 serde = { version = "1", features = ["derive"] }
+# Figure→clipboard (G-series): put a rasterised figure on the system clipboard
+# as an image. Already in the tree via eframe; declared directly so the copy
+# action can call `Clipboard::set_image`.
+arboard = "3"
 # C5 audio playback uses cpal's *output* side (same crate version
 # the engine + python crate already pull in for E1's input path).
 cpal = "0.17"
