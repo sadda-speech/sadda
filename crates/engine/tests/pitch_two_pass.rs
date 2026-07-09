@@ -8,9 +8,9 @@ use std::path::PathBuf;
 
 use sadda_engine::Audio;
 use sadda_engine::pitch::{
-    ADAPTIVE_MIN_VOICED, PitchConfig, PitchFrame, PitchMethod, TWO_PASS_CEILING_HZ,
-    TWO_PASS_FLOOR_HZ, estimate_pitch_range, pooled_pitch_range, two_pass_pitch,
-    voiced_f0_quantiles,
+    ADAPTIVE_MIN_VOICED, PitchConfig, PitchFrame, PitchMethod, RecordingF0Summary,
+    TWO_PASS_CEILING_HZ, TWO_PASS_FLOOR_HZ, empirical_bayes_pitch_ranges, estimate_pitch_range,
+    pitch_range_from_quartiles, pooled_pitch_range, two_pass_pitch, voiced_f0_quantiles,
 };
 use sadda_engine::units::Hertz;
 
@@ -172,4 +172,71 @@ fn pooled_range_none_when_pooled_voicing_sparse() {
     let a: Vec<PitchFrame> = (0..3).map(|i| frame(120.0, 1.0, i)).collect();
     let b: Vec<PitchFrame> = (0..3).map(|i| frame(130.0, 1.0, i)).collect();
     assert!(pooled_pitch_range(&[a, b], 0.45).is_none());
+}
+
+#[test]
+fn empirical_bayes_shrinks_short_recordings_toward_the_speaker() {
+    // Two well-sampled recordings at a consistent register + one short outlier
+    // with extreme quartiles. Empirical Bayes should pull the short outlier
+    // strongly toward the speaker while barely moving the well-sampled ones.
+    let recs = [
+        RecordingF0Summary {
+            q25: 100.0,
+            q75: 200.0,
+            n_voiced: 1000,
+        },
+        RecordingF0Summary {
+            q25: 100.0,
+            q75: 200.0,
+            n_voiced: 1000,
+        },
+        RecordingF0Summary {
+            q25: 60.0,
+            q75: 400.0,
+            n_voiced: 10,
+        },
+    ];
+    let out = empirical_bayes_pitch_ranges(&recs);
+
+    // Well-sampled recording ≈ its own two-pass range (minimal shrinkage).
+    let raw0 = pitch_range_from_quartiles(100.0, 200.0);
+    assert!(
+        (out[0].0 - raw0.0).abs() < 3.0 && (out[0].1 - raw0.1).abs() < 3.0,
+        "well-sampled should barely shrink: {:?} vs raw {raw0:?}",
+        out[0]
+    );
+
+    // The short outlier is pulled far in from its raw (0.75·60, 1.5·400) toward
+    // the speaker, and ends up ≈ the well-sampled range (borrowed strength).
+    let raw2 = pitch_range_from_quartiles(60.0, 400.0);
+    assert!(
+        out[2].0 > raw2.0 + 15.0,
+        "outlier floor should rise from {}",
+        raw2.0
+    );
+    assert!(
+        out[2].1 < raw2.1 - 100.0,
+        "outlier ceiling should fall from {}",
+        raw2.1
+    );
+    assert!(
+        (out[2].0 - out[0].0).abs() < 5.0 && (out[2].1 - out[0].1).abs() < 5.0,
+        "outlier EB range should ≈ the speaker range: {:?} vs {:?}",
+        out[2],
+        out[0]
+    );
+}
+
+#[test]
+fn empirical_bayes_single_recording_is_unshrunk() {
+    // One recording can't be pooled — it keeps its own two-pass range.
+    let recs = [RecordingF0Summary {
+        q25: 90.0,
+        q75: 210.0,
+        n_voiced: 500,
+    }];
+    assert_eq!(
+        empirical_bayes_pitch_ranges(&recs),
+        vec![pitch_range_from_quartiles(90.0, 210.0)]
+    );
 }

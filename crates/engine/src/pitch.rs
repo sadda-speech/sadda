@@ -402,6 +402,97 @@ pub fn pooled_pitch_range(
     Some(pitch_range_from_quartiles(q[0], q[1]))
 }
 
+/// A recording's voiced-f0 summary for the empirical-Bayes speaker estimator:
+/// its first/third quartiles (from a wide first pass) and the voiced-frame count
+/// they were computed from (the reliability weight).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecordingF0Summary {
+    /// First quartile (q25) of the recording's voiced f0, in Hz.
+    pub q25: f32,
+    /// Third quartile (q75) of the recording's voiced f0, in Hz.
+    pub q75: f32,
+    /// Number of voiced frames the quartiles were computed from.
+    pub n_voiced: usize,
+}
+
+/// Empirical-Bayes speaker pitch ranges: *partially* pool a speaker's
+/// recordings. Each recording's quartiles are shrunk toward the speaker-pooled
+/// quartiles by an amount that grows as the recording's voiced-frame count
+/// (reliability) falls, then the De Looze & Hirst formula is applied per
+/// recording. Returns one `(floor_hz, ceiling_hz)` per input, in order.
+///
+/// The middle ground between each recording's own two-pass range and the single
+/// [`pooled_pitch_range`]: short/noisy recordings borrow strength from the
+/// speaker; well-sampled ones keep their own estimate. sadda's own method (named
+/// as ours), after Efron & Morris's empirical Bayes; the quartile rule is De
+/// Looze & Hirst (2008).
+///
+/// Model, per quartile independently: each recording's quartile
+/// `x_i ~ N(θ_i, σ²/n_i)` with `θ_i ~ N(μ, τ²)`. `μ` is the reliability-weighted
+/// mean; `σ²` and `τ²` are estimated by method of moments (a least-squares fit
+/// of the squared deviations `(x_i − μ)²` on `1/n_i`). The James–Stein posterior
+/// mean `θ_i = μ + (1 − B_i)(x_i − μ)` with `B_i = (σ²/n_i)/(σ²/n_i + τ²)` shrinks
+/// low-`n` recordings harder. With a single recording — or when the sample sizes
+/// carry no information to separate between-recording signal (`τ²`) from
+/// sampling noise (`σ²`) — it returns the unshrunk per-recording ranges.
+pub fn empirical_bayes_pitch_ranges(recordings: &[RecordingF0Summary]) -> Vec<(f32, f32)> {
+    if recordings.is_empty() {
+        return Vec::new();
+    }
+    let ns: Vec<f64> = recordings
+        .iter()
+        .map(|r| r.n_voiced.max(1) as f64)
+        .collect();
+    let q25: Vec<f64> = recordings.iter().map(|r| r.q25 as f64).collect();
+    let q75: Vec<f64> = recordings.iter().map(|r| r.q75 as f64).collect();
+    let s25 = shrink_toward_prior(&q25, &ns);
+    let s75 = shrink_toward_prior(&q75, &ns);
+    s25.iter()
+        .zip(&s75)
+        .map(|(&a, &b)| pitch_range_from_quartiles(a as f32, b as f32))
+        .collect()
+}
+
+/// Shrink each `xs[i]` toward the reliability-weighted mean `μ` by a James–Stein
+/// factor from a normal-normal empirical-Bayes fit (variance components by
+/// method of moments, regressing the squared deviations on `1/ns[i]`). Falls
+/// back to no shrinkage when it can't be identified — a single value, or sample
+/// sizes with no spread (all equal `n`). Weights `ns` are assumed `>= 1`.
+fn shrink_toward_prior(xs: &[f64], ns: &[f64]) -> Vec<f64> {
+    let k = xs.len();
+    let sum_n: f64 = ns.iter().sum();
+    let mu = xs.iter().zip(ns).map(|(&x, &n)| x * n).sum::<f64>() / sum_n;
+    if k < 2 {
+        return xs.to_vec();
+    }
+    // Method of moments: (x_i − μ)² ≈ τ² + σ²·(1/n_i). Least-squares slope σ²,
+    // intercept τ². Needs spread in 1/n_i to be identifiable.
+    let inv: Vec<f64> = ns.iter().map(|&n| 1.0 / n).collect();
+    let d: Vec<f64> = xs.iter().map(|&x| (x - mu).powi(2)).collect();
+    let mean_inv = inv.iter().sum::<f64>() / k as f64;
+    let mean_d = d.iter().sum::<f64>() / k as f64;
+    let mut cov = 0.0;
+    let mut var_inv = 0.0;
+    for i in 0..k {
+        cov += (inv[i] - mean_inv) * (d[i] - mean_d);
+        var_inv += (inv[i] - mean_inv).powi(2);
+    }
+    if var_inv <= f64::EPSILON {
+        return xs.to_vec(); // equal sample sizes → nothing to identify σ² with
+    }
+    let sigma2 = (cov / var_inv).max(0.0);
+    let tau2 = (mean_d - sigma2 * mean_inv).max(0.0);
+    xs.iter()
+        .zip(ns)
+        .map(|(&x, &n)| {
+            let within = sigma2 / n;
+            let denom = within + tau2;
+            let b = if denom > 0.0 { within / denom } else { 0.0 };
+            mu + (1.0 - b) * (x - mu)
+        })
+        .collect()
+}
+
 // [docs-impl:sadda.dsp.f0]  — engine algorithm behind the `sadda.dsp.f0`
 // PyO3 shim; the source-link scanner renders this as the "impl" link.
 /// Estimates f0 using naive time-domain autocorrelation (Phase-0 method).

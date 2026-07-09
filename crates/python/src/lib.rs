@@ -3997,6 +3997,64 @@ fn speaker_pitch_range_pooled(
     ))
 }
 
+/// Empirical-Bayes speaker pitch ranges: *partially* pool a speaker's
+/// recordings. Each recording's quartiles are shrunk toward the speaker-pooled
+/// quartiles by an amount that grows as its voiced-frame count falls, then the
+/// De Looze & Hirst (2008) rule is applied per recording. Returns a list aligned
+/// with `audios`: each entry is that recording's shrunken `(floor_hz,
+/// ceiling_hz)`, or `None` if it had too few voiced frames to summarise.
+///
+/// The partial-pooling companion to `speaker_pitch_range_pooled`: short/noisy
+/// recordings borrow strength from the speaker; well-sampled ones keep their own
+/// estimate.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (audios, *, method="boersma", voicing_threshold=0.45))]
+fn speaker_pitch_ranges_shrunk(
+    py: Python<'_>,
+    audios: Vec<Py<PyAudio>>,
+    method: &str,
+    voicing_threshold: f32,
+) -> PyResult<Vec<Option<(f32, f32)>>> {
+    let pitch_method = parse_pitch_method(method)?;
+    let wide = sadda_engine::pitch::PitchConfig {
+        min_freq_hz: sadda_engine::pitch::TWO_PASS_FLOOR_HZ,
+        max_freq_hz: sadda_engine::pitch::TWO_PASS_CEILING_HZ,
+        voicing_threshold,
+        ..sadda_engine::pitch::PitchConfig::default()
+    };
+    // Summarise each recording; skip those too sparse to yield quartiles, but
+    // remember their positions so the output stays aligned with `audios`.
+    let mut summaries = Vec::new();
+    let mut positions = Vec::new();
+    for (i, a) in audios.iter().enumerate() {
+        let frames = sadda_engine::pitch::pitch(&a.borrow(py).inner, &wide, pitch_method);
+        let n_voiced = frames
+            .iter()
+            .filter(|f| {
+                let hz = f.frequency_hz.value();
+                f.voicing >= voicing_threshold && hz.is_finite() && hz > 0.0
+            })
+            .count();
+        if let Some(q) =
+            sadda_engine::pitch::voiced_f0_quantiles(&frames, voicing_threshold, &[0.25, 0.75])
+        {
+            summaries.push(sadda_engine::pitch::RecordingF0Summary {
+                q25: q[0],
+                q75: q[1],
+                n_voiced,
+            });
+            positions.push(i);
+        }
+    }
+    let ranges = sadda_engine::pitch::empirical_bayes_pitch_ranges(&summaries);
+    let mut out = vec![None; audios.len()];
+    for (pos, &i) in positions.iter().enumerate() {
+        out[i] = Some(ranges[pos]);
+    }
+    Ok(out)
+}
+
 /// Computes per-frame formants over an [`Audio`] via LPC + polynomial
 /// root-finding. Returns a list of `FormantFrame`s; each frame has
 /// variable-length `frequencies` / `bandwidths` (honestly empty for frames
@@ -4649,6 +4707,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(voiced_pitch, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_pitch_range, m)?)?;
     m.add_function(wrap_pyfunction!(speaker_pitch_range_pooled, m)?)?;
+    m.add_function(wrap_pyfunction!(speaker_pitch_ranges_shrunk, m)?)?;
     m.add_function(wrap_pyfunction!(formants, m)?)?;
     m.add_function(wrap_pyfunction!(mfcc, m)?)?;
     m.add_function(wrap_pyfunction!(log_mel_whisper, m)?)?;

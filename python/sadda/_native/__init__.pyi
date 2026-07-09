@@ -76,6 +76,7 @@ __all__ = [
     "probe_wav",
     "schema_version",
     "speaker_pitch_range_pooled",
+    "speaker_pitch_ranges_shrunk",
     "spectrogram",
     "stft",
     "syllabify",
@@ -2614,6 +2615,20 @@ def speaker_pitch_range_pooled(audios: typing.Sequence[Audio], *, method: builti
     Each recording is analysed over a wide range first so the pooled quartiles
     aren't clipped. This is the "complete pooling" baseline; its partial-pooling
     companion is `speaker_pitch_ranges_shrunk` (empirical Bayes).
+    """
+
+def speaker_pitch_ranges_shrunk(audios: typing.Sequence[Audio], *, method: builtins.str = 'boersma', voicing_threshold: builtins.float = 0.44999998807907104) -> builtins.list[typing.Optional[tuple[builtins.float, builtins.float]]]:
+    r"""
+    Empirical-Bayes speaker pitch ranges: *partially* pool a speaker's
+    recordings. Each recording's quartiles are shrunk toward the speaker-pooled
+    quartiles by an amount that grows as its voiced-frame count falls, then the
+    De Looze & Hirst (2008) rule is applied per recording. Returns a list aligned
+    with `audios`: each entry is that recording's shrunken `(floor_hz,
+    ceiling_hz)`, or `None` if it had too few voiced frames to summarise.
+    
+    The partial-pooling companion to `speaker_pitch_range_pooled`: short/noisy
+    recordings borrow strength from the speaker; well-sampled ones keep their own
+    estimate.
     """
 
 def spectrogram(samples: numpy.typing.NDArray[numpy.float32], frame_size: builtins.int, hop_size: builtins.int, *, window: typing.Optional[numpy.typing.NDArray[numpy.float32]] = None) -> numpy.typing.NDArray[numpy.float32]:

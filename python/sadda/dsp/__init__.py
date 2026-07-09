@@ -61,6 +61,7 @@ __all__ = [
     "voiced_pitch",
     "estimate_pitch_range",
     "speaker_pitch_range_pooled",
+    "speaker_pitch_ranges_shrunk",
 ]
 
 hann = stable(_native.hann)
@@ -244,6 +245,28 @@ def speaker_pitch_range_pooled(
     aren't clipped. The partial-pooling companion is
     :func:`speaker_pitch_ranges_shrunk` (empirical Bayes)."""
     return _native.speaker_pitch_range_pooled(
+        list(audios), method=method, voicing_threshold=voicing_threshold
+    )
+
+
+@stable
+def speaker_pitch_ranges_shrunk(
+    audios,
+    *,
+    method: str = "boersma",
+    voicing_threshold: float = 0.45,
+):
+    """Empirical-Bayes speaker pitch ranges: *partially* pool a speaker's
+    recordings (``audios``, an iterable of :class:`Audio`). Each recording's
+    quartiles are shrunk toward the speaker-pooled quartiles by an amount that
+    grows as its voiced-frame count falls, then the De Looze & Hirst (2008) rule
+    is applied per recording.
+
+    Returns a list aligned with ``audios``: each entry is that recording's
+    shrunken ``(floor_hz, ceiling_hz)``, or ``None`` if it had too few voiced
+    frames. The partial-pooling companion to :func:`speaker_pitch_range_pooled`
+    (sadda's own method, after Efron & Morris empirical Bayes)."""
+    return _native.speaker_pitch_ranges_shrunk(
         list(audios), method=method, voicing_threshold=voicing_threshold
     )
 
