@@ -144,20 +144,86 @@ _Designed 2026-07-01 (see DEVLOG design entry). `FigureSpec` IR in
   PNG via a file dialog (reuses/un-gates the F12 screenshot path). The manual/
   hand-draw tier; named capture + headless automation build on top (S3–S8). —
   _added 2026-07-01_
-- [ ] **G0 — figure-export groundwork** — move the colormap/spectrogram bake into
-  the engine + expose the spectrogram raster/matrix; add a `visible_lanes()`
-  accessor to the app. Bake-parity test; no user surface. — _added 2026-07-01_
-- [ ] **G1 — first shippable figure** — `FigureSpec` IR + **SVG** serializer for
-  waveform + spectrogram + tiers (specTeX-parity core) + PDF via SVG→PDF; Python
-  `export_figure(...)`; GUI "Export figure…" dialog with per-element include
-  checkboxes (default from `visible_lanes()`) + format choice. — _added 2026-07-01_
-- [ ] **G2 — TikZ backend** — TikZ serializer off the same IR + standalone `.tex`
-  preview wrapper (specTeX integration model). — _added 2026-07-01_
-- [ ] **G3 — measure lanes in figures** — f0 / formants / intensity / VAD as
-  stacked rows, both backends. — _added 2026-07-01_
-- [ ] **G4 — heatmap lanes + style knobs** — MFCC + embedding rasters; expose
-  colormap/palette/font/dimension overrides across Python + GUI (completes the
-  "whole signal column" default). — _added 2026-07-01_
+- [x] **G0 — figure-export groundwork** _(done 2026-07-08, feat/figure-export-g0)_ —
+  moved the colormap/spectrogram bake engine-side (`dsp::colormap::ColormapKind`
+  + `dsp::spectrogram::{power_to_db_normalized, colormap_bake}`; `colorous` dep
+  moved too), app re-exports so callers are untouched; added a `visible_lanes()`
+  accessor (`VisibleLanes`, reads the current post-S3 visibility model).
+  Bake-parity via moved unit tests + a new end-to-end pipeline test. No user
+  surface. — _added 2026-07-01_
+- [x] **G1 — first shippable figure** _(done 2026-07-08, feat/figure-export-g0)_ —
+  `FigureSpec` IR + **SVG** serializer (`io::figure`): waveform band + spectrogram
+  raster + tier boxes with panel-crossing boundary lines + shared time axis;
+  IPA as real text in embedded Doulos SIL (SIL OFL, bundled). `build_spec` +
+  `Project::export_figure`; Python `export_figure(...)`; GUI File ▸ Export ▸
+  Publication figure (SVG)… (defaults from `visible_lanes()`). Three surfaces
+  tested. **Deferred from G1:** PDF (see G1.1); the per-element checkbox dialog
+  (menu exports the visible set for now); SVG font subsetting (full embed →
+  ~1.2 MB SVGs). — _added 2026-07-01_
+- [x] **G1.1 — figure export to PDF** _(done 2026-07-08, feat/figure-export-g0)_ —
+  `io::figure::to_pdf` via **svg2pdf 0.13** behind the engine `figure-pdf` feature
+  (ON in the app + wheel, OFF for a bare engine). `Project::export_figure` `"pdf"`
+  branch + Python `format="pdf"` + GUI "Publication figure (PDF)…". svg2pdf
+  subsets the embedded font → **25 KB PDF vs 1.2 MB SVG**, IPA glyphs preserved.
+  — _added 2026-07-08_
+- [x] **Figure → clipboard (GUI)** _(done 2026-07-08, feat/figure-export-g0)_ —
+  File ▸ Export ▸ Copy figure to clipboard. `io::figure::to_rgba` (resvg) +
+  `Project::render_figure_rgba` (behind `figure-pdf`) + `arboard::set_image`.
+  Needed resvg's `raster-images` feature so the spectrogram PNG decodes. **Still
+  to confirm hands-on:** the OS clipboard hand-off under WSLg (RGBA render is
+  verified; the `set_image` link isn't). — _added 2026-07-08_
+- [ ] **G1 refinements — SVG font subsetting + per-element export dialog** —
+  (1) subset the embedded Doulos SIL to the glyphs a figure uses (tens of KB vs
+  the current full-font ~1.2 MB embed). **Blocked on tooling (investigated
+  2026-07-09):** the in-tree `subsetter` (0.2.6, via svg2pdf) *drops the cmap*
+  by design — it's PDF-oriented, where glyphs are referenced by id — so its
+  output can't back an SVG `<text>` (no char→glyph map). Needs either a
+  cmap-preserving/web-font subsetter (new dep, e.g. a `fonttools`-style subset)
+  or outlining `<text>` to `<path>` (rejected — loses the editable-text
+  property the full embed was chosen for). PDF/TikZ are unaffected (svg2pdf
+  already subsets; TikZ uses a system font). Revisit if SVG size becomes a real
+  complaint. (2) A proper export dialog with per-element include checkboxes
+  (waveform/spectrogram/each tier) + width/colormap/title, defaulting from
+  `visible_lanes()`, replacing the current "export what's visible" menu item. —
+  _added 2026-07-08_
+- [x] **G2 — TikZ backend** _(done 2026-07-08, feat/figure-export-g0)_ —
+  `io::figure::to_tikz` off the shared `FigureLayout`: standalone compilable
+  `.tex` (fontspec + Doulos SIL, native TikZ vector) + a `<stem>-spectrogram.png`
+  sidecar (TikZ can't inline a raster). `Project::export_figure` `"tikz"` branch
+  (no feature gate) + Python + GUI. Verified by a real `xelatex` compile. —
+  _added 2026-07-01_
+- [x] **G3 — measure lanes in figures** _(done 2026-07-08, feat/figure-export-g0)_ —
+  f0 (contour, unvoiced breaks) / formants (dots) / intensity (dB contour) as
+  stacked rows in the `MeasureLane` IR, computed by `build_measure_lanes` (pitch
+  /formants/intensity DSP), rendered in both SVG/PDF and TikZ; boundary lines
+  cross them. Opt-in; three surfaces (`f0=`/`formants=`/`intensity=` + GUI via
+  `visible_lanes()`). **VAD deferred** — needs the ml/model path (see below). —
+  _added 2026-07-01_
+- [ ] **Figure measure-lane follow-ups** — (1) **VAD lane** (the G3 measure the
+  neural path made too heavy to fold in — needs `ml` + model; render as a
+  0/1 step or shaded speech regions). (2) **f0 octave robustness** in figures —
+  `build_measure_lanes` uses `pitch::autocorrelation` (prone to octave-doubling,
+  which inflates the data-driven y-range); switch to `autocorrelation_boersma`
+  (octave cost + Viterbi). (3) expose the measure DSP params (pitch floor/ceiling,
+  formant count/ceiling) to the figure API instead of defaults. — _added 2026-07-08_
+- [x] **G4 — heatmap lanes + style knobs** _(done 2026-07-08, feat/figure-export-g0)_ —
+  MFCC heatmap lane (`HeatmapLane`; `build_heatmap_lanes` via `dsp::mfcc`,
+  per-coefficient normalised, colormap-baked); SVG/PDF inline it, TikZ writes a
+  per-lane raster sidecar (generalised from the single spectrogram sidecar).
+  First style knob (`font_size`) + existing width/colormap. Three surfaces
+  (`mfcc=`/`font_size=` + GUI). Completes the "whole signal column". **Deferred:**
+  embedding-raster heatmap (needs continuous_vector tier data); fuller style
+  knobs. — _added 2026-07-01_
+- [ ] **Figure heatmap/style follow-ups** — ~~embedding-raster heatmap lane~~
+  (done 2026-07-09: `embedding_tier_id` + shared `matrix_heatmap`).
+  ~~Fuller style knobs via a config object~~ (done 2026-07-09: `sadda.FigureStyle`
+  pyclass — width/font/per-lane heights/colours/colormap).
+  ~~Separate heatmap colormap + f0 range knobs~~ (done 2026-07-09:
+  `heatmap_colormap`, `f0_min_hz`/`f0_max_hz`). Remaining: (1) palette +
+  font-family knobs; expose formant count/ceiling + MFCC params. (2) **GUI style
+  controls** — the app passes default overrides; add a style panel/dialog so the
+  GUI can drive `FigureStyle` too. (3) label crowding in short measure-lane left
+  margins (tighten spacing when lanes are thin). — _added 2026-07-08_
 ## Documentation-image pathway
 
 _Designed 2026-07-02 (see DEVLOG design entry). North star: an **automatable,

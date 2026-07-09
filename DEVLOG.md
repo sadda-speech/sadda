@@ -6,6 +6,334 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-09 — Figure refinements (post-G-series)
+
+Picking off the figure-export backlog refinements. Running log:
+
+- **f0 octave robustness.** `build_measure_lanes` now tracks f0 with
+  **Boersma** (`pitch(..., PitchMethod::Boersma)` — octave cost + Viterbi)
+  instead of raw autocorrelation, and computes the lane's y-axis from the
+  **5th–95th percentile** of voiced values (padded) rather than raw min/max — so
+  a stray octave-error frame can't blow the axis up. Verified on a clean harmonic
+  voice: a 130–170 Hz contour now yields a tight ~70–198 Hz axis (was inflated
+  before). Engine test asserts the axis brackets 150 Hz.
+
+- **Embedding-raster heatmap.** The deferred second G4 heatmap: an
+  `embedding_tier_id` option draws a `continuous_vector` tier's `(frames × dims)`
+  matrix as a heatmap lane. Refactored the MFCC bake into a shared
+  `io::figure::matrix_heatmap` (per-feature min-max normalise → colormap bake);
+  MFCC and the embedding lane both use it. The tier read happens in
+  `figure_spec_for_bundle` (the pure `build_spec` can't read tiers). Three
+  surfaces: Python `export_figure(embedding_tier_id=…)`; GUI mirrors the
+  on-screen embedding lane (`persisted.embedding.selected_tier_id`). Verified: a
+  structured 8-dim embedding renders as the expected diagonal band (`d0`→`d7`),
+  and it sidecars into TikZ via the same generalised path.
+
+- **Style config object + fuller style knobs.** `export_figure` had grown to 19
+  kwargs; adding more style knobs as flat kwargs didn't scale (user call:
+  refactor to a config object first). Introduced a **`FigureStyle` pyclass**
+  (`sadda.FigureStyle(width=…, font_size=…, spectrogram_height=…, colormap=…,
+  stroke=…, …)`) passed as `style=`; the flat `width` / `font_size` / `colormap`
+  kwargs moved into it (spectrogram *analysis* params — `window_ms` / `hop_ms` /
+  `dynamic_range_db` — stay kwargs, being analysis not style), dropping the
+  signature to 16 and making new knobs additive. Engine `FigureExportOptions`
+  gained `Option` overrides for every `FigureStyle` field (per-lane heights,
+  background/stroke/waveform-fill colours), applied in `build_spec`. Opted the
+  pyclass into `FromPyObject` (`from_py_object`) for the by-value extract. GUI
+  passes `None` overrides (no style controls yet — a separate enhancement).
+  Verified: a custom style (blue waveform, greyscale spectrogram, off-white bg,
+  narrower width, shorter spectrogram) renders correctly; new `FigureStyle` +
+  dimension test.
+
+- **Per-heatmap colormap + f0 range knobs** (cheap wins on the config object).
+  `FigureStyle.heatmap_colormap` gives the MFCC/embedding heatmaps a colormap
+  distinct from the spectrogram's (falls back to `colormap` when unset) —
+  verified: a viridis spectrogram over a magma MFCC. `export_figure(f0_min_hz=,
+  f0_max_hz=)` bound the pitch tracker (`PitchConfig.min/max_freq_hz`). Engine
+  `heatmap_cmap()` helper + `f0_min_hz`/`f0_max_hz` options; wired through
+  Python + GUI (GUI passes `None`).
+
+## 2026-07-08 — G4: heatmap lanes (MFCC) + style knobs — completes the G-series
+
+The last G-series slice: an **MFCC heatmap lane** and the first **style knobs**,
+completing the "whole signal column" figure — waveform + spectrogram + f0 +
+formants + intensity + MFCC + tiers, in one export.
+
+**Heatmap lane.** `FigureSpec.heatmaps: Vec<HeatmapLane>` (a baked colormap
+raster like the spectrogram, but for a generic matrix, with a name +
+top/bottom labels + an optional `raster_ref` sidecar). `build_heatmap_lanes`
+computes MFCC (`dsp::mfcc`, 13 coeffs), **per-coefficient min-max normalised**
+so the c0 energy term doesn't wash out the rest, baked with the figure colormap.
+Opt-in via `mfcc`.
+
+**Both backends, generalised sidecars.** SVG/PDF inline the heatmap PNG;
+**TikZ** now writes *every* raster lane (spectrogram + each heatmap) as its own
+sidecar (`<stem>-spectrogram.png`, `<stem>-heatmap0.png`, …) and stamps each
+lane's `raster_ref` — the earlier single-spectrogram-sidecar path generalised.
+
+**Style knobs.** `FigureExportOptions.font_size: Option<f64>` (defaults when
+`None`) as the first exposed knob, applied to the style in `build_spec`; width
++ colormap were already exposed. Fuller style surface (per-lane heights,
+palette, fonts) is a noted refinement.
+
+**Surfaces.** Python `export_figure(mfcc=…, font_size=…)`; GUI reads
+`visible_lanes().mfcc`.
+
+**Verified — rendered the whole column.** A full waveform+spectrogram+f0+
+formants+intensity+MFCC figure via the Python API: the MFCC heatmap shows clear
+cepstral structure separating the ɑ/i vowels; **two rasters embedded** (test
+asserts the count). A real **xelatex** compile of the whole-column TikZ figure
+(both sidecars) succeeds. Engine 18 figure tests; Python 12; 305 python +
+workspace `clippy -D warnings` + `fmt` clean.
+
+**G-series complete (G0–G4):** publication figure export — SVG · PDF · TikZ ·
+clipboard — of waveform / spectrogram / f0 / formants / intensity / MFCC / tiers,
+across engine + Python + GUI. Remaining figure work is all backlog refinements
+(embedding-raster heatmap, VAD lane, SVG font subsetting, per-element export
+dialog, fuller style knobs, f0 octave robustness).
+
+## 2026-07-08 — G3: measure lanes (f0 / formants / intensity, both backends)
+
+Stacked measure-track rows on the figure: **f0** (pitch contour), **formants**
+(dots), and **intensity** (dB contour), between the spectrogram and the tiers,
+across engine + Python + GUI, in both the SVG/PDF and TikZ backends.
+
+**IR.** `FigureSpec` gains `measures: Vec<MeasureLane>`; a `MeasureLane` carries
+a name, unit, data-driven `y_range`, and one-or-more `MeasureSeries` (polyline
+**segments** so f0 breaks across unvoiced frames rather than bridging them; a
+`dots` flag for formants; a per-series colour). `FigureLayout` places measure
+rows between spectrogram and tiers and extends the panel region so **boundary
+lines cross the measure lanes too** (Praat-like).
+
+**Computation.** `build_measure_lanes` runs the engine DSP headlessly:
+`pitch::autocorrelation` (voiced runs → segments), `dsp::formants` (per-formant
+dot series), `dsp::intensity` (dB contour), each with a data-driven axis; empty
+lanes (e.g. fully unvoiced) drop out. Measures are **opt-in** (a plain figure
+stays waveform + spectrogram + tiers).
+
+**Surfaces.** Python `export_figure(f0=…, formants=…, intensity=…)`; GUI figure
+export + clipboard read the flags from `visible_lanes()` (so a figure mirrors
+the on-screen measure lanes). **VAD deferred** — it needs the neural ml/model
+path, unlike these pure-DSP measures; queued.
+
+**Layout bug caught by looking.** First render collided the lane-name and unit
+labels in the narrow left margin (garbled "f0"/"Hz"). Fixed by moving the unit
+onto the top numeric label (`"500 Hz"`) and keeping the name alone at mid-height.
+Re-rendered: f0 contour (with unvoiced breaks), formant dots, intensity line all
+read cleanly.
+
+**Verification.** Engine 16 figure tests (incl. measure computation + render);
+Python 9 (SVG measure lanes); a real **xelatex** compile of a TikZ figure *with*
+measures; 303 python + workspace `clippy -D warnings` + `fmt` clean.
+
+**Next:** G4 — heatmap lanes (MFCC + embedding rasters) + style knobs (colormap/
+palette/font/dimension overrides across Python + GUI). Also queued: f0 octave
+robustness (use `autocorrelation_boersma`), VAD lane.
+
+## 2026-07-08 — G2: TikZ backend (standalone .tex + raster sidecar, three surfaces)
+
+Second G-series backend: export the figure as a **standalone TikZ/LaTeX
+document** off the same `FigureSpec` IR — the specTeX integration model, for
+users who want LaTeX-native, hand-editable, document-font-matched figures.
+
+**Shared layout first.** Factored the vertical/horizontal geometry out of
+`to_svg` into a `FigureLayout` (lane y-positions, plot area, time→x), so the
+SVG, PDF, and TikZ backends compute identical geometry and can't drift. `to_svg`
+refactored onto it with no output change (goldens unchanged).
+
+**`to_tikz(spec, raster_ref)`.** Emits a compilable `standalone` document:
+`fontspec` + `\setmainfont{Doulos SIL}` for IPA, native TikZ `\draw`/`\fill` for
+the waveform band / tier boxes / panel-crossing boundary lines / axes, and text
+as real LaTeX nodes (`tex_escape` guards the specials; IPA passes through).
+TikZ can't embed a raster, so the spectrogram is a **sidecar PNG**
+(`<stem>-spectrogram.png`) written next to the `.tex` and `\includegraphics`'d —
+exactly specTeX's raster-plus-.tex split. `Project::export_figure` grew the
+`"tikz"` branch (writes both files); the format is pure-string + PNG, so it needs
+**no feature gate** (unlike PDF).
+
+**Three surfaces.** Python `export_figure(format="tikz")`; GUI File ▸ Export ▸
+Publication figure (TikZ)….
+
+**Verified end to end — actually compiled it.** Emitted a real `.tex` via the
+Python API and ran **`xelatex`** (with `OSFONTDIR` → the bundled Doulos): clean
+compile → a PDF whose figure is correct (waveform + viridis spectrogram sidecar
++ `p ɹ ɑː t` in Doulos SIL + axes). Engine 15 figure tests (incl. TikZ structure,
+`tex_escape`, `hex_rgb`, sidecar PNG magic); Python 7; workspace `clippy -D
+warnings` + `fmt` clean.
+
+**Next:** G3 measure lanes (f0/formants/intensity/VAD rows, both backends) · G4
+heatmaps + style knobs.
+
+## 2026-07-08 — Figure → clipboard (GUI): rasterise + copy for quick sharing
+
+A small GUI convenience riding on the resvg tree G1.1 pulled in: **File ▸ Export
+▸ Copy figure to clipboard** puts a bitmap of the on-screen figure on the system
+clipboard, so it pastes straight into a chat / doc / slide with no save-file
+round-trip.
+
+**Why raster.** The clipboard can't reliably carry SVG (most paste targets want
+a bitmap), so the figure is rasterised: `io::figure::to_rgba` renders `to_svg`
+via **resvg** into a straight-RGBA8 bitmap; `Project::render_figure_rgba` builds
+the spec (shared with `export_figure` via a new `figure_spec_for_bundle` helper)
+and rasterises. The app hands the bytes to `arboard::Clipboard::set_image`.
+Both engine bits are behind the `figure-pdf` feature (renamed in spirit to cover
+all rich figure output); the copy action mirrors the SVG/PDF export's "what's on
+screen" defaults.
+
+**Bug caught by looking.** First cut built `resvg` with `default-features =
+false, features = ["text"]` — which silently **dropped the spectrogram** (the
+embedded PNG `<image>` needs resvg's `raster-images` feature to decode). The
+PDF path had hidden it, since svg2pdf's own `image` feature handled the raster.
+Dumping the RGBA to a PNG showed the blank spectrogram lane; adding
+`raster-images` fixed it. Re-verified: the bitmap now has waveform + viridis
+spectrogram + `p ɹ ɑː t` — and resvg renders the IPA correctly from the loaded
+Doulos font.
+
+**Caveat.** The RGBA render is verified (engine test + eyeballed PNG); the actual
+OS clipboard hand-off (`arboard::set_image`) needs a hands-on check under WSLg —
+image-clipboard behaviour there is the untested link.
+
+**Verification.** Engine 12 figure tests (incl. `to_rgba` dimensions/opacity);
+workspace `clippy -D warnings` + `fmt` clean.
+
+## 2026-07-08 — G1.1: figure export to PDF (svg2pdf, feature-gated)
+
+The fast-follow to G1: the figure exporter now also writes **PDF**, across all
+three surfaces.
+
+**Engine.** `io::figure::to_pdf` renders `to_svg` then converts via **svg2pdf
+0.13** (usvg/resvg family, pure Rust — no system deps). usvg flattens the
+figure's `<text>` to outlines (so the PDF needs no font to *view*, at the cost
+of non-selectable text — the SVG keeps editable text) and decodes the embedded
+spectrogram PNG. The bundled Doulos SIL is loaded into usvg's fontdb directly so
+`Doulos SIL` always resolves. `Project::export_figure` gained the `"pdf"` branch;
+unknown formats (and `"pdf"` on a build without the feature) return an actionable
+error.
+
+**Feature-gated.** New engine feature **`figure-pdf`** (pulls `svg2pdf`), OFF by
+default so a bare `sadda-engine` stays lean, ON in the shipping artifacts (the
+app + the Python wheel). `cargo test`'s feature unification builds the engine
+with it, so the `to_pdf` test runs in CI.
+
+**Surfaces.** Python `export_figure(format="pdf")` just works; GUI adds File ▸
+Export ▸ **Publication figure (PDF)…** beside the SVG item (both share one
+helper).
+
+**Font subsetting — a useful finding.** svg2pdf's `subsetter` reduces the
+embedded font to only the used glyphs: a figure that is a **1.2 MB SVG** becomes
+a **25 KB PDF**, and — the thing I was wary of — the **IPA glyphs (ɹ, ɑ, ː)
+survive the subsetting intact** (verified by rasterising the PDF). That
+de-risks the queued SVG-subsetting refinement: the subsetter handles IPA
+correctly.
+
+**Verification.** Engine 11 figure tests (incl. `to_pdf` → valid `%PDF-`);
+Python 6 (incl. a self-contained-PDF assertion); workspace + `figure-pdf`
+`clippy -D warnings` + `fmt` clean; 562 workspace tests + 301 Python green.
+Visually validated: a sweep figure exported to PDF renders waveform +
+spectrogram + `p ɹ ɑː t` correctly.
+
+**Next:** figure-to-clipboard (rides on the resvg dep this added) · G2 TikZ · G3
+measure lanes · G4 heatmaps + style knobs · SVG font subsetting.
+
+## 2026-07-08 — G1: first shippable publication figure (FigureSpec → SVG, three surfaces)
+
+The user-facing payoff of the figure-export strand: export a journal-ready
+**waveform / spectrogram / annotation-tier** figure — the staple of a phonetics
+paper — as a self-contained SVG, across engine + Python + GUI.
+
+**Engine (`io::figure`).** A `FigureSpec` IR + free serializers, mirroring the
+tabular `ExportBundle → to_csv` split. `to_svg` renders a self-contained SVG: a
+vector waveform band (min/max envelope — improving on specTeX, which rasterises
+the waveform), the baked spectrogram raster embedded as a PNG `<image>`, tier
+boxes whose **boundary lines extend through the signal panels** (the specTeX
+signature), and a shared "Time (s)" axis. `build_spec` assembles a `FigureSpec`
+from raw audio + tiers headlessly (STFT → power → dB-normalise → G0's
+`colormap_bake`), so Python and the GUI share one path; `Project::export_figure`
+glues bundle data to it.
+
+**IPA as real text.** Labels render as SVG `<text>` in **Doulos SIL** (the
+phonetics IPA reference face, the specTeX baseline), embedded via a base64
+`@font-face` — so a figure renders identically anywhere *and* the IPA stays
+selectable/editable, without the viewer having the font. Font + SIL OFL license
+bundled under `crates/engine/assets/fonts/` (user chose Doulos over Charis;
+both OFL). Full-font embed for correctness (subsetting an IPA font risks dropping
+a diacritic) → ~1.2 MB SVGs; **subsetting is a flagged follow-up**.
+
+**Python.** `Project.export_figure(bundle, path, *, format, tier_ids, title,
+waveform, spectrogram, width, window_ms, hop_ms, dynamic_range_db, colormap)`.
+Verified end to end through the real wheel (5 tests) — including a live render of
+a 300→700 Hz sweep whose magma spectrogram shows the rising ridge + harmonics.
+
+**GUI.** File ▸ Export ▸ **Publication figure (SVG)…** — exports *what's on
+screen*: which signal lanes from `visible_lanes()` (G0), spectrogram params +
+colormap from the current config, tiers minus the hidden set. (The design's
+per-element checkbox dialog is deferred to a refinement; "export the visible
+set" is the strong default.)
+
+**Scope call (user-approved).** Shipped **SVG across all three surfaces** now;
+**PDF via `svg2pdf` is a fast-follow (G1.1)** — its usvg/resvg tree is heavy and
+wants a feature gate, and SVG already drops into LaTeX/Word/web and converts to
+PDF with one `rsvg-convert`. `export_figure(format="pdf")` raises an actionable
+error until then.
+
+**Verification.** Engine 313 tests (10 figure/colormap); Python 5; app compiles
++ workspace `clippy -D warnings` + `fmt` clean; stubs regenerated. Structural
+goldens normalize the embedded font/PNG blobs so they stay small. Visually
+validated by rasterising sample figures (waveform + viridis/magma spectrogram +
+`p ɹ ɑː t` tiers) — hits the design's G1 specTeX-parity checkpoint.
+
+**Next:** G1.1 PDF (svg2pdf, feature-gated) · G2 TikZ backend · G3 measure lanes
+· G4 heatmaps + style knobs. Refinements: SVG font subsetting, the per-element
+export dialog.
+
+## 2026-07-08 — G0: figure-export groundwork (bake moves engine-side)
+
+First slice of the **G-series** (publication figure export), picking up the
+figure-export strand after the S-series doc-image pipeline landed. Pure
+groundwork — **no user surface** — that unblocks G1's headless SVG/PDF figure.
+
+**Course correction first.** Started this session thinking `feat/figure-export`
+was a 19-commit branch of *unlanded* work to rebase onto main. It wasn't: a
+tree diff showed the branch is **already fully merged** (squash-merged as PR #19
+for the doc-image pipeline + #5–#9 for the DSP presets) — `doc_render.rs` on
+main is byte-identical to the branch, and `main..branch` is almost all
+deletions (main *has* the align/asr/tts/syllable work the stale branch predates).
+So no rebase; the branch is subsumed. The real open work is the G-series, which
+is greenfield (`io/figure.rs` doesn't exist yet).
+
+**The one real refactor (per the 2026-07-01 design).** The spectrogram bake
+pipeline lived in the **app** (`state.rs`): `power_to_db_normalized`,
+`colormap_bake`, `sample_colormap`, and the `ColormapKind` enum. Headless,
+three-surface figure export needs that bake available engine-side, so it moved:
+
+- **`sadda_engine::dsp::colormap`** (new) — `ColormapKind` (+ `label()` +
+  `sample()`); the `colorous` dep moved engine-side with it (removed from the
+  app). Viridis/Magma/Cividis/Hot/Greyscale, unchanged.
+- **`sadda_engine::dsp::spectrogram`** — gains `power_to_db_normalized` +
+  `colormap_bake` (+ `POWER_DB_FLOOR`) alongside the existing
+  `power_spectrogram`. A freq-major power matrix → normalised dB-FS → row-major
+  opaque RGBA (y-flipped), the exact bytes the GUI drew.
+- **App re-exports** the three names from `crate::state` so every existing
+  `compute_spectrogram_image` / MFCC-lane / embedding-lane caller in `main.rs`
+  is untouched — a literal move, not a reimplementation.
+
+**`visible_lanes()` accessor.** Consolidates the scattered per-lane visibility
+(structural `panes`, measure `tracks`, `mfcc.show`, embedding tier-selection)
+into one `VisibleLanes` descriptor, so G1's export dialog can default its
+per-element include checkboxes from a single source of truth. `#[allow(dead_code)]`
+until G1 consumes it (its tests are part of this slice). Note the 2026-07-01
+design predates the S-series pane toggles, so this reads the *current*
+(post-S3) visibility model, not the design's assumed one.
+
+**Verification.** Parity is pinned by construction (moved, not rewritten) plus
+the moved unit tests (exact greyscale @0.5 → 128, hot-ramp byte values, y-flip)
+and a new end-to-end pipeline test (real-audio STFT → normalise → bake: shape,
+`[0,1]` range, full opacity). Engine 303 + app 109 tests green; workspace
+`clippy -D warnings` (incl. the `download` feature) + `fmt` clean.
+
+**Next:** G1 — `FigureSpec` IR + SVG serializer (waveform + spectrogram + tiers,
+specTeX-parity) + PDF, Python `export_figure(...)`, GUI "Export figure…" dialog.
+
 ## 2026-07-07 — A5.3: forced alignment in the GUI (completes A5 + the A-series)
 
 The last A-series slice: an **Annotate ▸ Align…** action that force-aligns a

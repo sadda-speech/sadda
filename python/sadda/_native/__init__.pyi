@@ -20,6 +20,7 @@ __all__ = [
     "Criterion",
     "DerivedSignal",
     "ExportSummary",
+    "FigureStyle",
     "FormantFrame",
     "ImportSummary",
     "Instrument",
@@ -606,6 +607,143 @@ class ExportSummary:
         Number of assignments included.
         """
     def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class FigureStyle:
+    r"""
+    Visual style for [`PyProject::export_figure`] — figure dimensions, font
+    size, colours, and the spectrogram/heatmap colormap. Every field is
+    optional; unset ones use the built-in publication defaults. Passing this as
+    `style=` keeps `export_figure`'s signature small and makes new style knobs
+    additive rather than more keyword arguments.
+    
+    ```python
+    style = sadda.FigureStyle(width=1000, font_size=15, spectrogram_height=260,
+                              colormap="magma")
+    project.export_figure(bundle, "fig.svg", f0=True, style=style)
+    ```
+    """
+    @property
+    def width(self) -> typing.Optional[builtins.float]:
+        r"""
+        Overall figure width in px.
+        """
+    @width.setter
+    def width(self, value: typing.Optional[builtins.float]) -> None:
+        r"""
+        Overall figure width in px.
+        """
+    @property
+    def font_size(self) -> typing.Optional[builtins.float]:
+        r"""
+        Base font size in px.
+        """
+    @font_size.setter
+    def font_size(self, value: typing.Optional[builtins.float]) -> None:
+        r"""
+        Base font size in px.
+        """
+    @property
+    def waveform_height(self) -> typing.Optional[builtins.float]:
+        r"""
+        Waveform-lane height in px.
+        """
+    @waveform_height.setter
+    def waveform_height(self, value: typing.Optional[builtins.float]) -> None:
+        r"""
+        Waveform-lane height in px.
+        """
+    @property
+    def spectrogram_height(self) -> typing.Optional[builtins.float]:
+        r"""
+        Spectrogram-lane height in px.
+        """
+    @spectrogram_height.setter
+    def spectrogram_height(self, value: typing.Optional[builtins.float]) -> None:
+        r"""
+        Spectrogram-lane height in px.
+        """
+    @property
+    def measure_height(self) -> typing.Optional[builtins.float]:
+        r"""
+        Measure-lane (f0 / formants / intensity) height in px.
+        """
+    @measure_height.setter
+    def measure_height(self, value: typing.Optional[builtins.float]) -> None:
+        r"""
+        Measure-lane (f0 / formants / intensity) height in px.
+        """
+    @property
+    def heatmap_height(self) -> typing.Optional[builtins.float]:
+        r"""
+        Heatmap-lane (MFCC / embedding) height in px.
+        """
+    @heatmap_height.setter
+    def heatmap_height(self, value: typing.Optional[builtins.float]) -> None:
+        r"""
+        Heatmap-lane (MFCC / embedding) height in px.
+        """
+    @property
+    def tier_height(self) -> typing.Optional[builtins.float]:
+        r"""
+        Tier-row height in px.
+        """
+    @tier_height.setter
+    def tier_height(self, value: typing.Optional[builtins.float]) -> None:
+        r"""
+        Tier-row height in px.
+        """
+    @property
+    def colormap(self) -> typing.Optional[builtins.str]:
+        r"""
+        Spectrogram colormap (viridis / magma / hot / cividis / greyscale).
+        """
+    @colormap.setter
+    def colormap(self, value: typing.Optional[builtins.str]) -> None:
+        r"""
+        Spectrogram colormap (viridis / magma / hot / cividis / greyscale).
+        """
+    @property
+    def heatmap_colormap(self) -> typing.Optional[builtins.str]:
+        r"""
+        Heatmap (MFCC / embedding) colormap; falls back to `colormap` when unset.
+        """
+    @heatmap_colormap.setter
+    def heatmap_colormap(self, value: typing.Optional[builtins.str]) -> None:
+        r"""
+        Heatmap (MFCC / embedding) colormap; falls back to `colormap` when unset.
+        """
+    @property
+    def background(self) -> typing.Optional[builtins.str]:
+        r"""
+        Background colour (CSS, e.g. "#ffffff").
+        """
+    @background.setter
+    def background(self, value: typing.Optional[builtins.str]) -> None:
+        r"""
+        Background colour (CSS, e.g. "#ffffff").
+        """
+    @property
+    def stroke(self) -> typing.Optional[builtins.str]:
+        r"""
+        Stroke colour for the waveform / axes / boundaries (CSS).
+        """
+    @stroke.setter
+    def stroke(self, value: typing.Optional[builtins.str]) -> None:
+        r"""
+        Stroke colour for the waveform / axes / boundaries (CSS).
+        """
+    @property
+    def waveform_fill(self) -> typing.Optional[builtins.str]:
+        r"""
+        Waveform-band fill colour (CSS).
+        """
+    @waveform_fill.setter
+    def waveform_fill(self, value: typing.Optional[builtins.str]) -> None:
+        r"""
+        Waveform-band fill colour (CSS).
+        """
+    def __new__(cls, *, width: typing.Optional[builtins.float] = None, font_size: typing.Optional[builtins.float] = None, waveform_height: typing.Optional[builtins.float] = None, spectrogram_height: typing.Optional[builtins.float] = None, measure_height: typing.Optional[builtins.float] = None, heatmap_height: typing.Optional[builtins.float] = None, tier_height: typing.Optional[builtins.float] = None, colormap: typing.Optional[builtins.str] = None, heatmap_colormap: typing.Optional[builtins.str] = None, background: typing.Optional[builtins.str] = None, stroke: typing.Optional[builtins.str] = None, waveform_fill: typing.Optional[builtins.str] = None) -> FigureStyle: ...
 
 @typing.final
 class FormantFrame:
@@ -1715,6 +1853,31 @@ class Project:
         to `path`: bundle metadata plus a `tiers` array, each tier carrying
         its native rows (faithful, unlike the flattened CSV). If `tier_ids`
         is given, only those tiers are exported. Dense tiers are skipped.
+        """
+    def export_figure(self, bundle_id: builtins.int, path: builtins.str | os.PathLike | pathlib.Path, *, format: builtins.str = 'svg', tier_ids: typing.Optional[typing.Sequence[builtins.int]] = None, title: typing.Optional[builtins.str] = None, waveform: builtins.bool = True, spectrogram: builtins.bool = True, f0: builtins.bool = False, formants: builtins.bool = False, intensity: builtins.bool = False, mfcc: builtins.bool = False, embedding_tier_id: typing.Optional[builtins.int] = None, f0_min_hz: typing.Optional[builtins.float] = None, f0_max_hz: typing.Optional[builtins.float] = None, window_ms: builtins.float = 25.0, hop_ms: builtins.float = 5.0, dynamic_range_db: builtins.float = 70.0, style: typing.Optional[FigureStyle] = None) -> None:
+        r"""
+        Exports a publication **figure** of `bundle_id` to `path` — a stacked
+        waveform / spectrogram / annotation-tier figure sharing one time axis,
+        the staple of a phonetics paper.
+        
+        `format` is one of: `"svg"` (a self-contained SVG with the Doulos SIL
+        font and the spectrogram raster embedded, so it renders identically
+        anywhere and IPA labels stay real, selectable text); `"pdf"` (a
+        self-contained vector PDF; its text is flattened to outlines); or
+        `"tikz"` (a standalone TikZ/LaTeX document — compile with XeLaTeX or
+        LuaLaTeX — plus a sidecar `<stem>-spectrogram.png` written next to it,
+        since TikZ can't embed a raster). `tier_ids` selects which interval/point
+        tiers to draw, in that
+        order (default: all drawable tiers). `waveform` / `spectrogram` toggle
+        the signal lanes; `f0` / `formants` / `intensity` add measure-track lanes
+        and `mfcc` adds an MFCC heatmap lane (all off by default), each computed
+        from the audio; `embedding_tier_id` adds a heatmap of that
+        `continuous_vector` tier's `(frames × dims)` matrix. `f0_min_hz` /
+        `f0_max_hz` bound the pitch tracker; `window_ms` / `hop_ms` /
+        `dynamic_range_db` set the spectrogram analysis. Visual style
+        — dimensions, font size, colours, and the colormap — is a
+        [`FigureStyle`] object passed as `style` (all its fields default when
+        unset). `title` is an optional caption.
         """
     def import_csv(self, path: builtins.str | os.PathLike | pathlib.Path, bundle_id: builtins.int) -> builtins.list[builtins.int]:
         r"""

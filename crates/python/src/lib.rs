@@ -3382,6 +3382,102 @@ impl PyProject {
             .map_err(engine_err_to_py)
     }
 
+    /// Exports a publication **figure** of `bundle_id` to `path` — a stacked
+    /// waveform / spectrogram / annotation-tier figure sharing one time axis,
+    /// the staple of a phonetics paper.
+    ///
+    /// `format` is one of: `"svg"` (a self-contained SVG with the Doulos SIL
+    /// font and the spectrogram raster embedded, so it renders identically
+    /// anywhere and IPA labels stay real, selectable text); `"pdf"` (a
+    /// self-contained vector PDF; its text is flattened to outlines); or
+    /// `"tikz"` (a standalone TikZ/LaTeX document — compile with XeLaTeX or
+    /// LuaLaTeX — plus a sidecar `<stem>-spectrogram.png` written next to it,
+    /// since TikZ can't embed a raster). `tier_ids` selects which interval/point
+    /// tiers to draw, in that
+    /// order (default: all drawable tiers). `waveform` / `spectrogram` toggle
+    /// the signal lanes; `f0` / `formants` / `intensity` add measure-track lanes
+    /// and `mfcc` adds an MFCC heatmap lane (all off by default), each computed
+    /// from the audio; `embedding_tier_id` adds a heatmap of that
+    /// `continuous_vector` tier's `(frames × dims)` matrix. `f0_min_hz` /
+    /// `f0_max_hz` bound the pitch tracker; `window_ms` / `hop_ms` /
+    /// `dynamic_range_db` set the spectrogram analysis. Visual style
+    /// — dimensions, font size, colours, and the colormap — is a
+    /// [`FigureStyle`] object passed as `style` (all its fields default when
+    /// unset). `title` is an optional caption.
+    #[pyo3(signature = (bundle_id, path, *, format="svg", tier_ids=None, title=None,
+        waveform=true, spectrogram=true, f0=false, formants=false, intensity=false,
+        mfcc=false, embedding_tier_id=None, f0_min_hz=None, f0_max_hz=None,
+        window_ms=25.0, hop_ms=5.0, dynamic_range_db=70.0, style=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn export_figure(
+        &self,
+        bundle_id: i64,
+        path: PathBuf,
+        format: &str,
+        tier_ids: Option<Vec<i64>>,
+        title: Option<String>,
+        waveform: bool,
+        spectrogram: bool,
+        f0: bool,
+        formants: bool,
+        intensity: bool,
+        mfcc: bool,
+        embedding_tier_id: Option<i64>,
+        f0_min_hz: Option<f32>,
+        f0_max_hz: Option<f32>,
+        window_ms: f32,
+        hop_ms: f32,
+        dynamic_range_db: f32,
+        style: Option<PyFigureStyle>,
+    ) -> PyResult<()> {
+        let style = style.unwrap_or_default();
+        let resolve_cmap = |name: &str| {
+            sadda_engine::dsp::ColormapKind::from_name(name).ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "unknown colormap {name:?}; expected one of \
+                     viridis, magma, hot, cividis, greyscale"
+                ))
+            })
+        };
+        let colormap = resolve_cmap(style.colormap.as_deref().unwrap_or("viridis"))?;
+        let heatmap_colormap = style
+            .heatmap_colormap
+            .as_deref()
+            .map(resolve_cmap)
+            .transpose()?;
+        let default_width = sadda_engine::io::figure::FigureStyle::default().width;
+        let opts = sadda_engine::io::figure::FigureExportOptions {
+            title,
+            include_waveform: waveform,
+            include_spectrogram: spectrogram,
+            include_f0: f0,
+            include_formants: formants,
+            include_intensity: intensity,
+            include_mfcc: mfcc,
+            embedding_tier_id,
+            width: style.width.unwrap_or(default_width),
+            font_size: style.font_size,
+            waveform_height: style.waveform_height,
+            spectrogram_height: style.spectrogram_height,
+            measure_height: style.measure_height,
+            heatmap_height: style.heatmap_height,
+            tier_height: style.tier_height,
+            background: style.background,
+            stroke: style.stroke,
+            waveform_fill: style.waveform_fill,
+            window_ms,
+            hop_ms,
+            dynamic_range_db,
+            colormap,
+            heatmap_colormap,
+            f0_min_hz,
+            f0_max_hz,
+        };
+        self.inner
+            .export_figure(bundle_id, path, format, tier_ids.as_deref(), &opts)
+            .map_err(engine_err_to_py)
+    }
+
     /// Imports a flat CSV (as written by `export_csv`) into `bundle_id`. Rows
     /// are grouped into new tiers by `(tier_name, tier_type)`; interval /
     /// point rows become annotations. Returns the new tier IDs and records a
@@ -4543,6 +4639,99 @@ impl PyTimeline {
     }
 }
 
+/// Visual style for [`PyProject::export_figure`] — figure dimensions, font
+/// size, colours, and the spectrogram/heatmap colormap. Every field is
+/// optional; unset ones use the built-in publication defaults. Passing this as
+/// `style=` keeps `export_figure`'s signature small and makes new style knobs
+/// additive rather than more keyword arguments.
+///
+/// ```python
+/// style = sadda.FigureStyle(width=1000, font_size=15, spectrogram_height=260,
+///                           colormap="magma")
+/// project.export_figure(bundle, "fig.svg", f0=True, style=style)
+/// ```
+#[gen_stub_pyclass]
+#[pyclass(module = "sadda._native", name = "FigureStyle", from_py_object)]
+#[derive(Clone, Default)]
+struct PyFigureStyle {
+    /// Overall figure width in px.
+    #[pyo3(get, set)]
+    width: Option<f64>,
+    /// Base font size in px.
+    #[pyo3(get, set)]
+    font_size: Option<f64>,
+    /// Waveform-lane height in px.
+    #[pyo3(get, set)]
+    waveform_height: Option<f64>,
+    /// Spectrogram-lane height in px.
+    #[pyo3(get, set)]
+    spectrogram_height: Option<f64>,
+    /// Measure-lane (f0 / formants / intensity) height in px.
+    #[pyo3(get, set)]
+    measure_height: Option<f64>,
+    /// Heatmap-lane (MFCC / embedding) height in px.
+    #[pyo3(get, set)]
+    heatmap_height: Option<f64>,
+    /// Tier-row height in px.
+    #[pyo3(get, set)]
+    tier_height: Option<f64>,
+    /// Spectrogram colormap (viridis / magma / hot / cividis / greyscale).
+    #[pyo3(get, set)]
+    colormap: Option<String>,
+    /// Heatmap (MFCC / embedding) colormap; falls back to `colormap` when unset.
+    #[pyo3(get, set)]
+    heatmap_colormap: Option<String>,
+    /// Background colour (CSS, e.g. "#ffffff").
+    #[pyo3(get, set)]
+    background: Option<String>,
+    /// Stroke colour for the waveform / axes / boundaries (CSS).
+    #[pyo3(get, set)]
+    stroke: Option<String>,
+    /// Waveform-band fill colour (CSS).
+    #[pyo3(get, set)]
+    waveform_fill: Option<String>,
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl PyFigureStyle {
+    #[new]
+    #[pyo3(signature = (*, width=None, font_size=None, waveform_height=None,
+        spectrogram_height=None, measure_height=None, heatmap_height=None,
+        tier_height=None, colormap=None, heatmap_colormap=None, background=None,
+        stroke=None, waveform_fill=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        width: Option<f64>,
+        font_size: Option<f64>,
+        waveform_height: Option<f64>,
+        spectrogram_height: Option<f64>,
+        measure_height: Option<f64>,
+        heatmap_height: Option<f64>,
+        tier_height: Option<f64>,
+        colormap: Option<String>,
+        heatmap_colormap: Option<String>,
+        background: Option<String>,
+        stroke: Option<String>,
+        waveform_fill: Option<String>,
+    ) -> Self {
+        Self {
+            width,
+            font_size,
+            waveform_height,
+            spectrogram_height,
+            measure_height,
+            heatmap_height,
+            tier_height,
+            colormap,
+            heatmap_colormap,
+            background,
+            stroke,
+            waveform_fill,
+        }
+    }
+}
+
 /// sadda._native — Rust extension submodule. End users should `import sadda`
 /// and use the decorated re-exports in `sadda.__init__` rather than reaching
 /// in here directly.
@@ -4590,6 +4779,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPoint>()?;
     m.add_class::<PyReference>()?;
     m.add_class::<PyRubric>()?;
+    m.add_class::<PyFigureStyle>()?;
     m.add_class::<PyStatusDef>()?;
     m.add_class::<PyRubricTier>()?;
     m.add_class::<PyVocabEntry>()?;

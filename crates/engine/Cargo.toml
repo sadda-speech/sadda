@@ -22,6 +22,13 @@ ml = ["dep:ort", "dep:libloading"]
 # models to run them) and pulls `ureq` (rustls TLS, fully sync, no async
 # runtime). See the 2026-05-27 E12 network-spike DEVLOG entry.
 download = ["ml", "dep:ureq"]
+# G1.1 figure export to PDF + G-series figure rasterisation (io::figure::to_pdf
+# / to_rgba). Pulls the svg2pdf + resvg tree (usvg-based, pure Rust, no runtime
+# /system deps, but a heavy compile), so it's OFF by default to keep a bare
+# `sadda-engine` lean. The shipping artifacts (the app + the Python wheel) turn
+# it on; without it, PDF export returns an actionable error and the raster path
+# is absent. (Named for its first use; also gates SVG→RGBA for figure→clipboard.)
+figure-pdf = ["dep:svg2pdf", "dep:resvg"]
 # Throwaway perf-spike code (compositional-DSP benchmark in dsp::mfcc::spike +
 # benches/). OFF by default so it is NEVER compiled into the app or wheel;
 # enabled only by `just bench`. Holdout-code convention — see DEVLOG / CONTRIBUTING.
@@ -32,6 +39,25 @@ spike = []
 # /cookies, no async runtime — see the network spike.
 ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }
 arrow = { version = "58", default-features = false }
+# Perceptually-uniform colormaps (Viridis/Magma/Cividis) for the spectrogram
+# raster bake (G0 — moved engine-side so headless figure export can bake
+# without the GUI). Same crate the app used.
+colorous = "1"
+# G1 figure export (io::figure): base64 embeds the Doulos SIL font + the
+# spectrogram raster PNG into self-contained SVG figures; `png` encodes the
+# baked RGBA raster. Both tiny + pure-Rust, already in the lock tree.
+base64 = "0.22"
+png = "0.17"
+# G1.1 SVG→PDF (feature = "figure-pdf"). Pure Rust (usvg/resvg family); its
+# usvg flattens the figure's <text> to paths and decodes the embedded PNG
+# raster. Off by default — see the `figure-pdf` feature.
+svg2pdf = { version = "0.13", optional = true, default-features = false, features = ["text", "image"] }
+# SVG → RGBA rasterisation for figure→clipboard (feature = "figure-pdf"). Same
+# usvg/tiny-skia tree svg2pdf pulls in; re-exports usvg + tiny_skia so no extra
+# direct deps. `raster-images` is required so the embedded spectrogram PNG
+# `<image>` actually decodes (without it the spectrogram lane silently drops).
+# Version tracks svg2pdf's usvg (0.45).
+resvg = { version = "0.45", optional = true, default-features = false, features = ["text", "raster-images"] }
 # E11 ML inference (feature = "ml"). load-dynamic: no build-time ORT
 # download/link; the runtime ONNX Runtime is resolved at load time.
 ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = ["load-dynamic", "ndarray"] }

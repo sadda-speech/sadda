@@ -19,16 +19,17 @@ path = "src/main.rs"
 # `download` (implies `ml`) lets the app fetch acoustic models via the engine's
 # `hf://` resolver for native forced alignment (A5); the fetch stays dormant
 # until network is explicitly allowed. `ml` alone still runs a locally-present model.
-sadda-engine = { path = "../engine", features = ["ml", "download"] }
+sadda-engine = { path = "../engine", features = ["ml", "download", "figure-pdf"] }
 # `persistence` enables the eframe Storage trait the welcome screen's
 # recent-projects list and the window-state restore both ride on.
 eframe = { version = "0.34", features = ["persistence"] }
 egui_plot = "0.35"
 rfd = "0.17"
 serde = { version = "1", features = ["derive"] }
-# Matplotlib-faithful viridis / magma / greyscale colormaps for the B3
-# spectrogram. Pure Rust, no native deps, ~50 KB.
-colorous = "1"
+# Figure→clipboard (G-series): put a rasterised figure on the system clipboard
+# as an image. Already in the tree via eframe; declared directly so the copy
+# action can call `Clipboard::set_image`.
+arboard = "3"
 # C5 audio playback uses cpal's *output* side (same crate version
 # the engine + python crate already pull in for E1's input path).
 cpal = "0.17"

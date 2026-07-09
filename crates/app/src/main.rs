@@ -2701,6 +2701,159 @@ impl SaddaApp {
         }
     }
 
+    /// Exports a publication figure (G1) of the active bundle to `path` in
+    /// `format` (`"svg"` or `"pdf"`). The figure mirrors **what's on screen**:
+    /// which signal lanes to draw come from
+    /// [`crate::state::PersistedState::visible_lanes`], the spectrogram
+    /// parameters + colormap from the current `spectrogram` config, and the
+    /// tiers from those not hidden in the tier strip.
+    fn export_figure_for_active_bundle(&mut self, path: PathBuf, format: &str) {
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return;
+        };
+        let lanes = self.persisted.visible_lanes();
+        let sc = self.persisted.spectrogram;
+        let hidden = self.persisted.hidden_tier_ids.clone();
+        let opts = sadda_engine::io::figure::FigureExportOptions {
+            title: None,
+            include_waveform: lanes.waveform,
+            include_spectrogram: lanes.spectrogram,
+            include_f0: lanes.f0,
+            include_formants: lanes.formants,
+            include_intensity: lanes.intensity,
+            include_mfcc: lanes.mfcc,
+            // The embedding heatmap mirrors the on-screen embedding lane (which
+            // is visible exactly when a tier is selected for it).
+            embedding_tier_id: self.persisted.embedding.selected_tier_id,
+            width: sadda_engine::io::figure::FigureStyle::default().width,
+            font_size: None,
+            // Style overrides are GUI defaults for now (no style controls yet).
+            waveform_height: None,
+            spectrogram_height: None,
+            measure_height: None,
+            heatmap_height: None,
+            tier_height: None,
+            background: None,
+            stroke: None,
+            waveform_fill: None,
+            window_ms: sc.window_ms,
+            hop_ms: sc.hop_ms,
+            dynamic_range_db: sc.dynamic_range_db,
+            colormap: sc.colormap,
+            heatmap_colormap: None,
+            f0_min_hz: None,
+            f0_max_hz: None,
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        // The tier strip's visible tiers, in order (empty when the strip is hidden).
+        let tier_ids: Option<Vec<i64>> = if lanes.tier_strip {
+            Some(
+                project
+                    .tiers(Some(bundle_id))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|t| !hidden.contains(&t.id))
+                    .map(|t| t.id)
+                    .collect(),
+            )
+        } else {
+            Some(Vec::new())
+        };
+        let result = project.export_figure(bundle_id, &path, format, tier_ids.as_deref(), &opts);
+        match result {
+            Ok(()) => {
+                self.error = None;
+                self.set_info(format!("Wrote figure to {}", path.display()));
+            }
+            Err(e) => self.set_error(format!("Figure export failed: {e}")),
+        }
+    }
+
+    /// Renders the active bundle's figure (the on-screen lanes, per
+    /// [`Self::export_figure_for_active_bundle`]) to a raster and puts it on the
+    /// system clipboard as an image — for quick sharing (paste into a chat, doc,
+    /// or slide) without a save-file round-trip. Clipboard images must be
+    /// raster, not SVG, so this rasterises the same figure the exporter builds.
+    fn copy_figure_to_clipboard(&mut self) {
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return;
+        };
+        let lanes = self.persisted.visible_lanes();
+        let sc = self.persisted.spectrogram;
+        let hidden = self.persisted.hidden_tier_ids.clone();
+        let opts = sadda_engine::io::figure::FigureExportOptions {
+            title: None,
+            include_waveform: lanes.waveform,
+            include_spectrogram: lanes.spectrogram,
+            include_f0: lanes.f0,
+            include_formants: lanes.formants,
+            include_intensity: lanes.intensity,
+            include_mfcc: lanes.mfcc,
+            // The embedding heatmap mirrors the on-screen embedding lane (which
+            // is visible exactly when a tier is selected for it).
+            embedding_tier_id: self.persisted.embedding.selected_tier_id,
+            width: sadda_engine::io::figure::FigureStyle::default().width,
+            font_size: None,
+            // Style overrides are GUI defaults for now (no style controls yet).
+            waveform_height: None,
+            spectrogram_height: None,
+            measure_height: None,
+            heatmap_height: None,
+            tier_height: None,
+            background: None,
+            stroke: None,
+            waveform_fill: None,
+            window_ms: sc.window_ms,
+            hop_ms: sc.hop_ms,
+            dynamic_range_db: sc.dynamic_range_db,
+            colormap: sc.colormap,
+            heatmap_colormap: None,
+            f0_min_hz: None,
+            f0_max_hz: None,
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        let tier_ids: Option<Vec<i64>> = if lanes.tier_strip {
+            Some(
+                project
+                    .tiers(Some(bundle_id))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|t| !hidden.contains(&t.id))
+                    .map(|t| t.id)
+                    .collect(),
+            )
+        } else {
+            Some(Vec::new())
+        };
+        let rendered = project.render_figure_rgba(bundle_id, tier_ids.as_deref(), &opts);
+        let (w, h, rgba) = match rendered {
+            Ok(v) => v,
+            Err(e) => {
+                self.set_error(format!("Copy figure failed: {e}"));
+                return;
+            }
+        };
+        // Hand the bitmap to the OS clipboard.
+        let result = arboard::Clipboard::new().and_then(|mut cb| {
+            cb.set_image(arboard::ImageData {
+                width: w as usize,
+                height: h as usize,
+                bytes: std::borrow::Cow::Owned(rgba),
+            })
+        });
+        match result {
+            Ok(()) => {
+                self.error = None;
+                self.set_info("Copied figure to clipboard".to_string());
+            }
+            Err(e) => self.set_error(format!("Copy figure failed: {e}")),
+        }
+    }
+
     /// Pops a save-file dialog defaulting to the project's
     /// `exports/` directory + the active bundle's name + the
     /// requested extension. Returns `None` if the user cancels.
@@ -10463,6 +10616,57 @@ impl SaddaApp {
                         if let Some(path) = self.suggest_export_path("json") {
                             self.export_json_for_active_bundle(path);
                         }
+                    }
+                    ui.separator();
+                    if ui
+                        .button("Publication figure (SVG)…")
+                        .on_hover_text(
+                            "Export a waveform / spectrogram / tier figure of what's on \
+                             screen as a self-contained SVG",
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        if let Some(path) = self.suggest_export_path("svg") {
+                            self.export_figure_for_active_bundle(path, "svg");
+                        }
+                    }
+                    if ui
+                        .button("Publication figure (PDF)…")
+                        .on_hover_text(
+                            "Export the same figure as a self-contained PDF (vector, \
+                             journal-ready)",
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        if let Some(path) = self.suggest_export_path("pdf") {
+                            self.export_figure_for_active_bundle(path, "pdf");
+                        }
+                    }
+                    if ui
+                        .button("Publication figure (TikZ)…")
+                        .on_hover_text(
+                            "Export a standalone TikZ/LaTeX document (+ a spectrogram \
+                             PNG sidecar) — compile with XeLaTeX/LuaLaTeX",
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        if let Some(path) = self.suggest_export_path("tex") {
+                            self.export_figure_for_active_bundle(path, "tikz");
+                        }
+                    }
+                    if ui
+                        .button("Copy figure to clipboard")
+                        .on_hover_text(
+                            "Render the on-screen figure to an image and copy it — paste \
+                             into a chat, doc, or slide",
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        self.copy_figure_to_clipboard();
                     }
                 });
                 if !export_enabled {

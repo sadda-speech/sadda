@@ -5609,6 +5609,199 @@ impl Project {
         Ok(())
     }
 
+    /// Writes a publication **figure** of `bundle_id` (waveform / spectrogram /
+    /// annotation-tier lanes on a shared time axis) to `path`.
+    ///
+    /// `format` is currently `"svg"` — a self-contained SVG with the font and
+    /// spectrogram raster embedded; PDF and TikZ arrive in later G-series
+    /// slices. `tier_ids` (if given) selects which interval/point tiers to
+    /// draw, in that order; dense/reference tiers are never drawable. `opts`
+    /// controls the spectrogram parameters, which signal lanes to include, the
+    /// figure width, and the title.
+    pub fn export_figure(
+        &self,
+        bundle_id: i64,
+        path: impl AsRef<Path>,
+        format: &str,
+        tier_ids: Option<&[i64]>,
+        opts: &crate::io::figure::FigureExportOptions,
+    ) -> Result<()> {
+        let fmt = format.to_ascii_lowercase();
+        // "pdf" is only a valid request when the `figure-pdf` feature is on;
+        // otherwise it falls through to the unsupported-format error below.
+        let is_svg = fmt == "svg";
+        let is_pdf = fmt == "pdf" && cfg!(feature = "figure-pdf");
+        let is_tikz = fmt == "tikz";
+        if !is_svg && !is_pdf && !is_tikz {
+            let hint = if cfg!(feature = "figure-pdf") {
+                "\"svg\", \"pdf\", or \"tikz\""
+            } else {
+                "\"svg\" or \"tikz\" (this build has no PDF support)"
+            };
+            return Err(EngineError::Corpus(format!(
+                "figure export format {format:?} is not supported; expected {hint}"
+            )));
+        }
+        let mut spec = self.figure_spec_for_bundle(bundle_id, tier_ids, opts)?;
+
+        // TikZ can't embed a raster, so each raster lane (spectrogram + every
+        // heatmap) is written as a sidecar PNG next to the `.tex` and
+        // `\includegraphics`'d.
+        if is_tikz {
+            let stem = path
+                .as_ref()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("figure")
+                .to_string();
+            let write_sidecar = |name: &str, png: Vec<u8>| -> Result<()> {
+                std::fs::write(path.as_ref().with_file_name(name), png)
+                    .map_err(|e| EngineError::Corpus(format!("figure raster write failed: {e}")))
+            };
+            let spectrogram_ref = match crate::io::figure::spectrogram_png(&spec) {
+                Some(png) => {
+                    let name = format!("{stem}-spectrogram.png");
+                    write_sidecar(&name, png)?;
+                    Some(name)
+                }
+                None => None,
+            };
+            // Heatmap sidecars; stamp each lane's raster_ref for the serializer.
+            for (i, lane) in spec.heatmaps.iter_mut().enumerate() {
+                if lane.width == 0 || lane.height == 0 {
+                    continue;
+                }
+                let name = format!("{stem}-heatmap{i}.png");
+                let png = crate::io::figure::rgba_to_png_bytes(&lane.rgba, lane.width, lane.height);
+                write_sidecar(&name, png)?;
+                lane.raster_ref = Some(name);
+            }
+            let tex = crate::io::figure::to_tikz(&spec, spectrogram_ref.as_deref());
+            std::fs::write(path.as_ref(), tex)
+                .map_err(|e| EngineError::Corpus(format!("figure export write failed: {e}")))?;
+            return Ok(());
+        }
+
+        let bytes: Vec<u8> = if is_svg {
+            crate::io::figure::to_svg(&spec).into_bytes()
+        } else {
+            #[cfg(feature = "figure-pdf")]
+            {
+                crate::io::figure::to_pdf(&spec).map_err(EngineError::Corpus)?
+            }
+            // Unreachable when the feature is off: `is_pdf` is false there, so
+            // the guard above already returned. Keeps the match total.
+            #[cfg(not(feature = "figure-pdf"))]
+            {
+                unreachable!("pdf export requires the figure-pdf feature")
+            }
+        };
+        std::fs::write(path.as_ref(), bytes)
+            .map_err(|e| EngineError::Corpus(format!("figure export write failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Gathers a bundle's interval + point tiers as drawable
+    /// [`crate::io::figure::FigureTier`]s — filtered by `tier_ids` (in that
+    /// order) if given, otherwise all tiers in natural order. Dense and
+    /// reference tiers are skipped (they have no figure representation yet).
+    fn gather_figure_tiers(
+        &self,
+        bundle_id: i64,
+        tier_ids: Option<&[i64]>,
+    ) -> Result<Vec<crate::io::figure::FigureTier>> {
+        use crate::io::figure::{FigureInterval, FigurePoint, FigureTier, FigureTierContent};
+        let all = self.tiers(Some(bundle_id))?;
+        let ordered: Vec<&Tier> = match tier_ids {
+            Some(ids) => ids
+                .iter()
+                .filter_map(|id| all.iter().find(|t| t.id == *id))
+                .collect(),
+            None => all.iter().collect(),
+        };
+        let mut out = Vec::new();
+        for tier in ordered {
+            let content = match tier.r#type {
+                TierType::Interval => FigureTierContent::Intervals(
+                    self.intervals(tier.id)?
+                        .into_iter()
+                        .map(|iv| FigureInterval {
+                            start: iv.start_seconds,
+                            end: iv.end_seconds,
+                            label: iv.label.unwrap_or_default(),
+                        })
+                        .collect(),
+                ),
+                TierType::Point => FigureTierContent::Points(
+                    self.points(tier.id)?
+                        .into_iter()
+                        .map(|p| FigurePoint {
+                            time: p.time_seconds,
+                            label: p.label.unwrap_or_default(),
+                        })
+                        .collect(),
+                ),
+                _ => continue, // dense / reference tiers aren't drawable
+            };
+            out.push(FigureTier {
+                name: tier.name.clone(),
+                content,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Builds a [`crate::io::figure::FigureSpec`] for `bundle_id` — loads the
+    /// audio, gathers the drawable tiers, and assembles the lanes. Shared by
+    /// [`Self::export_figure`] and [`Self::render_figure_rgba`].
+    fn figure_spec_for_bundle(
+        &self,
+        bundle_id: i64,
+        tier_ids: Option<&[i64]>,
+        opts: &crate::io::figure::FigureExportOptions,
+    ) -> Result<crate::io::figure::FigureSpec> {
+        let audio = self.load_audio(bundle_id)?;
+        let samples: Vec<f32> = audio.mono_samples().collect();
+        let tiers = self.gather_figure_tiers(bundle_id, tier_ids)?;
+        let mut spec = crate::io::figure::build_spec(&samples, audio.sample_rate, tiers, opts);
+
+        // The embedding heatmap needs tier data, which `build_spec` (pure) can't
+        // read — bake it here where the project is in hand.
+        if let Some(tier_id) = opts.embedding_tier_id {
+            let matrix = self.read_continuous_vector(tier_id)?;
+            let (n_frames, n_dims) = (matrix.nrows(), matrix.ncols());
+            if let Some(lane) = crate::io::figure::matrix_heatmap(
+                "embedding",
+                |f, d| matrix[[f, d]] as f32,
+                n_frames,
+                n_dims,
+                opts.heatmap_cmap(),
+                &format!("d{}", n_dims.saturating_sub(1)),
+                "d0",
+            ) {
+                spec.heatmaps.push(lane);
+            }
+        }
+
+        Ok(spec)
+    }
+
+    /// Rasterises a publication figure of `bundle_id` to an `(width, height,
+    /// rgba)` bitmap (straight RGBA8, row-major) — for the GUI's
+    /// figure→clipboard action, where the clipboard needs a raster, not SVG.
+    /// Requires the engine `figure-pdf` feature (the app enables it). Same
+    /// lanes / tiers / options as [`Self::export_figure`].
+    #[cfg(feature = "figure-pdf")]
+    pub fn render_figure_rgba(
+        &self,
+        bundle_id: i64,
+        tier_ids: Option<&[i64]>,
+        opts: &crate::io::figure::FigureExportOptions,
+    ) -> Result<(u32, u32, Vec<u8>)> {
+        let spec = self.figure_spec_for_bundle(bundle_id, tier_ids, opts)?;
+        crate::io::figure::to_rgba(&spec).map_err(EngineError::Corpus)
+    }
+
     /// Imports an ELAN `.eaf` into `bundle_id`. Each EAF tier becomes a
     /// new [`Tier`] (interval / point / reference based on stereotype and
     /// annotation shape); each annotation becomes an `annotation_*` row
