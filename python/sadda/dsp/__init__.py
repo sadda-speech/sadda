@@ -59,6 +59,8 @@ __all__ = [
     "spectrogram",
     "stft",
     "voiced_pitch",
+    "estimate_pitch_range",
+    "speaker_pitch_range_pooled",
 ]
 
 hann = stable(_native.hann)
@@ -222,6 +224,27 @@ def estimate_pitch_range(
     https://doi.org/10.21437/SpeechProsody.2008-32."""
     return _native.estimate_pitch_range(
         audio, method=method, voicing_threshold=voicing_threshold
+    )
+
+
+@stable
+def speaker_pitch_range_pooled(
+    audios,
+    *,
+    method: str = "boersma",
+    voicing_threshold: float = 0.45,
+):
+    """Complete-pooling speaker pitch range: pool the voiced f0 of *all* a
+    speaker's recordings (``audios``, an iterable of :class:`Audio`) into one
+    distribution, then return a single ``(floor_hz, ceiling_hz)`` via the De
+    Looze & Hirst (2008) rule (``floor = 0.75·q25``, ``ceiling = 1.5·q75``), or
+    ``None`` if the pooled f0 has too few voiced frames.
+
+    Each recording is analysed over a wide range first so the pooled quartiles
+    aren't clipped. The partial-pooling companion is
+    :func:`speaker_pitch_ranges_shrunk` (empirical Bayes)."""
+    return _native.speaker_pitch_range_pooled(
+        list(audios), method=method, voicing_threshold=voicing_threshold
     )
 
 

@@ -281,6 +281,41 @@ pub const TWO_PASS_CEILING_HZ: f32 = 750.0;
 /// this the f0 distribution is too sparse for stable quartiles.
 pub const ADAPTIVE_MIN_VOICED: usize = 10;
 
+/// The usable voiced f0 values (Hz) in `frames`: `voicing >= voicing_threshold`,
+/// finite and positive.
+fn voiced_f0_values(
+    frames: &[PitchFrame],
+    voicing_threshold: f32,
+) -> impl Iterator<Item = f64> + '_ {
+    frames
+        .iter()
+        .filter(move |f| f.voicing >= voicing_threshold)
+        .map(|f| f.frequency_hz.value() as f64)
+        .filter(|&hz| hz.is_finite() && hz > 0.0)
+}
+
+/// Quantiles of a set of values by type-7 linear interpolation (NumPy's default
+/// `quantile`). `qs` are cut points in `[0, 1]`. Returns `None` when fewer than
+/// [`ADAPTIVE_MIN_VOICED`] values are present — too few for a stable estimate.
+fn quantiles_of(mut vs: Vec<f64>, qs: &[f64]) -> Option<Vec<f32>> {
+    if vs.len() < ADAPTIVE_MIN_VOICED {
+        return None;
+    }
+    vs.sort_by(|a, b| a.total_cmp(b));
+    let n = vs.len();
+    Some(
+        qs.iter()
+            .map(|&q| {
+                let pos = q.clamp(0.0, 1.0) * (n - 1) as f64;
+                let lo = pos.floor() as usize;
+                let hi = pos.ceil() as usize;
+                let frac = pos - lo as f64;
+                (vs[lo] + (vs[hi] - vs[lo]) * frac) as f32
+            })
+            .collect(),
+    )
+}
+
 /// Quantiles of the voiced f0 values in `frames` (those with
 /// `voicing >= voicing_threshold`).
 ///
@@ -294,28 +329,7 @@ pub fn voiced_f0_quantiles(
     voicing_threshold: f32,
     qs: &[f64],
 ) -> Option<Vec<f32>> {
-    let mut vs: Vec<f64> = frames
-        .iter()
-        .filter(|f| f.voicing >= voicing_threshold)
-        .map(|f| f.frequency_hz.value() as f64)
-        .filter(|&hz| hz.is_finite() && hz > 0.0)
-        .collect();
-    if vs.len() < ADAPTIVE_MIN_VOICED {
-        return None;
-    }
-    vs.sort_by(|a, b| a.total_cmp(b));
-    let n = vs.len();
-    let out = qs
-        .iter()
-        .map(|&q| {
-            let pos = q.clamp(0.0, 1.0) * (n - 1) as f64;
-            let lo = pos.floor() as usize;
-            let hi = pos.ceil() as usize;
-            let frac = pos - lo as f64;
-            (vs[lo] + (vs[hi] - vs[lo]) * frac) as f32
-        })
-        .collect();
-    Some(out)
+    quantiles_of(voiced_f0_values(frames, voicing_threshold).collect(), qs)
 }
 
 /// Estimates a speaker-appropriate `(floor_hz, ceiling_hz)` from a single
@@ -363,6 +377,29 @@ pub fn two_pass_pitch(audio: &Audio, config: &PitchConfig, method: PitchMethod) 
         cfg.max_freq_hz = ceiling;
     }
     pitch(audio, &cfg, method)
+}
+
+/// Complete-pooling speaker pitch range: pool the voiced f0 of *all* a speaker's
+/// recordings into one distribution, then apply the De Looze & Hirst formula
+/// once (`floor = 0.75·q25`, `ceiling = 1.5·q75`). One range shared by the
+/// speaker — the "complete pooling" end of the partial-pooling spectrum.
+///
+/// This is sadda's own speaker-adaptive baseline (the underlying quartile rule
+/// is De Looze & Hirst 2008); pair it with [`empirical_bayes_pitch_ranges`],
+/// which partially pools instead. Each recording's `frames` should come from a
+/// wide first pass (see [`TWO_PASS_FLOOR_HZ`]/[`TWO_PASS_CEILING_HZ`]) so the
+/// pooled distribution isn't clipped. Returns `None` if the speaker has too few
+/// voiced frames pooled across all recordings.
+pub fn pooled_pitch_range(
+    recordings: &[Vec<PitchFrame>],
+    voicing_threshold: f32,
+) -> Option<(f32, f32)> {
+    let pooled: Vec<f64> = recordings
+        .iter()
+        .flat_map(|frames| voiced_f0_values(frames, voicing_threshold))
+        .collect();
+    let q = quantiles_of(pooled, &[0.25, 0.75])?;
+    Some(pitch_range_from_quartiles(q[0], q[1]))
 }
 
 // [docs-impl:sadda.dsp.f0]  — engine algorithm behind the `sadda.dsp.f0`

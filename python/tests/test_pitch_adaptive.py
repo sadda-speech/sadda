@@ -51,3 +51,15 @@ def test_two_pass_recovers_tone(tmp_path: Path) -> None:
 def test_unknown_range_mode_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="range_mode"):
         dsp.voiced_pitch(_tone(tmp_path, 150.0), range_mode="nonsense")
+
+
+def test_speaker_pooled_range_spans_recordings(tmp_path: Path) -> None:
+    # Two recordings of one speaker at different registers → one pooled range
+    # covering both (complete pooling).
+    lo, hi = _tone(tmp_path, 120.0), _tone(tmp_path, 240.0)
+    rng = dsp.speaker_pitch_range_pooled([lo, hi])
+    assert rng is not None
+    floor, ceiling = rng
+    assert floor < 120.0 and ceiling > 240.0
+    assert floor == pytest.approx(0.75 * 120.0, rel=0.15)
+    assert ceiling == pytest.approx(1.5 * 240.0, rel=0.15)

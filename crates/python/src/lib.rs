@@ -3962,6 +3962,41 @@ fn estimate_pitch_range(
     ))
 }
 
+/// Complete-pooling speaker pitch range: pool the voiced f0 of all of a
+/// speaker's recordings into one distribution, then apply the De Looze & Hirst
+/// (2008) rule once (`floor = 0.75·q25`, `ceiling = 1.5·q75`). Returns one
+/// `(floor_hz, ceiling_hz)` for the speaker, or `None` if too few voiced frames
+/// pooled across the recordings.
+///
+/// Each recording is analysed over a wide range first so the pooled quartiles
+/// aren't clipped. This is the "complete pooling" baseline; its partial-pooling
+/// companion is `speaker_pitch_ranges_shrunk` (empirical Bayes).
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (audios, *, method="boersma", voicing_threshold=0.45))]
+fn speaker_pitch_range_pooled(
+    py: Python<'_>,
+    audios: Vec<Py<PyAudio>>,
+    method: &str,
+    voicing_threshold: f32,
+) -> PyResult<Option<(f32, f32)>> {
+    let pitch_method = parse_pitch_method(method)?;
+    let wide = sadda_engine::pitch::PitchConfig {
+        min_freq_hz: sadda_engine::pitch::TWO_PASS_FLOOR_HZ,
+        max_freq_hz: sadda_engine::pitch::TWO_PASS_CEILING_HZ,
+        voicing_threshold,
+        ..sadda_engine::pitch::PitchConfig::default()
+    };
+    let recordings: Vec<Vec<sadda_engine::pitch::PitchFrame>> = audios
+        .iter()
+        .map(|a| sadda_engine::pitch::pitch(&a.borrow(py).inner, &wide, pitch_method))
+        .collect();
+    Ok(sadda_engine::pitch::pooled_pitch_range(
+        &recordings,
+        voicing_threshold,
+    ))
+}
+
 /// Computes per-frame formants over an [`Audio`] via LPC + polynomial
 /// root-finding. Returns a list of `FormantFrame`s; each frame has
 /// variable-length `frequencies` / `bandwidths` (honestly empty for frames
@@ -4613,6 +4648,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(intensity, m)?)?;
     m.add_function(wrap_pyfunction!(voiced_pitch, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_pitch_range, m)?)?;
+    m.add_function(wrap_pyfunction!(speaker_pitch_range_pooled, m)?)?;
     m.add_function(wrap_pyfunction!(formants, m)?)?;
     m.add_function(wrap_pyfunction!(mfcc, m)?)?;
     m.add_function(wrap_pyfunction!(log_mel_whisper, m)?)?;

@@ -9,7 +9,8 @@ use std::path::PathBuf;
 use sadda_engine::Audio;
 use sadda_engine::pitch::{
     ADAPTIVE_MIN_VOICED, PitchConfig, PitchFrame, PitchMethod, TWO_PASS_CEILING_HZ,
-    TWO_PASS_FLOOR_HZ, estimate_pitch_range, two_pass_pitch, voiced_f0_quantiles,
+    TWO_PASS_FLOOR_HZ, estimate_pitch_range, pooled_pitch_range, two_pass_pitch,
+    voiced_f0_quantiles,
 };
 use sadda_engine::units::Hertz;
 
@@ -149,4 +150,26 @@ fn two_pass_falls_back_when_range_unestimable() {
     let silence = Audio::from_samples(vec![0.0f32; 16_000], 16_000, 1);
     let cfg = PitchConfig::default();
     let _ = two_pass_pitch(&silence, &cfg, PitchMethod::Boersma);
+}
+
+#[test]
+fn pooled_range_spans_a_speakers_recordings() {
+    // Two recordings of one speaker at different registers: complete pooling
+    // gives a single range covering both — floor from the low recording, ceiling
+    // from the high — unlike either recording's own two-pass range.
+    let low: Vec<PitchFrame> = (0..30).map(|i| frame(120.0, 1.0, i)).collect();
+    let high: Vec<PitchFrame> = (0..30).map(|i| frame(200.0, 1.0, i)).collect();
+    let (floor, ceiling) = pooled_pitch_range(&[low, high], 0.45).expect("enough voiced");
+    // Pooled quartiles: q25 = 120, q75 = 200 → floor = 0.75·120 = 90,
+    // ceiling = 1.5·200 = 300.
+    assert!((floor - 90.0).abs() < 1.0, "pooled floor {floor:.1}");
+    assert!((ceiling - 300.0).abs() < 1.0, "pooled ceiling {ceiling:.1}");
+}
+
+#[test]
+fn pooled_range_none_when_pooled_voicing_sparse() {
+    // Too few voiced frames pooled across all recordings → None.
+    let a: Vec<PitchFrame> = (0..3).map(|i| frame(120.0, 1.0, i)).collect();
+    let b: Vec<PitchFrame> = (0..3).map(|i| frame(130.0, 1.0, i)).collect();
+    assert!(pooled_pitch_range(&[a, b], 0.45).is_none());
 }

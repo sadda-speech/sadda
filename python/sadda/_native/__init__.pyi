@@ -75,6 +75,7 @@ __all__ = [
     "perturbation",
     "probe_wav",
     "schema_version",
+    "speaker_pitch_range_pooled",
     "spectrogram",
     "stft",
     "syllabify",
@@ -2600,6 +2601,19 @@ def probe_wav(path: builtins.str | os.PathLike | pathlib.Path) -> AudioProbe:
 def schema_version() -> builtins.int:
     r"""
     Returns the highest corpus-database schema version this engine supports.
+    """
+
+def speaker_pitch_range_pooled(audios: typing.Sequence[Audio], *, method: builtins.str = 'boersma', voicing_threshold: builtins.float = 0.44999998807907104) -> typing.Optional[tuple[builtins.float, builtins.float]]:
+    r"""
+    Complete-pooling speaker pitch range: pool the voiced f0 of all of a
+    speaker's recordings into one distribution, then apply the De Looze & Hirst
+    (2008) rule once (`floor = 0.75·q25`, `ceiling = 1.5·q75`). Returns one
+    `(floor_hz, ceiling_hz)` for the speaker, or `None` if too few voiced frames
+    pooled across the recordings.
+    
+    Each recording is analysed over a wide range first so the pooled quartiles
+    aren't clipped. This is the "complete pooling" baseline; its partial-pooling
+    companion is `speaker_pitch_ranges_shrunk` (empirical Bayes).
     """
 
 def spectrogram(samples: numpy.typing.NDArray[numpy.float32], frame_size: builtins.int, hop_size: builtins.int, *, window: typing.Optional[numpy.typing.NDArray[numpy.float32]] = None) -> numpy.typing.NDArray[numpy.float32]:
