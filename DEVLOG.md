@@ -6,6 +6,54 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-08 — G0: figure-export groundwork (bake moves engine-side)
+
+First slice of the **G-series** (publication figure export), picking up the
+figure-export strand after the S-series doc-image pipeline landed. Pure
+groundwork — **no user surface** — that unblocks G1's headless SVG/PDF figure.
+
+**Course correction first.** Started this session thinking `feat/figure-export`
+was a 19-commit branch of *unlanded* work to rebase onto main. It wasn't: a
+tree diff showed the branch is **already fully merged** (squash-merged as PR #19
+for the doc-image pipeline + #5–#9 for the DSP presets) — `doc_render.rs` on
+main is byte-identical to the branch, and `main..branch` is almost all
+deletions (main *has* the align/asr/tts/syllable work the stale branch predates).
+So no rebase; the branch is subsumed. The real open work is the G-series, which
+is greenfield (`io/figure.rs` doesn't exist yet).
+
+**The one real refactor (per the 2026-07-01 design).** The spectrogram bake
+pipeline lived in the **app** (`state.rs`): `power_to_db_normalized`,
+`colormap_bake`, `sample_colormap`, and the `ColormapKind` enum. Headless,
+three-surface figure export needs that bake available engine-side, so it moved:
+
+- **`sadda_engine::dsp::colormap`** (new) — `ColormapKind` (+ `label()` +
+  `sample()`); the `colorous` dep moved engine-side with it (removed from the
+  app). Viridis/Magma/Cividis/Hot/Greyscale, unchanged.
+- **`sadda_engine::dsp::spectrogram`** — gains `power_to_db_normalized` +
+  `colormap_bake` (+ `POWER_DB_FLOOR`) alongside the existing
+  `power_spectrogram`. A freq-major power matrix → normalised dB-FS → row-major
+  opaque RGBA (y-flipped), the exact bytes the GUI drew.
+- **App re-exports** the three names from `crate::state` so every existing
+  `compute_spectrogram_image` / MFCC-lane / embedding-lane caller in `main.rs`
+  is untouched — a literal move, not a reimplementation.
+
+**`visible_lanes()` accessor.** Consolidates the scattered per-lane visibility
+(structural `panes`, measure `tracks`, `mfcc.show`, embedding tier-selection)
+into one `VisibleLanes` descriptor, so G1's export dialog can default its
+per-element include checkboxes from a single source of truth. `#[allow(dead_code)]`
+until G1 consumes it (its tests are part of this slice). Note the 2026-07-01
+design predates the S-series pane toggles, so this reads the *current*
+(post-S3) visibility model, not the design's assumed one.
+
+**Verification.** Parity is pinned by construction (moved, not rewritten) plus
+the moved unit tests (exact greyscale @0.5 → 128, hot-ramp byte values, y-flip)
+and a new end-to-end pipeline test (real-audio STFT → normalise → bake: shape,
+`[0,1]` range, full opacity). Engine 303 + app 109 tests green; workspace
+`clippy -D warnings` (incl. the `download` feature) + `fmt` clean.
+
+**Next:** G1 — `FigureSpec` IR + SVG serializer (waveform + spectrogram + tiers,
+specTeX-parity) + PDF, Python `export_figure(...)`, GUI "Export figure…" dialog.
+
 ## 2026-07-07 — A5.3: forced alignment in the GUI (completes A5 + the A-series)
 
 The last A-series slice: an **Annotate ▸ Align…** action that force-aligns a

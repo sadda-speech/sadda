@@ -144,9 +144,13 @@ _Designed 2026-07-01 (see DEVLOG design entry). `FigureSpec` IR in
   PNG via a file dialog (reuses/un-gates the F12 screenshot path). The manual/
   hand-draw tier; named capture + headless automation build on top (S3–S8). —
   _added 2026-07-01_
-- [ ] **G0 — figure-export groundwork** — move the colormap/spectrogram bake into
-  the engine + expose the spectrogram raster/matrix; add a `visible_lanes()`
-  accessor to the app. Bake-parity test; no user surface. — _added 2026-07-01_
+- [x] **G0 — figure-export groundwork** _(done 2026-07-08, feat/figure-export-g0)_ —
+  moved the colormap/spectrogram bake engine-side (`dsp::colormap::ColormapKind`
+  + `dsp::spectrogram::{power_to_db_normalized, colormap_bake}`; `colorous` dep
+  moved too), app re-exports so callers are untouched; added a `visible_lanes()`
+  accessor (`VisibleLanes`, reads the current post-S3 visibility model).
+  Bake-parity via moved unit tests + a new end-to-end pipeline test. No user
+  surface. — _added 2026-07-01_
 - [ ] **G1 — first shippable figure** — `FigureSpec` IR + **SVG** serializer for
   waveform + spectrogram + tiers (specTeX-parity core) + PDF via SVG→PDF; Python
   `export_figure(...)`; GUI "Export figure…" dialog with per-element include

@@ -32,6 +32,10 @@ spike = []
 # /cookies, no async runtime — see the network spike.
 ureq = { version = "3", optional = true, default-features = false, features = ["rustls"] }
 arrow = { version = "58", default-features = false }
+# Perceptually-uniform colormaps (Viridis/Magma/Cividis) for the spectrogram
+# raster bake (G0 — moved engine-side so headless figure export can bake
+# without the GUI). Same crate the app used.
+colorous = "1"
 # E11 ML inference (feature = "ml"). load-dynamic: no build-time ORT
 # download/link; the runtime ONNX Runtime is resolved at load time.
 ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = ["load-dynamic", "ndarray"] }

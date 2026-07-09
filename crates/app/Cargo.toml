@@ -26,9 +26,6 @@ eframe = { version = "0.34", features = ["persistence"] }
 egui_plot = "0.35"
 rfd = "0.17"
 serde = { version = "1", features = ["derive"] }
-# Matplotlib-faithful viridis / magma / greyscale colormaps for the B3
-# spectrogram. Pure Rust, no native deps, ~50 KB.
-colorous = "1"
 # C5 audio playback uses cpal's *output* side (same crate version
 # the engine + python crate already pull in for E1's input path).
 cpal = "0.17"

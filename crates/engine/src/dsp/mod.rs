@@ -6,6 +6,7 @@
 //!
 //! Design: see the 2026-05-21 DEVLOG entry "Foundational DSP (C1)".
 
+pub mod colormap;
 pub mod formant_preset;
 pub mod formants;
 pub mod intensity;
@@ -18,6 +19,7 @@ pub mod spectrogram;
 pub mod stft;
 pub mod windowing;
 
+pub use colormap::ColormapKind;
 pub use formant_preset::{FormantPreset, FormantPresetStore, formant_builtin_presets};
 pub use formants::{FormantFrame, FormantsConfig, formants};
 pub use intensity::{IntensityFrame, intensity};
@@ -29,7 +31,7 @@ pub use mfcc::{
 };
 pub use preset::{MfccPreset, MfccPresetStore, builtin_presets};
 pub use roots::polynomial_roots;
-pub use spectrogram::power_spectrogram;
+pub use spectrogram::{colormap_bake, power_spectrogram, power_to_db_normalized};
 pub use stft::{Shape, stft};
 pub use windowing::{blackman, gaussian, hamming, hann, kaiser};
 

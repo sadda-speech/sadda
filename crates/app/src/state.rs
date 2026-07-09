@@ -193,7 +193,55 @@ impl Default for PersistedState {
     }
 }
 
+/// G0 (figure-export groundwork): a single consolidated descriptor of which
+/// signal-column lanes are currently visible.
+///
+/// Lane visibility is otherwise scattered across several `PersistedState`
+/// fields — structural panes in `panes`, measure lanes in `tracks`,
+/// `mfcc.show`, and the embedding tier selection — with no one place to ask
+/// "what is on screen?". The figure-export dialog (G1) defaults its
+/// per-element include checkboxes from this, and the headless exporter reads
+/// it to decide which lanes to draw, so a figure matches what the user saw.
+///
+// Consumed by the figure-export dialog + serializer in G1; unused until then,
+// hence the `allow` (the accessor + its tests are the G0 deliverable).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisibleLanes {
+    pub waveform: bool,
+    pub spectrogram: bool,
+    pub f0: bool,
+    pub formants: bool,
+    pub intensity: bool,
+    pub vad: bool,
+    pub mfcc: bool,
+    pub embedding: bool,
+    pub tier_strip: bool,
+}
+
 impl PersistedState {
+    /// Builds the current [`VisibleLanes`] descriptor from the scattered
+    /// per-lane visibility flags. Pure — reads only persisted state, no live
+    /// GUI context, so the headless doc/figure path can call it too.
+    ///
+    /// The embedding lane is "visible" exactly when a tier is selected for it
+    /// (its default `None` selection is what hides it).
+    // Wired into the G1 export dialog; unused until that slice lands.
+    #[allow(dead_code)]
+    pub fn visible_lanes(&self) -> VisibleLanes {
+        VisibleLanes {
+            waveform: self.panes.waveform,
+            spectrogram: self.panes.spectrogram,
+            f0: self.tracks.f0_visible,
+            formants: self.tracks.formants_visible,
+            intensity: self.tracks.intensity_visible,
+            vad: self.tracks.vad_visible,
+            mfcc: self.mfcc.show,
+            embedding: self.embedding.selected_tier_id.is_some(),
+            tier_strip: self.panes.tier_strip,
+        }
+    }
+
     /// Records a project open. Moves the path to the front of the list,
     /// removing duplicates and capping the total at
     /// [`MAX_RECENT_PROJECTS`].
@@ -226,6 +274,39 @@ mod tests {
         assert!(!cfg.formants_visible);
         assert!(!cfg.intensity_visible);
         assert!(cfg.any_visible());
+    }
+
+    #[test]
+    fn visible_lanes_reflects_defaults() {
+        // Default: structural panes all shown, only f0 among measure lanes,
+        // mfcc + embedding hidden.
+        let lanes = PersistedState::default().visible_lanes();
+        assert!(lanes.waveform);
+        assert!(lanes.spectrogram);
+        assert!(lanes.tier_strip);
+        assert!(lanes.f0);
+        assert!(!lanes.formants);
+        assert!(!lanes.intensity);
+        assert!(!lanes.vad);
+        assert!(!lanes.mfcc);
+        assert!(!lanes.embedding);
+    }
+
+    #[test]
+    fn visible_lanes_tracks_each_source_field() {
+        let mut s = PersistedState::default();
+        s.panes.waveform = false;
+        s.tracks.formants_visible = true;
+        s.mfcc.show = true;
+        s.embedding.selected_tier_id = Some(7);
+        let lanes = s.visible_lanes();
+        assert!(!lanes.waveform, "structural pane toggle feeds through");
+        assert!(lanes.formants, "measure-lane toggle feeds through");
+        assert!(lanes.mfcc, "mfcc.show feeds through");
+        assert!(
+            lanes.embedding,
+            "a selected embedding tier makes it visible"
+        );
     }
 
     #[test]
@@ -493,39 +574,9 @@ pub fn build_envelope(samples: &[f32], target_buckets: usize) -> Vec<(f32, f32)>
 // Spectrogram (B3): config + pure-data helpers
 // ---------------------------------------------------------------------------
 
-/// Which colormap the spectrogram pane uses to map normalised power
-/// values into RGB. Default is `Viridis` (perceptually uniform).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum ColormapKind {
-    /// Modern perceptually-uniform default; dark purple → blue → green → yellow.
-    #[default]
-    Viridis,
-    /// Dark-mode-friendly perceptually-uniform alternate; black → purple → red → yellow.
-    Magma,
-    /// matplotlib / MATLAB `hot`: black → red → orange → yellow → white — a
-    /// piecewise-linear RGB ramp (red fills first, then green, then blue).
-    /// Not perceptually uniform, unlike Viridis / Magma / Cividis.
-    Hot,
-    /// Perceptually-uniform map optimised for colour-vision deficiency
-    /// (dark blue → grey → yellow). The accessibility pick — it stays
-    /// monotonic in luminance for all common forms of CVD.
-    Cividis,
-    /// Classic black-and-white spectrogram; Praat refugees.
-    Greyscale,
-}
-
-impl ColormapKind {
-    /// Human-readable label for the toolbar `ComboBox`.
-    pub fn label(self) -> &'static str {
-        match self {
-            ColormapKind::Viridis => "Viridis",
-            ColormapKind::Magma => "Magma",
-            ColormapKind::Hot => "Hot",
-            ColormapKind::Cividis => "Cividis (CVD-safe)",
-            ColormapKind::Greyscale => "Greyscale",
-        }
-    }
-}
+// `ColormapKind` (with its `label()` and colormap sampling) lives in the
+// engine (`sadda_engine::dsp::colormap`) as of G0 and is re-exported below
+// alongside the bake helpers.
 
 /// Colour scheme for the measure-track lanes and reference overlays.
 /// `Default` keeps the original warm-leaning scheme; `OkabeIto` swaps in
@@ -975,212 +1026,17 @@ impl MfccC0Display {
     }
 }
 
-/// Floor for converting linear power to dB-FS without blowing up on
-/// silent frames. Matches the floor [`crate::state::power_to_db_normalized`]
-/// applies when `power == 0`.
-const POWER_DB_FLOOR: f32 = -200.0;
-
-/// Converts linear power values into `[0, 1]` normalised dB-FS,
-/// suitable for direct colormap indexing.
-///
-/// Pipeline per cell:
-/// 1. `db = 10 · log10(power)` (or `POWER_DB_FLOOR` for silent cells).
-/// 2. Find the global max across the buffer.
-/// 3. Re-reference: `db_rel = db - max_db`.
-/// 4. Clamp to `[-dynamic_range_db, 0]`.
-/// 5. Normalise to `[0, 1]`: `(db_rel + dynamic_range_db) / dynamic_range_db`.
-///
-/// Returns an empty vector for empty input. `dynamic_range_db` must
-/// be `> 0`; values `<=0` are treated as `1.0` to avoid div-by-zero.
-pub fn power_to_db_normalized(power: &[f32], dynamic_range_db: f32) -> Vec<f32> {
-    if power.is_empty() {
-        return Vec::new();
-    }
-    let dr = if dynamic_range_db > 0.0 {
-        dynamic_range_db
-    } else {
-        1.0
-    };
-    // 1. power → dB (with floor for zeros).
-    let mut db: Vec<f32> = power
-        .iter()
-        .map(|&p| {
-            if p > 0.0 {
-                10.0 * p.log10()
-            } else {
-                POWER_DB_FLOOR
-            }
-        })
-        .collect();
-    // 2. global max.
-    let max_db = db.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    // 3–5. re-reference, clamp, normalise. In-place to save the alloc.
-    for d in db.iter_mut() {
-        let rel = (*d - max_db).clamp(-dr, 0.0);
-        *d = (rel + dr) / dr;
-    }
-    db
-}
-
-/// Bakes a normalised `[0, 1]` freq-major buffer into a row-major
-/// `RGBA8` image suitable for `egui::ColorImage::from_rgba_unmultiplied`.
-///
-/// `power` is laid out as `height` rows of `width` columns (a
-/// freq-major spectrogram, `[freq_bin * width + frame]`). The output
-/// flips the y-axis so frequency increases bottom→top in image
-/// coordinates, which is the convention every spectrogram viewer
-/// uses.
-pub fn colormap_bake(
-    power: &[f32],
-    width: usize,
-    height: usize,
-    colormap: ColormapKind,
-) -> Vec<u8> {
-    debug_assert_eq!(power.len(), width * height, "colormap_bake: shape mismatch");
-    let mut out = vec![0u8; width * height * 4];
-    for y in 0..height {
-        // Flip: image row 0 is at the top, which should show the
-        // highest frequency bin (`height - 1`).
-        let bin = height - 1 - y;
-        for x in 0..width {
-            let v = power[bin * width + x].clamp(0.0, 1.0);
-            let (r, g, b) = sample_colormap(colormap, v);
-            let i = (y * width + x) * 4;
-            out[i] = r;
-            out[i + 1] = g;
-            out[i + 2] = b;
-            out[i + 3] = 255;
-        }
-    }
-    out
-}
-
-fn sample_colormap(kind: ColormapKind, t: f32) -> (u8, u8, u8) {
-    let t = t.clamp(0.0, 1.0) as f64;
-    match kind {
-        ColormapKind::Viridis => {
-            let c = colorous::VIRIDIS.eval_continuous(t);
-            (c.r, c.g, c.b)
-        }
-        ColormapKind::Magma => {
-            let c = colorous::MAGMA.eval_continuous(t);
-            (c.r, c.g, c.b)
-        }
-        ColormapKind::Hot => {
-            // matplotlib / MATLAB `hot`: black → red → orange → yellow → white.
-            // Red fills over the first 3/8, green over the next 3/8, blue over
-            // the last 2/8.
-            let r = (8.0 / 3.0 * t).clamp(0.0, 1.0);
-            let g = ((8.0 * t - 3.0) / 3.0).clamp(0.0, 1.0);
-            let b = (4.0 * t - 3.0).clamp(0.0, 1.0);
-            (
-                (r * 255.0).round() as u8,
-                (g * 255.0).round() as u8,
-                (b * 255.0).round() as u8,
-            )
-        }
-        ColormapKind::Cividis => {
-            let c = colorous::CIVIDIS.eval_continuous(t);
-            (c.r, c.g, c.b)
-        }
-        ColormapKind::Greyscale => {
-            let v = (t * 255.0).round() as u8;
-            (v, v, v)
-        }
-    }
-}
+// G0 (figure-export groundwork): the spectrogram bake pipeline
+// (`power_to_db_normalized` + `colormap_bake`) and the `ColormapKind` enum
+// moved into the engine (`sadda_engine::dsp`) so headless figure export can
+// bake a spectrogram raster without the GUI. Re-exported here so the existing
+// `crate::state::{…}` references across the app keep resolving unchanged; the
+// unit tests for these moved with them.
+pub use sadda_engine::dsp::{ColormapKind, colormap_bake, power_to_db_normalized};
 
 #[cfg(test)]
-mod spectrogram_tests {
+mod appearance_default_tests {
     use super::*;
-
-    #[test]
-    fn power_to_db_normalized_empty_returns_empty() {
-        assert!(power_to_db_normalized(&[], 70.0).is_empty());
-    }
-
-    #[test]
-    fn power_to_db_normalized_constant_input_returns_ones() {
-        // All cells equal → all re-referenced to 0 dB → normalised to 1.
-        let out = power_to_db_normalized(&[1.0, 1.0, 1.0, 1.0], 70.0);
-        for v in out {
-            assert!((v - 1.0).abs() < 1e-6, "expected 1.0, got {v}");
-        }
-    }
-
-    #[test]
-    fn power_to_db_normalized_clamps_below_dynamic_range() {
-        // Max is 1.0 (0 dB); silent cell is at POWER_DB_FLOOR (very
-        // negative), should clamp to the bottom of the range (= 0.0).
-        let out = power_to_db_normalized(&[1.0, 0.0, 0.0, 0.0], 70.0);
-        assert!((out[0] - 1.0).abs() < 1e-6);
-        for &v in &out[1..] {
-            assert!(v.abs() < 1e-6, "silent cell should clamp to 0.0, got {v}");
-        }
-    }
-
-    #[test]
-    fn power_to_db_normalized_midpoint_is_half_at_floor_minus_half() {
-        // Cell at -35 dB relative to max with 70 dB range → 0.5 after
-        // normalisation.
-        // power that gives -35 dB relative: 10^(-3.5) ≈ 0.000316.
-        let out = power_to_db_normalized(&[1.0, 10f32.powf(-3.5)], 70.0);
-        assert!((out[1] - 0.5).abs() < 1e-3, "got {}", out[1]);
-    }
-
-    #[test]
-    fn colormap_bake_shape_is_rgba_height_times_width() {
-        let power = vec![0.5_f32; 6]; // 2 freq bins × 3 frames
-        let rgba = colormap_bake(&power, 3, 2, ColormapKind::Greyscale);
-        assert_eq!(rgba.len(), 3 * 2 * 4);
-        // Greyscale @ 0.5 ≈ (128, 128, 128, 255).
-        for chunk in rgba.chunks_exact(4) {
-            assert!((chunk[0] as i32 - 128).abs() < 2);
-            assert_eq!(chunk[0], chunk[1]);
-            assert_eq!(chunk[0], chunk[2]);
-            assert_eq!(chunk[3], 255);
-        }
-    }
-
-    #[test]
-    fn colormap_bake_flips_y_axis_so_highest_freq_is_at_top() {
-        // 2 freq bins × 1 frame. bin 0 (low) = 0.0, bin 1 (high) = 1.0.
-        let power = vec![0.0_f32, 1.0_f32];
-        let rgba = colormap_bake(&power, 1, 2, ColormapKind::Greyscale);
-        // Image row 0 (top) should reflect the high freq (1.0 → 255).
-        assert_eq!(rgba[0], 255, "image top row should be the high-freq cell");
-        // Image row 1 (bottom) should reflect the low freq (0.0 → 0).
-        assert_eq!(rgba[4], 0, "image bottom row should be the low-freq cell");
-    }
-
-    #[test]
-    fn cividis_colormap_is_distinct() {
-        // Endpoints differ, and Cividis differs from Viridis at the
-        // midpoint — guards the new match arm against accidentally
-        // aliasing another scheme.
-        assert_ne!(
-            sample_colormap(ColormapKind::Cividis, 0.0),
-            sample_colormap(ColormapKind::Cividis, 1.0),
-        );
-        assert_ne!(
-            sample_colormap(ColormapKind::Cividis, 0.5),
-            sample_colormap(ColormapKind::Viridis, 0.5),
-        );
-    }
-
-    #[test]
-    fn hot_colormap_ramps_black_to_white_and_is_not_magma() {
-        // black → red → orange → yellow → white (matplotlib/MATLAB `hot`).
-        assert_eq!(sample_colormap(ColormapKind::Hot, 0.0), (0, 0, 0));
-        assert_eq!(sample_colormap(ColormapKind::Hot, 0.375), (255, 0, 0)); // red
-        assert_eq!(sample_colormap(ColormapKind::Hot, 0.75), (255, 255, 0)); // yellow
-        assert_eq!(sample_colormap(ColormapKind::Hot, 1.0), (255, 255, 255));
-        // Magma is preserved as its own (distinct) perceptually-uniform map.
-        assert_ne!(
-            sample_colormap(ColormapKind::Hot, 0.5),
-            sample_colormap(ColormapKind::Magma, 0.5),
-        );
-    }
 
     #[test]
     fn appearance_defaults_are_native_scale_and_default_palette() {

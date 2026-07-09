@@ -4346,7 +4346,6 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 name = "sadda-app"
 version = "0.5.0"
 dependencies = [
- "colorous",
  "cpal",
  "eframe",
  "egui_kittest",
@@ -4368,6 +4367,7 @@ name = "sadda-engine"
 version = "0.5.0"
 dependencies = [
  "arrow",
+ "colorous",
  "cpal",
  "directories",
  "divan",
