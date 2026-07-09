@@ -251,8 +251,13 @@ impl Default for HnrConfig {
 }
 
 /// Mean harmonics-to-noise ratio (dB) of a sustained phonation, via the
-/// Boersma-1993 **cross-correlation** method (Praat's `To Harmonicity
-/// (cc)`).
+/// **cross-correlation** harmonicity method — Praat's `To Harmonicity (cc)`
+/// (<https://www.fon.hum.uva.nl/praat/manual/Sound__To_Harmonicity__cc____.html>).
+/// The HNR-from-normalized-correlation framework is Boersma (1993,
+/// <https://www.fon.hum.uva.nl/paul/papers/Proceedings_1993.pdf>); note that
+/// paper develops the *autocorrelation* variant — the cross-correlation variant
+/// used here is Praat's own, documented in the manual with no separate
+/// publication.
 ///
 /// Per frame, the maximum normalized cross-correlation `r` over the
 /// pitch lag range gives `HNR = 10·log10(r / (1 − r))`; the mean is
@@ -361,6 +366,14 @@ impl Default for CppsConfig {
 /// the prominence of the cepstral peak (at the f0 quefrency) above the
 /// cepstrum's regression tilt line, averaged over frames. Praat's
 /// `PowerCepstrogram` → `Get CPPS`.
+///
+/// Primary sources: Hillenbrand & Houde (1996), which introduced the smoothed
+/// cepstral measure for continuous speech
+/// (<https://doi.org/10.1044/jshr.3902.311>), and Heman-Ackah et al. (2003),
+/// which established CPPS as a reliable dysphonia measure
+/// (<https://doi.org/10.1177/000348940311200406>). CLEAN-ROOM: reproduced from
+/// these publications and the Praat manual, with Praat as the validation
+/// oracle.
 ///
 /// The prominence (peak − tilt line) is invariant to the cepstrum's
 /// overall scaling, so it's robust to FFT-normalization / log-base /

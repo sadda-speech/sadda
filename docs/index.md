@@ -34,7 +34,8 @@ for users who don't need VAD / embeddings; ML calls raise a clean
   Polars DataFrame.
 - **[Text-to-speech](tts.md)** — synthesize narration for generated docs
   (or any TTS task) through a pluggable backend, with content-hash caching
-  and 100+ languages via espeak-ng.
+  and [100+ languages](https://github.com/espeak-ng/espeak-ng/blob/master/docs/languages.md)
+  via espeak-ng.
 - **[Forced alignment](align.md)** — time-align a transcript to audio into
   Word and Phone tiers (IPA), with espeak-ng G2P + a multilingual neural
   acoustic model.
