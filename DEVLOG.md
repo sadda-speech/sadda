@@ -6,6 +6,45 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-08 — G4: heatmap lanes (MFCC) + style knobs — completes the G-series
+
+The last G-series slice: an **MFCC heatmap lane** and the first **style knobs**,
+completing the "whole signal column" figure — waveform + spectrogram + f0 +
+formants + intensity + MFCC + tiers, in one export.
+
+**Heatmap lane.** `FigureSpec.heatmaps: Vec<HeatmapLane>` (a baked colormap
+raster like the spectrogram, but for a generic matrix, with a name +
+top/bottom labels + an optional `raster_ref` sidecar). `build_heatmap_lanes`
+computes MFCC (`dsp::mfcc`, 13 coeffs), **per-coefficient min-max normalised**
+so the c0 energy term doesn't wash out the rest, baked with the figure colormap.
+Opt-in via `mfcc`.
+
+**Both backends, generalised sidecars.** SVG/PDF inline the heatmap PNG;
+**TikZ** now writes *every* raster lane (spectrogram + each heatmap) as its own
+sidecar (`<stem>-spectrogram.png`, `<stem>-heatmap0.png`, …) and stamps each
+lane's `raster_ref` — the earlier single-spectrogram-sidecar path generalised.
+
+**Style knobs.** `FigureExportOptions.font_size: Option<f64>` (defaults when
+`None`) as the first exposed knob, applied to the style in `build_spec`; width
++ colormap were already exposed. Fuller style surface (per-lane heights,
+palette, fonts) is a noted refinement.
+
+**Surfaces.** Python `export_figure(mfcc=…, font_size=…)`; GUI reads
+`visible_lanes().mfcc`.
+
+**Verified — rendered the whole column.** A full waveform+spectrogram+f0+
+formants+intensity+MFCC figure via the Python API: the MFCC heatmap shows clear
+cepstral structure separating the ɑ/i vowels; **two rasters embedded** (test
+asserts the count). A real **xelatex** compile of the whole-column TikZ figure
+(both sidecars) succeeds. Engine 18 figure tests; Python 12; 305 python +
+workspace `clippy -D warnings` + `fmt` clean.
+
+**G-series complete (G0–G4):** publication figure export — SVG · PDF · TikZ ·
+clipboard — of waveform / spectrogram / f0 / formants / intensity / MFCC / tiers,
+across engine + Python + GUI. Remaining figure work is all backlog refinements
+(embedding-raster heatmap, VAD lane, SVG font subsetting, per-element export
+dialog, fuller style knobs, f0 octave robustness).
+
 ## 2026-07-08 — G3: measure lanes (f0 / formants / intensity, both backends)
 
 Stacked measure-track rows on the figure: **f0** (pitch contour), **formants**

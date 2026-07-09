@@ -82,6 +82,42 @@ def test_export_figure_with_measure_lanes() -> None:
         assert ">f0</text>" in svg
 
 
+def test_export_figure_whole_signal_column() -> None:
+    """Every lane at once: waveform + spectrogram + f0/formants/intensity +
+    MFCC heatmap + tiers — plus a style knob."""
+    with tempfile.TemporaryDirectory() as td:
+        proj, bundle = _project_with_annotated_bundle(Path(td))
+        out = Path(td) / "column.svg"
+        proj.export_figure(
+            bundle,
+            out,
+            f0=True,
+            formants=True,
+            intensity=True,
+            mfcc=True,
+            font_size=15.0,
+            colormap="magma",
+        )
+        svg = out.read_text()
+        assert ">MFCC</text>" in svg
+        assert ">intensity</text>" in svg
+        # Two rasters embedded: the spectrogram + the MFCC heatmap.
+        assert svg.count("data:image/png;base64,") == 2
+
+
+def test_export_figure_mfcc_tikz_writes_heatmap_sidecar() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        proj, bundle = _project_with_annotated_bundle(Path(td))
+        out = Path(td) / "hm.tex"
+        proj.export_figure(bundle, out, format="tikz", mfcc=True)
+        tex = out.read_text()
+        # Both raster sidecars are referenced + written.
+        assert "hm-spectrogram.png" in tex
+        assert "hm-heatmap0.png" in tex
+        assert (Path(td) / "hm-spectrogram.png").exists()
+        assert (Path(td) / "hm-heatmap0.png").exists()
+
+
 def test_export_figure_respects_include_flags() -> None:
     with tempfile.TemporaryDirectory() as td:
         proj, bundle = _project_with_annotated_bundle(Path(td))

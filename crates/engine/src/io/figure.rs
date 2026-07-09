@@ -60,6 +60,9 @@ pub struct FigureSpec {
     /// Measure-track lanes (f0 / formants / intensity …), each its own stacked
     /// row between the spectrogram and the tiers.
     pub measures: Vec<MeasureLane>,
+    /// Heatmap lanes (MFCC / embedding rasters), each a baked colormap raster
+    /// in its own row.
+    pub heatmaps: Vec<HeatmapLane>,
     /// Annotation-tier rows, drawn top-to-bottom in the given order.
     pub tiers: Vec<FigureTier>,
     /// Sizing, fonts, and colours.
@@ -77,6 +80,27 @@ pub struct MeasureLane {
     pub y_range: (f64, f64),
     /// One or more series drawn in the lane (e.g. F1…F5 as separate series).
     pub series: Vec<MeasureSeries>,
+}
+
+/// A heatmap lane — a baked colormap raster (MFCC coefficients, an embedding
+/// matrix, …) in its own row, like the spectrogram but for a generic matrix.
+pub struct HeatmapLane {
+    /// Lane name, drawn in the left margin (e.g. `"MFCC"`).
+    pub name: String,
+    /// Row-major RGBA8 (`width * height * 4`), row 0 = top — as
+    /// [`crate::dsp::colormap_bake`] produces.
+    pub rgba: Vec<u8>,
+    /// Raster width in cells (time frames).
+    pub width: usize,
+    /// Raster height in cells (matrix rows, e.g. coefficients).
+    pub height: usize,
+    /// Top y-axis label (e.g. the highest coefficient index).
+    pub top_label: String,
+    /// Bottom y-axis label (e.g. the lowest coefficient index).
+    pub bottom_label: String,
+    /// Sidecar PNG filename for backends that can't inline a raster (TikZ);
+    /// `None` for the inlining backends (SVG/PDF). Set by the exporter.
+    pub raster_ref: Option<String>,
 }
 
 /// One time-series in a [`MeasureLane`].
@@ -164,6 +188,8 @@ pub struct FigureStyle {
     pub spectrogram_height: f64,
     /// Height of each measure-track lane row (f0 / formants / intensity).
     pub measure_height: f64,
+    /// Height of each heatmap lane row (MFCC / embedding).
+    pub heatmap_height: f64,
     /// Height of each tier row.
     pub tier_height: f64,
     /// Left margin reserved for y-axis + tier-name labels.
@@ -191,6 +217,7 @@ impl Default for FigureStyle {
             waveform_height: 90.0,
             spectrogram_height: 220.0,
             measure_height: 80.0,
+            heatmap_height: 120.0,
             tier_height: 34.0,
             margin_left: 64.0,
             margin_right: 12.0,
@@ -223,8 +250,11 @@ struct FigureLayout {
     spec_y: Option<f64>,
     /// Top y of each measure lane, in order.
     measure_ys: Vec<f64>,
+    /// Top y of each heatmap lane, in order.
+    heatmap_ys: Vec<f64>,
     /// Bottom y of the signal-panel region (tiers start here; boundary lines
-    /// end here — they cross the waveform, spectrogram, and measure lanes).
+    /// end here — they cross the waveform, spectrogram, measure, and heatmap
+    /// lanes).
     panels_bottom: f64,
     /// Top y of each tier row, in order.
     tier_tops: Vec<f64>,
@@ -262,6 +292,11 @@ impl FigureLayout {
             measure_ys.push(y);
             y += s.measure_height;
         }
+        let mut heatmap_ys = Vec::with_capacity(spec.heatmaps.len());
+        for _ in &spec.heatmaps {
+            heatmap_ys.push(y);
+            y += s.heatmap_height;
+        }
         let panels_bottom = y;
 
         let mut tier_tops = Vec::with_capacity(spec.tiers.len());
@@ -280,6 +315,7 @@ impl FigureLayout {
             wave_y,
             spec_y,
             measure_ys,
+            heatmap_ys,
             panels_bottom,
             tier_tops,
             axis_y,
@@ -314,6 +350,7 @@ pub fn to_svg(spec: &FigureSpec) -> String {
         wave_y,
         spec_y,
         ref measure_ys,
+        ref heatmap_ys,
         panels_bottom,
         ref tier_tops,
         axis_y,
@@ -382,6 +419,18 @@ pub fn to_svg(spec: &FigureSpec) -> String {
             plot_x0,
             plot_x1,
             &x_of,
+            s,
+        ));
+    }
+
+    // Heatmap lanes (MFCC / embedding rasters).
+    for (lane, &top) in spec.heatmaps.iter().zip(heatmap_ys) {
+        out.push_str(&heatmap_svg(
+            lane,
+            top,
+            s.heatmap_height,
+            plot_x0,
+            plot_w,
             s,
         ));
     }
@@ -599,6 +648,38 @@ pub fn to_tikz(spec: &FigureSpec, raster_ref: Option<&str>) -> String {
                 }
             }
         }
+    }
+
+    // Heatmap lanes (MFCC / embedding): each a sidecar raster, like the
+    // spectrogram, plus name + top/bottom labels.
+    for (lane, &top) in spec.heatmaps.iter().zip(&lay.heatmap_ys) {
+        if let Some(r) = &lane.raster_ref {
+            b.push_str(&format!(
+                "\\node[anchor=north west,inner sep=0] at ({:.1},{:.1}) \
+                 {{\\includegraphics[width={:.1}pt,height={:.1}pt]{{{}}}}};\n",
+                lay.plot_x0,
+                ty(top),
+                lay.plot_w,
+                s.heatmap_height,
+                r,
+            ));
+        }
+        b.push_str(&format!(
+            "\\node[anchor=east,font=\\small] at ({:.1},{:.1}) {{{}}};\n",
+            lay.plot_x0 - 6.0,
+            ty(top + s.heatmap_height / 2.0),
+            tex_escape(&lane.name),
+        ));
+        b.push_str(&tikz_ylabel(
+            lay.plot_x0,
+            ty(top + s.font_size),
+            &lane.top_label,
+        ));
+        b.push_str(&tikz_ylabel(
+            lay.plot_x0,
+            ty(top + s.heatmap_height),
+            &lane.bottom_label,
+        ));
     }
 
     // Boundary lines through the signal panels (interval tiers only).
@@ -994,6 +1075,38 @@ fn measure_svg(
     out
 }
 
+fn heatmap_svg(
+    lane: &HeatmapLane,
+    top: f64,
+    height: f64,
+    plot_x0: f64,
+    plot_w: f64,
+    s: &FigureStyle,
+) -> String {
+    let mut out = String::new();
+    if lane.width > 0 && lane.height > 0 && lane.rgba.len() == lane.width * lane.height * 4 {
+        let png_b64 = rgba_to_png_base64(&lane.rgba, lane.width, lane.height);
+        out.push_str(&format!(
+            "<image x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" \
+             preserveAspectRatio=\"none\" xlink:href=\"data:image/png;base64,{}\" \
+             xmlns:xlink=\"http://www.w3.org/1999/xlink\"/>\n",
+            plot_x0, top, plot_w, height, png_b64
+        ));
+    }
+    // Lane name + top/bottom labels.
+    out.push_str(&format!(
+        "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"{:.1}\" text-anchor=\"end\" fill=\"{}\">{}</text>\n",
+        plot_x0 - 6.0,
+        top + height / 2.0 + s.font_size * 0.35,
+        s.font_size * 0.85,
+        s.stroke,
+        xml_escape(&lane.name),
+    ));
+    out.push_str(&y_label(plot_x0, top + s.font_size, &lane.top_label, s));
+    out.push_str(&y_label(plot_x0, top + height, &lane.bottom_label, s));
+    out
+}
+
 fn boundary_lines_svg(
     spec: &FigureSpec,
     y_top: f64,
@@ -1160,6 +1273,13 @@ fn y_label(plot_x0: f64, y: f64, text: &str, s: &FigureStyle) -> String {
     )
 }
 
+/// PNG-encodes an RGBA8 raster to bytes — for writing a heatmap-lane sidecar
+/// (the TikZ backend can't inline a raster). Public counterpart of
+/// [`spectrogram_png`] for the heatmap lanes.
+pub fn rgba_to_png_bytes(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
+    rgba_to_png(rgba, width, height)
+}
+
 /// PNG-encodes an RGBA8 raster to bytes.
 fn rgba_to_png(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
     let mut png_bytes = Vec::new();
@@ -1237,8 +1357,12 @@ pub struct FigureExportOptions {
     pub include_formants: bool,
     /// Draw the intensity measure lane.
     pub include_intensity: bool,
+    /// Draw the MFCC heatmap lane.
+    pub include_mfcc: bool,
     /// Overall figure width in px.
     pub width: f64,
+    /// Base font-size override in px (style knob); `None` keeps the default.
+    pub font_size: Option<f64>,
     /// STFT window length in milliseconds.
     pub window_ms: f32,
     /// STFT hop length in milliseconds.
@@ -1260,7 +1384,9 @@ impl Default for FigureExportOptions {
             include_f0: false,
             include_formants: false,
             include_intensity: false,
+            include_mfcc: false,
             width: FigureStyle::default().width,
+            font_size: None,
             window_ms: 25.0,
             hop_ms: 5.0,
             dynamic_range_db: 70.0,
@@ -1291,9 +1417,11 @@ pub fn build_spec(
     } else {
         0.0
     };
+    let default_style = FigureStyle::default();
     let style = FigureStyle {
         width: opts.width,
-        ..FigureStyle::default()
+        font_size: opts.font_size.unwrap_or(default_style.font_size),
+        ..default_style
     };
 
     let waveform = if opts.include_waveform && !samples.is_empty() {
@@ -1320,6 +1448,7 @@ pub fn build_spec(
     };
 
     let measures = build_measure_lanes(samples, sample_rate, opts);
+    let heatmaps = build_heatmap_lanes(samples, sample_rate, opts);
 
     FigureSpec {
         title: opts.title.clone(),
@@ -1327,9 +1456,66 @@ pub fn build_spec(
         waveform,
         spectrogram,
         measures,
+        heatmaps,
         tiers,
         style,
     }
+}
+
+/// Computes the requested heatmap lanes (MFCC …) from audio. Each matrix is
+/// per-row min-max normalised (so lower coefficients aren't washed out by the
+/// energy term) and baked with the figure's colormap.
+fn build_heatmap_lanes(
+    samples: &[f32],
+    sample_rate: u32,
+    opts: &FigureExportOptions,
+) -> Vec<HeatmapLane> {
+    let mut lanes = Vec::new();
+    if sample_rate == 0 || samples.is_empty() {
+        return lanes;
+    }
+    if opts.include_mfcc {
+        let arr = crate::dsp::mfcc(
+            samples,
+            sample_rate,
+            0.025,
+            0.010,
+            40,
+            13,
+            0.0,
+            sample_rate as f32 / 2.0,
+            crate::dsp::MfccMethod::default(),
+        );
+        let (n_frames, n_mfcc) = (arr.nrows(), arr.ncols());
+        if n_frames > 0 && n_mfcc > 0 {
+            // Per-coefficient min-max → [0, 1], coeff-major (row = coefficient).
+            let mut norm = vec![0.0_f32; n_mfcc * n_frames];
+            for c in 0..n_mfcc {
+                let mut lo = f32::INFINITY;
+                let mut hi = f32::NEG_INFINITY;
+                for f in 0..n_frames {
+                    let v = arr[[f, c]];
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+                let span = (hi - lo).max(1e-9);
+                for f in 0..n_frames {
+                    norm[c * n_frames + f] = (arr[[f, c]] - lo) / span;
+                }
+            }
+            let rgba = crate::dsp::colormap_bake(&norm, n_frames, n_mfcc, opts.colormap);
+            lanes.push(HeatmapLane {
+                name: "MFCC".to_string(),
+                rgba,
+                width: n_frames,
+                height: n_mfcc,
+                top_label: format!("c{}", n_mfcc - 1),
+                bottom_label: "c0".to_string(),
+                raster_ref: None,
+            });
+        }
+    }
+    lanes
 }
 
 /// Computes the requested measure lanes (f0 / formants / intensity) from audio
@@ -1600,6 +1786,15 @@ mod tests {
                     color: Some("#2b6cb0".to_string()),
                 }],
             }],
+            heatmaps: vec![HeatmapLane {
+                name: "MFCC".to_string(),
+                rgba: vec![64u8; 5 * 3 * 4], // 5 frames × 3 coeffs
+                width: 5,
+                height: 3,
+                top_label: "c2".to_string(),
+                bottom_label: "c0".to_string(),
+                raster_ref: None,
+            }],
             tiers: vec![
                 FigureTier {
                     name: "phones".to_string(),
@@ -1697,6 +1892,7 @@ mod tests {
                 max_freq_hz: 5000.0,
             }),
             measures: vec![],
+            heatmaps: vec![],
             tiers: vec![],
             style: FigureStyle::default(),
         };
@@ -1875,6 +2071,38 @@ mod tests {
         assert!(svg.contains(">f0</text>"));
         let tikz = to_tikz(&spec, None);
         assert!(tikz.contains("{intensity}"));
+    }
+
+    #[test]
+    fn build_spec_computes_mfcc_heatmap_and_renders_it() {
+        let sr = 16_000u32;
+        let n = (sr as f64 * 0.3) as usize;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (std::f32::consts::TAU * 200.0 * i as f32 / sr as f32).sin() * 0.5)
+            .collect();
+        let opts = FigureExportOptions {
+            include_mfcc: true,
+            ..FigureExportOptions::default()
+        };
+        let spec = build_spec(&samples, sr, vec![], &opts);
+        assert_eq!(spec.heatmaps.len(), 1);
+        let hm = &spec.heatmaps[0];
+        assert_eq!(hm.name, "MFCC");
+        assert_eq!(hm.height, 13); // 13 coefficients
+        assert_eq!(hm.rgba.len(), hm.width * hm.height * 4);
+        // Renders as an embedded raster in SVG, with its lane label.
+        let svg = to_svg(&spec);
+        assert!(svg.contains(">MFCC</text>"));
+    }
+
+    #[test]
+    fn font_size_style_knob_applies() {
+        let opts = FigureExportOptions {
+            font_size: Some(20.0),
+            ..FigureExportOptions::default()
+        };
+        let spec = build_spec(&[0.1_f32; 16_000], 16_000, vec![], &opts);
+        assert_eq!(spec.style.font_size, 20.0);
     }
 
     #[test]

@@ -199,9 +199,20 @@ _Designed 2026-07-01 (see DEVLOG design entry). `FigureSpec` IR in
   which inflates the data-driven y-range); switch to `autocorrelation_boersma`
   (octave cost + Viterbi). (3) expose the measure DSP params (pitch floor/ceiling,
   formant count/ceiling) to the figure API instead of defaults. — _added 2026-07-08_
-- [ ] **G4 — heatmap lanes + style knobs** — MFCC + embedding rasters; expose
-  colormap/palette/font/dimension overrides across Python + GUI (completes the
-  "whole signal column" default). — _added 2026-07-01_
+- [x] **G4 — heatmap lanes + style knobs** _(done 2026-07-08, feat/figure-export-g0)_ —
+  MFCC heatmap lane (`HeatmapLane`; `build_heatmap_lanes` via `dsp::mfcc`,
+  per-coefficient normalised, colormap-baked); SVG/PDF inline it, TikZ writes a
+  per-lane raster sidecar (generalised from the single spectrogram sidecar).
+  First style knob (`font_size`) + existing width/colormap. Three surfaces
+  (`mfcc=`/`font_size=` + GUI). Completes the "whole signal column". **Deferred:**
+  embedding-raster heatmap (needs continuous_vector tier data); fuller style
+  knobs. — _added 2026-07-01_
+- [ ] **Figure heatmap/style follow-ups** — (1) **embedding-raster heatmap lane**
+  from a `continuous_vector` tier (the other G4 heatmap; needs dense-tier read
+  plumbing into `build_heatmap_lanes`). (2) **Fuller style knobs** across Python
+  + GUI: per-lane heights, colormap per heatmap/spectrogram separately, palette,
+  font family/dimensions. (3) label crowding in short measure-lane left margins
+  (tighten spacing when lanes are thin). — _added 2026-07-08_
 ## Documentation-image pathway
 
 _Designed 2026-07-02 (see DEVLOG design entry). North star: an **automatable,

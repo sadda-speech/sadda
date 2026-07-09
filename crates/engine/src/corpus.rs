@@ -5642,28 +5642,41 @@ impl Project {
                 "figure export format {format:?} is not supported; expected {hint}"
             )));
         }
-        let spec = self.figure_spec_for_bundle(bundle_id, tier_ids, opts)?;
+        let mut spec = self.figure_spec_for_bundle(bundle_id, tier_ids, opts)?;
 
-        // TikZ writes a `.tex` plus a sidecar spectrogram PNG (TikZ can't embed
-        // a raster), so it takes its own path.
+        // TikZ can't embed a raster, so each raster lane (spectrogram + every
+        // heatmap) is written as a sidecar PNG next to the `.tex` and
+        // `\includegraphics`'d.
         if is_tikz {
-            let raster_ref = match crate::io::figure::spectrogram_png(&spec) {
+            let stem = path
+                .as_ref()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("figure")
+                .to_string();
+            let write_sidecar = |name: &str, png: Vec<u8>| -> Result<()> {
+                std::fs::write(path.as_ref().with_file_name(name), png)
+                    .map_err(|e| EngineError::Corpus(format!("figure raster write failed: {e}")))
+            };
+            let spectrogram_ref = match crate::io::figure::spectrogram_png(&spec) {
                 Some(png) => {
-                    let stem = path
-                        .as_ref()
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("figure");
                     let name = format!("{stem}-spectrogram.png");
-                    let raster_path = path.as_ref().with_file_name(&name);
-                    std::fs::write(&raster_path, png).map_err(|e| {
-                        EngineError::Corpus(format!("figure raster write failed: {e}"))
-                    })?;
+                    write_sidecar(&name, png)?;
                     Some(name)
                 }
                 None => None,
             };
-            let tex = crate::io::figure::to_tikz(&spec, raster_ref.as_deref());
+            // Heatmap sidecars; stamp each lane's raster_ref for the serializer.
+            for (i, lane) in spec.heatmaps.iter_mut().enumerate() {
+                if lane.width == 0 || lane.height == 0 {
+                    continue;
+                }
+                let name = format!("{stem}-heatmap{i}.png");
+                let png = crate::io::figure::rgba_to_png_bytes(&lane.rgba, lane.width, lane.height);
+                write_sidecar(&name, png)?;
+                lane.raster_ref = Some(name);
+            }
+            let tex = crate::io::figure::to_tikz(&spec, spectrogram_ref.as_deref());
             std::fs::write(path.as_ref(), tex)
                 .map_err(|e| EngineError::Corpus(format!("figure export write failed: {e}")))?;
             return Ok(());
