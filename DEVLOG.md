@@ -6,6 +6,63 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-09 — Annotation-flow bug fixes + unifying the signal-lane scaffold
+
+A round of GUI papercuts from the annotation workflow, plus a refactor the last
+one forced.
+
+**Four bugs (all `crates/app`):**
+
+- **Interval-create → Enter now edits the label** (was a spurious overlap
+  prompt). `enter_commit` added the interval but never selected it or cleared
+  `timeline.selection`, so a second Enter re-ran the commit on the still-live
+  selection, "found" the interval it had just added, and popped the conflict
+  prompt. It now consumes the selection on a clean commit and (for a single-tier
+  commit) selects the new annotation — mirroring the drag-create path. Flow:
+  select span → Enter (create + select) → Enter (label editor) → type → Enter
+  (accept) / Esc (cancel). (Cross-refs the open keybindings-pass items; the
+  broader "chain interval from previous endpoint" work stays a joint session.)
+
+- **"Recording too short for spectrogram window" no longer fires mid-recording.**
+  The live-spectrogram dispatcher guarded on a hard-coded `< 512` samples then
+  handed anything longer to `compute_spectrogram_image`, which errors until a
+  *full window* of audio exists — and that error was piped into the banner. Now
+  it guards on the actual `window_samples` derived from the config, so it never
+  dispatches a too-short capture.
+
+- **View ▸ UI-scale slider no longer jumps under the cursor.** The slider mutated
+  `ui_scale` live and `set_zoom_factor` was applied every frame, relaying out the
+  (zoomed) menu mid-drag so the track slid away. A transient `ui_scale_dragging`
+  flag now freezes the *applied* zoom during the drag (the value still updates
+  live); the zoom lands on release.
+
+- **Clipped rotated y-axis titles** ("f0" losing its glyph tops) — see below; the
+  fix turned into the refactor.
+
+**Unifying the signal lanes.** The y-axis-title clip was egui_plot 0.35 drawing
+the rotated label ~0.25×text-height *left* of the plot frame and clipping to the
+frame edge (~4px shaved). The fix is a small left inset with the child ui keeping
+the wider clip rect (`SIGNAL_AXIS_LABEL_PAD`). But the *layout contract* of "a
+signal lane" — the `SIGNAL_LEFT_GUTTER`, that inset, x-bounds locked to the
+visible window, the synced cursor line + selection band, and the drag→select /
+wheel→zoom vocabulary — was **duplicated across five `Plot`-construction sites**
+(waveform, spectrogram, two heatmaps, and the shared `measure_lane`). Applying
+the inset to only one both left the others clipped *and* shifted the measure
+lanes 6px out of horizontal alignment — the straight-cursor invariant the gutter
+exists to guarantee.
+
+So `measure_lane` was generalised into one **`signal_lane(ui, timeline,
+SignalLaneSpec, draw)`** scaffold that owns the whole contract; every lane routes
+through it. Per-lane config (`plot_id`, `y_range`, `y_axis_label`, `show_x_axis`,
+`ctrl_snap`, `snap_bounds`) is a named `SignalLaneSpec` struct (readable call
+sites, no positional bools); each lane supplies only its `draw` closure for its
+own marks. `measure_lane` is now a thin wrapper. Because the contract lives in
+one place, this class of mismatch is structurally impossible; tuning the inset is
+one constant for all lanes. "Capture image → signal column" is a screenshot of
+these panes, so the export inherits the fix. Verified in the app (titles
+un-crowded, cursor straight, lanes aligned); clippy/fmt clean; 115 app tests pass
+incl. the gutter-alignment test.
+
 ## 2026-07-07 — A5.3: forced alignment in the GUI (completes A5 + the A-series)
 
 The last A-series slice: an **Annotate ▸ Align…** action that force-aligns a
