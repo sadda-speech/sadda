@@ -64,6 +64,12 @@ const TIER_LANE_HEIGHT: f32 = 28.0;
 /// Sized to fit a 16-char tier name; comfortably wider than the
 /// widest expected Hz tickmark ("22050" at a 44.1 kHz sample rate).
 const SIGNAL_LEFT_GUTTER: f32 = 120.0;
+/// Left inset (px) for a measure lane's plot. egui_plot draws the rotated
+/// Y-axis label ~0.25×text-height *left* of the plot frame and clips the axis
+/// painter to the frame edge, shaving the top of glyphs like "f0". Insetting
+/// the plot by this much (while the child ui keeps the wider clip rect) gives
+/// the label room to render un-clipped.
+const SIGNAL_AXIS_LABEL_PAD: f32 = 6.0;
 /// D10: default height (px) of each stacked measure-track lane. The
 /// panels are resizable, so this is just the initial split.
 const MEASURE_LANE_HEIGHT: f32 = 96.0;
@@ -8249,22 +8255,60 @@ fn formant_color(palette: PlotPalette, slot: usize) -> egui::Color32 {
     set[slot % set.len()]
 }
 
-/// D10: shared scaffolding for a measure-track lane. Owns the plot
-/// bounds (visible window in x, the lane's own range in y — so each
-/// lane x-aligns with the waveform/spectrogram and the cursor draws a
-/// single straight line through them all), draws the synced cursor,
-/// and routes click-to-seek + wheel zoom/scroll back into `timeline`.
-/// The lane-specific contour is drawn by `draw`. The x-axis is hidden
-/// (`show_axes([false, true])`) to keep stacked lanes compact; the
-/// waveform and spectrogram already carry the time ruler.
-fn measure_lane(
-    ui: &mut egui::Ui,
-    plot_id: &str,
-    timeline: &mut TimelineState,
+/// Per-lane configuration for [`signal_lane`] — everything that legitimately
+/// differs between lanes. Grouped so the scaffold stays a single call and every
+/// field is named at the call site (no cryptic positional bools).
+struct SignalLaneSpec<'a> {
+    /// Stable egui id for the plot.
+    plot_id: &'a str,
+    /// The lane's own y-range (x is always the visible time window).
     y_range: (f64, f64),
-    y_axis_label: &str,
+    /// Rotated y-axis title.
+    y_axis_label: &'a str,
+    /// Whether this lane carries the shared time ruler (x-axis). Measure lanes
+    /// hide it; the waveform / spectrogram / heatmaps show it.
+    show_x_axis: bool,
+    /// Whether Ctrl-snap is active this frame — selection edges snap to
+    /// `snap_bounds`. Measure lanes pass `false`.
+    ctrl_snap: bool,
+    /// Interval boundaries to snap selection edges to when `ctrl_snap`; empty
+    /// otherwise.
+    snap_bounds: &'a [f64],
+}
+
+/// D10: the shared scaffold for *every* signal lane — the waveform, the
+/// spectrogram, the measure tracks (f0/formants/intensity/vad), and the
+/// heatmaps. Owns the layout contract that MUST be identical across lanes for
+/// them to stack pixel-aligned: the left y-axis gutter (`SIGNAL_LEFT_GUTTER`),
+/// the rotated-label inset (`SIGNAL_AXIS_LABEL_PAD`), the x-bounds locked to
+/// the visible window (so the shared cursor lands on the same pixel column in
+/// every lane), the synced cursor line + selection band, and the drag→select /
+/// wheel→zoom input vocabulary. Because this lives in ONE place, a lane can't
+/// silently diverge on any of it.
+///
+/// Each lane supplies only what legitimately differs: its `y_range`,
+/// `y_axis_label`, whether it carries the shared time ruler (`show_x_axis`),
+/// its Ctrl-snap boundaries (`ctrl_snap` + `snap_bounds` — measure lanes pass
+/// `false` / `&[]`), and a `draw` closure for its own marks (polyline / raster
+/// / contour). Returns the `PlotResponse` so a caller (the waveform) can read
+/// the realised frame geometry.
+///
+/// Per-lane config is grouped into [`SignalLaneSpec`] so the scaffold stays a
+/// single call and each field is named at the call site.
+fn signal_lane(
+    ui: &mut egui::Ui,
+    timeline: &mut TimelineState,
+    spec: SignalLaneSpec<'_>,
     draw: impl FnOnce(&mut egui_plot::PlotUi<'_>),
-) {
+) -> egui_plot::PlotResponse<()> {
+    let SignalLaneSpec {
+        plot_id,
+        y_range,
+        y_axis_label,
+        show_x_axis,
+        ctrl_snap,
+        snap_bounds,
+    } = spec;
     let view_start = timeline.view_start;
     let view_end = timeline.view_end;
     let cursor = timeline.cursor;
@@ -8275,57 +8319,99 @@ fn measure_lane(
     let mut drag_to: Option<f64> = None;
     let mut drag_ended = false;
 
-    let plot_response = Plot::new(plot_id)
-        .show_axes([false, true])
-        .y_axis_label(y_axis_label)
-        .y_axis_min_width(SIGNAL_LEFT_GUTTER)
-        .allow_drag(false)
-        .allow_zoom(false)
-        .allow_scroll(false)
-        .show(ui, |plot_ui| {
-            // Own the bounds outright (matches the waveform pane): the
-            // explicit set disables auto-fit so there's no edge margin
-            // and the x-window matches the other lanes exactly.
-            plot_ui.set_plot_bounds_x(view_start..=view_end);
-            plot_ui.set_plot_bounds_y(y_min..=y_max);
-            draw(plot_ui);
-            draw_cursor_line(plot_ui, cursor, y_min, y_max);
-            draw_selection_band(plot_ui, selection, y_min, y_max);
+    // Inset the plot a few px from the lane's left edge so egui_plot's rotated
+    // Y-axis label (drawn just left of the plot frame) isn't shaved by the frame
+    // clip. The child ui inherits the parent's full-width clip rect, so the
+    // label draws un-clipped into the inset gap. See `SIGNAL_AXIS_LABEL_PAD`.
+    let full_rect = ui.available_rect_before_wrap();
+    let plot_rect = egui::Rect::from_min_max(
+        full_rect.min + egui::vec2(SIGNAL_AXIS_LABEL_PAD, 0.0),
+        full_rect.max,
+    );
+    let plot_response = ui
+        .scope_builder(egui::UiBuilder::new().max_rect(plot_rect), |ui| {
+            // The x-axis (time ruler) shows only on lanes that carry it; the
+            // others hide it to stack compactly. Everything else is identical.
+            let mut plot = Plot::new(plot_id)
+                .show_axes([show_x_axis, true])
+                .y_axis_label(y_axis_label)
+                .y_axis_min_width(SIGNAL_LEFT_GUTTER)
+                .allow_drag(false)
+                .allow_zoom(false)
+                .allow_scroll(false);
+            if show_x_axis {
+                plot = plot.x_axis_label("seconds");
+            }
+            plot.show(ui, |plot_ui| {
+                // Own the bounds outright (matches the waveform pane): the
+                // explicit set disables auto-fit so there's no edge margin
+                // and the x-window matches the other lanes exactly.
+                plot_ui.set_plot_bounds_x(view_start..=view_end);
+                plot_ui.set_plot_bounds_y(y_min..=y_max);
+                draw(plot_ui);
+                draw_cursor_line(plot_ui, cursor, y_min, y_max);
+                draw_selection_band(plot_ui, selection, y_min, y_max);
 
-            let resp = plot_ui.response();
-            if resp.drag_started() {
-                drag_start = resp
-                    .interact_pointer_pos()
-                    .map(|p| plot_ui.plot_from_screen(p).x);
-            }
-            if resp.dragged() {
-                drag_to = resp
-                    .interact_pointer_pos()
-                    .map(|p| plot_ui.plot_from_screen(p).x);
-            }
-            if resp.drag_stopped() {
-                drag_ended = true;
-            }
-            if resp.clicked() {
-                clicked_time = resp
-                    .interact_pointer_pos()
-                    .map(|p| plot_ui.plot_from_screen(p).x);
-            }
+                let resp = plot_ui.response();
+                if resp.drag_started() {
+                    drag_start = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
+                }
+                if resp.dragged() {
+                    drag_to = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
+                }
+                if resp.drag_stopped() {
+                    drag_ended = true;
+                }
+                if resp.clicked() {
+                    clicked_time = resp
+                        .interact_pointer_pos()
+                        .map(|p| plot_ui.plot_from_screen(p).x);
+                }
+            })
         })
-        .response;
+        .inner;
 
-    // Measure lanes don't carry the project handle for boundary snapping; Ctrl-snap
-    // is available on the waveform / spectrogram / heatmap panes instead.
     apply_lane_selection_drag(
         timeline,
         drag_start,
         drag_to,
         drag_ended,
         clicked_time,
-        false,
-        &[],
+        ctrl_snap,
+        snap_bounds,
     );
-    handle_zoom_and_scroll(&plot_response, timeline);
+    handle_zoom_and_scroll(&plot_response.response, timeline);
+    plot_response
+}
+
+/// Convenience wrapper for a measure-track lane (f0/formants/intensity/vad):
+/// hides the shared time ruler and opts out of Ctrl-snap. Delegates to
+/// `signal_lane` so the layout contract stays single-sourced.
+fn measure_lane(
+    ui: &mut egui::Ui,
+    plot_id: &str,
+    timeline: &mut TimelineState,
+    y_range: (f64, f64),
+    y_axis_label: &str,
+    draw: impl FnOnce(&mut egui_plot::PlotUi<'_>),
+) {
+    signal_lane(
+        ui,
+        timeline,
+        SignalLaneSpec {
+            plot_id,
+            y_range,
+            y_axis_label,
+            show_x_axis: false,
+            ctrl_snap: false,
+            snap_bounds: &[],
+        },
+        draw,
+    );
 }
 
 /// Wheel-driven zoom + shift-wheel scroll. Reads raw scroll deltas
@@ -12099,34 +12185,32 @@ impl SaddaApp {
         let n_buckets = buckets.len();
         let view_range = self.timeline.view_range();
         let view_start = self.timeline.view_start;
-        let view_end = self.timeline.view_end;
-        let cursor = self.timeline.cursor;
-        let selection = self.timeline.selection;
-        let mut clicked_time: Option<f64> = None;
-        let mut drag_start: Option<f64> = None;
-        let mut drag_to: Option<f64> = None;
-        let mut drag_ended = false;
         // Left edge of where the plot widget will be allocated (egui_plot
-        // uses available_rect_before_wrap().min); the data area's left
-        // minus this is the true y-axis gutter width.
+        // uses available_rect_before_wrap().min), captured before `signal_lane`
+        // insets — the data area's left minus this is the true gutter width.
         let widget_left = ui.available_rect_before_wrap().left();
 
-        let plot_response = Plot::new("waveform")
-            .show_axes([true, true])
-            .y_axis_label("amplitude")
-            .x_axis_label("seconds")
-            .y_axis_min_width(SIGNAL_LEFT_GUTTER)
-            .allow_drag(false)
-            .allow_zoom(false)
-            .allow_scroll(false)
-            .show(ui, |plot_ui| {
-                // Own the bounds outright: visible window in x, full
-                // amplitude range in y. This disables auto-fit (so no
-                // edge margin) and matches the spectrogram's x-bounds
-                // exactly, so the shared cursor lands on the same pixel
-                // column in both panes.
-                plot_ui.set_plot_bounds_x(view_start..=view_end);
-                plot_ui.set_plot_bounds_y(-1.0..=1.0);
+        // Ctrl-snap: while Ctrl is held, selection edges snap to the nearest
+        // existing interval boundary across active interval tiers (Slice 3c).
+        let ctrl_snap = ui.input(|i| i.modifiers.command);
+        let snap_bounds = if ctrl_snap {
+            self.active_interval_boundaries()
+        } else {
+            Vec::new()
+        };
+
+        let plot_response = signal_lane(
+            ui,
+            &mut self.timeline,
+            SignalLaneSpec {
+                plot_id: "waveform",
+                y_range: (-1.0, 1.0),
+                y_axis_label: "amplitude",
+                show_x_axis: true,
+                ctrl_snap,
+                snap_bounds: &snap_bounds,
+            },
+            |plot_ui| {
                 if n_buckets > 0 {
                     let dt = view_range / n_buckets as f64;
                     for (i, (mn, mx)) in buckets.iter().enumerate() {
@@ -12137,37 +12221,15 @@ impl SaddaApp {
                         );
                     }
                 }
-                draw_cursor_line(plot_ui, cursor, -1.0, 1.0);
-                draw_selection_band(plot_ui, selection, -1.0, 1.0);
-
-                // Drag draws a time-span selection; a plain click clears
-                // it and positions the cursor. Times come from the
-                // pointer-coord in plot space.
-                let resp = plot_ui.response();
-                if resp.drag_started() {
-                    drag_start = resp
-                        .interact_pointer_pos()
-                        .map(|p| plot_ui.plot_from_screen(p).x);
-                }
-                if resp.dragged() {
-                    drag_to = resp
-                        .interact_pointer_pos()
-                        .map(|p| plot_ui.plot_from_screen(p).x);
-                }
-                if resp.drag_stopped() {
-                    drag_ended = true;
-                }
-                if resp.clicked() {
-                    clicked_time = resp
-                        .interact_pointer_pos()
-                        .map(|p| plot_ui.plot_from_screen(p).x);
-                }
-            });
+            },
+        );
 
         // Measure the lane geometry as WIDTHS (not absolute coords): the
         // y-axis gutter = data-area left minus the plot WIDGET's left
         // (NB egui_plot's `response.rect` is the data area, not the widget,
         // so we use the captured `widget_left`), plus the data-area width.
+        // Read off the realised frame, so the inset applied by `signal_lane`
+        // is reflected and the tier rows align to the same (inset) data area.
         {
             let frame = plot_response.transform.frame();
             let gutter_w = frame.left() - widget_left;
@@ -12181,25 +12243,6 @@ impl SaddaApp {
                 frame.width()
             );
         }
-
-        // Ctrl-snap: while Ctrl is held, selection edges snap to the nearest
-        // existing interval boundary across active interval tiers (Slice 3c).
-        let ctrl_snap = ui.input(|i| i.modifiers.command);
-        let snap_bounds = if ctrl_snap {
-            self.active_interval_boundaries()
-        } else {
-            Vec::new()
-        };
-        apply_lane_selection_drag(
-            &mut self.timeline,
-            drag_start,
-            drag_to,
-            drag_ended,
-            clicked_time,
-            ctrl_snap,
-            &snap_bounds,
-        );
-        handle_zoom_and_scroll(&plot_response.response, &mut self.timeline);
     }
 
     fn spectrogram_pane(&mut self, ui: &mut egui::Ui) {
@@ -12238,59 +12281,6 @@ impl SaddaApp {
         let centre = egui_plot::PlotPoint::new(duration / 2.0, nyquist / 2.0);
         let size = egui::Vec2::new(duration as f32, nyquist as f32);
         let texture_id = sc.texture.id();
-        let cursor = self.timeline.cursor;
-        let view_start = self.timeline.view_start;
-        let view_end = self.timeline.view_end;
-        let selection = self.timeline.selection;
-        let mut clicked_time: Option<f64> = None;
-        let mut drag_start: Option<f64> = None;
-        let mut drag_to: Option<f64> = None;
-        let mut drag_ended = false;
-
-        let plot_response = Plot::new("spectrogram")
-            .show_axes([true, true])
-            .y_axis_label("Hz")
-            .x_axis_label("seconds")
-            .y_axis_min_width(SIGNAL_LEFT_GUTTER)
-            .allow_drag(false)
-            .allow_zoom(false)
-            .allow_scroll(false)
-            .show(ui, |plot_ui| {
-                // Crop to the visible window in x and clamp y to
-                // [0, nyquist]: no negative-frequency band, nothing
-                // plotted past the recording edges, x aligned to the
-                // waveform.
-                plot_ui.set_plot_bounds_x(view_start..=view_end);
-                plot_ui.set_plot_bounds_y(0.0..=nyquist);
-                plot_ui.image(egui_plot::PlotImage::new(
-                    "spectrogram_img",
-                    texture_id,
-                    centre,
-                    size,
-                ));
-                draw_cursor_line(plot_ui, cursor, 0.0, nyquist);
-                draw_selection_band(plot_ui, selection, 0.0, nyquist);
-
-                let resp = plot_ui.response();
-                if resp.drag_started() {
-                    drag_start = resp
-                        .interact_pointer_pos()
-                        .map(|p| plot_ui.plot_from_screen(p).x);
-                }
-                if resp.dragged() {
-                    drag_to = resp
-                        .interact_pointer_pos()
-                        .map(|p| plot_ui.plot_from_screen(p).x);
-                }
-                if resp.drag_stopped() {
-                    drag_ended = true;
-                }
-                if resp.clicked() {
-                    clicked_time = resp
-                        .interact_pointer_pos()
-                        .map(|p| plot_ui.plot_from_screen(p).x);
-                }
-            });
 
         // Ctrl-snap: while Ctrl is held, selection edges snap to the nearest
         // existing interval boundary across active interval tiers (Slice 3c).
@@ -12300,16 +12290,32 @@ impl SaddaApp {
         } else {
             Vec::new()
         };
-        apply_lane_selection_drag(
+
+        // Crop to the visible window in x and clamp y to [0, nyquist]: no
+        // negative-frequency band, nothing plotted past the recording edges, x
+        // aligned to the waveform — all owned by `signal_lane`. The texture
+        // spans the whole bundle ([0, duration] × [0, nyquist]); the lane's
+        // x/y bounds crop it to the visible window.
+        signal_lane(
+            ui,
             &mut self.timeline,
-            drag_start,
-            drag_to,
-            drag_ended,
-            clicked_time,
-            ctrl_snap,
-            &snap_bounds,
+            SignalLaneSpec {
+                plot_id: "spectrogram",
+                y_range: (0.0, nyquist),
+                y_axis_label: "Hz",
+                show_x_axis: true,
+                ctrl_snap,
+                snap_bounds: &snap_bounds,
+            },
+            |plot_ui| {
+                plot_ui.image(egui_plot::PlotImage::new(
+                    "spectrogram_img",
+                    texture_id,
+                    centre,
+                    size,
+                ));
+            },
         );
-        handle_zoom_and_scroll(&plot_response.response, &mut self.timeline);
     }
 
     fn spectrogram_toolbar(&mut self, ui: &mut egui::Ui) {
@@ -12674,56 +12680,6 @@ impl SaddaApp {
         let centre = egui_plot::PlotPoint::new(duration / 2.0, n_dims / 2.0);
         let size = egui::Vec2::new(duration as f32, n_dims as f32);
         let texture_id = cache.texture.id();
-        let cursor = self.timeline.cursor;
-        let view_start = self.timeline.view_start;
-        let view_end = self.timeline.view_end;
-        let selection = self.timeline.selection;
-        let mut clicked_time: Option<f64> = None;
-        let mut drag_start: Option<f64> = None;
-        let mut drag_to: Option<f64> = None;
-        let mut drag_ended = false;
-
-        let plot_response = Plot::new("embedding_heatmap_plot")
-            .show_axes([true, true])
-            .y_axis_label("dim")
-            .x_axis_label("seconds")
-            .y_axis_min_width(SIGNAL_LEFT_GUTTER)
-            .allow_drag(false)
-            .allow_zoom(false)
-            .allow_scroll(false)
-            .show(ui, |plot_ui| {
-                plot_ui.set_plot_bounds_x(view_start..=view_end);
-                plot_ui.set_plot_bounds_y(0.0..=n_dims);
-                plot_ui.image(egui_plot::PlotImage::new(
-                    "embedding_heatmap_img",
-                    texture_id,
-                    centre,
-                    size,
-                ));
-                draw_cursor_line(plot_ui, cursor, 0.0, n_dims);
-                draw_selection_band(plot_ui, selection, 0.0, n_dims);
-
-                let resp = plot_ui.response();
-                if resp.drag_started() {
-                    drag_start = resp
-                        .interact_pointer_pos()
-                        .map(|p| plot_ui.plot_from_screen(p).x);
-                }
-                if resp.dragged() {
-                    drag_to = resp
-                        .interact_pointer_pos()
-                        .map(|p| plot_ui.plot_from_screen(p).x);
-                }
-                if resp.drag_stopped() {
-                    drag_ended = true;
-                }
-                if resp.clicked() {
-                    clicked_time = resp
-                        .interact_pointer_pos()
-                        .map(|p| plot_ui.plot_from_screen(p).x);
-                }
-            })
-            .response;
 
         // Ctrl-snap: while Ctrl is held, selection edges snap to the nearest
         // existing interval boundary across active interval tiers (Slice 3c).
@@ -12733,16 +12689,29 @@ impl SaddaApp {
         } else {
             Vec::new()
         };
-        apply_lane_selection_drag(
+
+        // The texture spans the whole bundle ([0, duration] × [0, n_dims]); the
+        // lane's x/y bounds crop it to the visible window.
+        signal_lane(
+            ui,
             &mut self.timeline,
-            drag_start,
-            drag_to,
-            drag_ended,
-            clicked_time,
-            ctrl_snap,
-            &snap_bounds,
+            SignalLaneSpec {
+                plot_id: "embedding_heatmap_plot",
+                y_range: (0.0, n_dims),
+                y_axis_label: "dim",
+                show_x_axis: true,
+                ctrl_snap,
+                snap_bounds: &snap_bounds,
+            },
+            |plot_ui| {
+                plot_ui.image(egui_plot::PlotImage::new(
+                    "embedding_heatmap_img",
+                    texture_id,
+                    centre,
+                    size,
+                ));
+            },
         );
-        handle_zoom_and_scroll(&plot_response, &mut self.timeline);
     }
 
     /// MFCC heatmap lane. Draws the cached coefficient texture as a
@@ -12799,56 +12768,6 @@ impl SaddaApp {
         let centre = egui_plot::PlotPoint::new(duration / 2.0, n_rows / 2.0);
         let size = egui::Vec2::new(duration as f32, n_rows as f32);
         let texture_id = cache.texture.id();
-        let cursor = self.timeline.cursor;
-        let view_start = self.timeline.view_start;
-        let view_end = self.timeline.view_end;
-        let selection = self.timeline.selection;
-        let mut clicked_time: Option<f64> = None;
-        let mut drag_start: Option<f64> = None;
-        let mut drag_to: Option<f64> = None;
-        let mut drag_ended = false;
-
-        let plot_response = Plot::new("mfcc_heatmap_plot")
-            .show_axes([true, true])
-            .y_axis_label("coeff")
-            .x_axis_label("seconds")
-            .y_axis_min_width(SIGNAL_LEFT_GUTTER)
-            .allow_drag(false)
-            .allow_zoom(false)
-            .allow_scroll(false)
-            .show(ui, |plot_ui| {
-                plot_ui.set_plot_bounds_x(view_start..=view_end);
-                plot_ui.set_plot_bounds_y(0.0..=n_rows);
-                plot_ui.image(egui_plot::PlotImage::new(
-                    "mfcc_heatmap_img",
-                    texture_id,
-                    centre,
-                    size,
-                ));
-                draw_cursor_line(plot_ui, cursor, 0.0, n_rows);
-                draw_selection_band(plot_ui, selection, 0.0, n_rows);
-
-                let resp = plot_ui.response();
-                if resp.drag_started() {
-                    drag_start = resp
-                        .interact_pointer_pos()
-                        .map(|p| plot_ui.plot_from_screen(p).x);
-                }
-                if resp.dragged() {
-                    drag_to = resp
-                        .interact_pointer_pos()
-                        .map(|p| plot_ui.plot_from_screen(p).x);
-                }
-                if resp.drag_stopped() {
-                    drag_ended = true;
-                }
-                if resp.clicked() {
-                    clicked_time = resp
-                        .interact_pointer_pos()
-                        .map(|p| plot_ui.plot_from_screen(p).x);
-                }
-            })
-            .response;
 
         let ctrl_snap = ui.input(|i| i.modifiers.command);
         let snap_bounds = if ctrl_snap {
@@ -12856,16 +12775,29 @@ impl SaddaApp {
         } else {
             Vec::new()
         };
-        apply_lane_selection_drag(
+
+        // The texture spans the whole bundle ([0, duration] × [0, n_rows]); the
+        // lane's x/y bounds crop it to the visible window.
+        signal_lane(
+            ui,
             &mut self.timeline,
-            drag_start,
-            drag_to,
-            drag_ended,
-            clicked_time,
-            ctrl_snap,
-            &snap_bounds,
+            SignalLaneSpec {
+                plot_id: "mfcc_heatmap_plot",
+                y_range: (0.0, n_rows),
+                y_axis_label: "coeff",
+                show_x_axis: true,
+                ctrl_snap,
+                snap_bounds: &snap_bounds,
+            },
+            |plot_ui| {
+                plot_ui.image(egui_plot::PlotImage::new(
+                    "mfcc_heatmap_img",
+                    texture_id,
+                    centre,
+                    size,
+                ));
+            },
         );
-        handle_zoom_and_scroll(&plot_response, &mut self.timeline);
     }
 
     fn tier_strip_pane(&mut self, ui: &mut egui::Ui) {
