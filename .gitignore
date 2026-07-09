@@ -47,6 +47,13 @@ Thumbs.db
 /ManualTesting/
 /scratch/
 
+# Reference assets — local-only copies of cited papers/specs (see refs/README.md).
+# Not distributed: most are copyright and can't be redistributed. The
+# authoritative reference is always the DOI/weblink in the code + citations;
+# these PDFs are a local convenience only. The README is tracked; contents aren't.
+/refs/*
+!/refs/README.md
+
 # Claude Code — personal workflow config (commands, settings), not project
 # spec. Kept out of the repo so it isn't imposed on contributors.
 /.claude/
