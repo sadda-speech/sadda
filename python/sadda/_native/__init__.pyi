@@ -51,6 +51,7 @@ __all__ = [
     "avqi",
     "blackman",
     "cpps",
+    "estimate_pitch_range",
     "f0",
     "forced_align",
     "formants",
@@ -2394,6 +2395,21 @@ def cpps(audio: Audio, *, pitch_floor_hz: builtins.float = 60.0, pitch_ceiling_h
     signal is too short. Intended for sustained vowels.
     """
 
+def estimate_pitch_range(audio: Audio, *, method: builtins.str = 'boersma', voicing_threshold: builtins.float = 0.44999998807907104) -> typing.Optional[tuple[builtins.float, builtins.float]]:
+    r"""
+    Estimates a speaker-appropriate `(floor_hz, ceiling_hz)` from a recording via
+    the De Looze & Hirst (2008) two-pass rule: analyse f0 over a wide range, then
+    `floor = 0.75·q25`, `ceiling = 1.5·q75` from the first/third quartiles of the
+    voiced f0. Returns `None` when the recording has too few voiced frames.
+    
+    This is the range `voiced_pitch(..., range_mode="two_pass")` derives before
+    its second pass; call it directly to inspect or reuse the range.
+    
+    Reference: De Looze & Hirst (2008), "Detecting changes in key and range for
+    the automatic modelling and coding of intonation," Speech Prosody 2008,
+    <https://doi.org/10.21437/SpeechProsody.2008-32>.
+    """
+
 def f0(audio: Audio, *, frame_size_seconds: builtins.float = 0.029999999329447746, hop_size_seconds: builtins.float = 0.009999999776482582, min_freq_hz: builtins.float = 75.0, max_freq_hz: builtins.float = 500.0) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float32]]:
     r"""
     Estimates f0 over an Audio via time-domain autocorrelation.
@@ -2616,7 +2632,7 @@ def version() -> builtins.str:
     Returns the underlying engine version string.
     """
 
-def voiced_pitch(audio: Audio, *, frame_size_seconds: builtins.float = 0.029999999329447746, hop_size_seconds: builtins.float = 0.009999999776482582, min_freq_hz: builtins.float = 75.0, max_freq_hz: builtins.float = 500.0, method: builtins.str = 'boersma', voicing_threshold: builtins.float = 0.44999998807907104) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float32], numpy.typing.NDArray[numpy.float32]]:
+def voiced_pitch(audio: Audio, *, frame_size_seconds: builtins.float = 0.029999999329447746, hop_size_seconds: builtins.float = 0.009999999776482582, min_freq_hz: builtins.float = 75.0, max_freq_hz: builtins.float = 500.0, method: builtins.str = 'boersma', voicing_threshold: builtins.float = 0.44999998807907104, range_mode: builtins.str = 'manual') -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float32], numpy.typing.NDArray[numpy.float32]]:
     r"""
     Estimates f0 with a voicing decision and returns `(times, frequencies,
     voicing)` as three NumPy arrays. `times` is float64 seconds at frame
@@ -2656,5 +2672,12 @@ def voiced_pitch(audio: Audio, *, frame_size_seconds: builtins.float = 0.0299999
     
     `voicing_threshold` is informational here: the function returns voicing
     values for every frame so callers can apply their own threshold.
+    
+    `range_mode` selects how the analysis floor/ceiling are chosen:
+    - `"manual"` (default) — use `min_freq_hz` / `max_freq_hz` as given.
+    - `"two_pass"` — adapt them to the recording via De Looze & Hirst (2008):
+      analyse over a wide range, then set `floor = 0.75·q25`, `ceiling = 1.5·q75`
+      from the voiced-f0 quartiles, and re-track. `min_freq_hz` / `max_freq_hz`
+      are then ignored. See `estimate_pitch_range`.
     """
 

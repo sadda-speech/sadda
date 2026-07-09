@@ -171,6 +171,7 @@ def voiced_pitch(
     max_freq_hz: float = 500.0,
     method: str = "boersma",
     voicing_threshold: float = 0.45,
+    range_mode: str = "manual",
 ):
     """Estimate f0 with a voicing decision; returns ``(times, frequencies,
     voicing)`` as three NumPy arrays.
@@ -180,7 +181,14 @@ def voiced_pitch(
     ``swipe``) with the common analysis keywords, or pass ``params=`` a
     :class:`PitchParams` (from a preset, optionally edited with
     ``.replace(...)``). When ``params`` is given it fully determines the
-    computation and the other keywords are ignored."""
+    computation and the other keywords are ignored.
+
+    ``range_mode`` chooses how the analysis floor/ceiling are set:
+    ``"manual"`` (default) uses ``min_freq_hz`` / ``max_freq_hz`` as given;
+    ``"two_pass"`` adapts them to the recording (De Looze & Hirst 2008 —
+    ``floor = 0.75·q25``, ``ceiling = 1.5·q75`` from a wide first pass, then
+    re-track), ignoring ``min_freq_hz`` / ``max_freq_hz``. See
+    :func:`estimate_pitch_range`."""
     if params is not None:
         return _native.pitch_preset.compute(audio, params)
     return _native.voiced_pitch(
@@ -191,6 +199,29 @@ def voiced_pitch(
         max_freq_hz=max_freq_hz,
         method=method,
         voicing_threshold=voicing_threshold,
+        range_mode=range_mode,
+    )
+
+
+@stable
+def estimate_pitch_range(
+    audio,
+    *,
+    method: str = "boersma",
+    voicing_threshold: float = 0.45,
+):
+    """Estimate a speaker-appropriate ``(floor_hz, ceiling_hz)`` from one
+    recording via the De Looze & Hirst (2008) two-pass rule, or ``None`` if the
+    recording has too few voiced frames.
+
+    Analyses f0 over a wide range, then returns ``floor = 0.75·q25`` and
+    ``ceiling = 1.5·q75`` from the first/third quartiles of the voiced f0 — the
+    same range :func:`voiced_pitch` derives under ``range_mode="two_pass"``.
+
+    Reference: De Looze & Hirst (2008),
+    https://doi.org/10.21437/SpeechProsody.2008-32."""
+    return _native.estimate_pitch_range(
+        audio, method=method, voicing_threshold=voicing_threshold
     )
 
 

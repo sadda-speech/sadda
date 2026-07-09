@@ -267,6 +267,104 @@ pub fn pitch_with_params(audio: &Audio, params: &PitchParams) -> Vec<PitchFrame>
     pitch(audio, &params.config, params.method)
 }
 
+/// First-pass floor for the two-pass adaptive range estimator (De Looze &
+/// Hirst 2008): the low end of a deliberately wide bracket so the initial
+/// analysis captures the speaker's true range before it is refined. The paper's
+/// exact first-pass value.
+pub const TWO_PASS_FLOOR_HZ: f32 = 60.0;
+/// First-pass ceiling for the two-pass adaptive range estimator (De Looze &
+/// Hirst 2008): the high end of the wide first-pass bracket. The paper's exact
+/// first-pass value.
+pub const TWO_PASS_CEILING_HZ: f32 = 750.0;
+
+/// Minimum voiced frames before an adaptive range estimate is trusted; below
+/// this the f0 distribution is too sparse for stable quartiles.
+pub const ADAPTIVE_MIN_VOICED: usize = 10;
+
+/// Quantiles of the voiced f0 values in `frames` (those with
+/// `voicing >= voicing_threshold`).
+///
+/// `qs` are cut points in `[0, 1]`; each is evaluated by linear interpolation
+/// on the sorted voiced-f0 values (the "linear" / type-7 convention, matching
+/// NumPy's default `quantile`). Non-finite or non-positive f0 values are
+/// dropped. Returns `None` when fewer than [`ADAPTIVE_MIN_VOICED`] usable voiced
+/// frames remain — too few for a stable estimate.
+pub fn voiced_f0_quantiles(
+    frames: &[PitchFrame],
+    voicing_threshold: f32,
+    qs: &[f64],
+) -> Option<Vec<f32>> {
+    let mut vs: Vec<f64> = frames
+        .iter()
+        .filter(|f| f.voicing >= voicing_threshold)
+        .map(|f| f.frequency_hz.value() as f64)
+        .filter(|&hz| hz.is_finite() && hz > 0.0)
+        .collect();
+    if vs.len() < ADAPTIVE_MIN_VOICED {
+        return None;
+    }
+    vs.sort_by(|a, b| a.total_cmp(b));
+    let n = vs.len();
+    let out = qs
+        .iter()
+        .map(|&q| {
+            let pos = q.clamp(0.0, 1.0) * (n - 1) as f64;
+            let lo = pos.floor() as usize;
+            let hi = pos.ceil() as usize;
+            let frac = pos - lo as f64;
+            (vs[lo] + (vs[hi] - vs[lo]) * frac) as f32
+        })
+        .collect();
+    Some(out)
+}
+
+/// Estimates a speaker-appropriate `(floor_hz, ceiling_hz)` from a single
+/// recording via the De Looze & Hirst (2008) two-pass rule: analyse f0 over a
+/// wide range ([`TWO_PASS_FLOOR_HZ`]–[`TWO_PASS_CEILING_HZ`]), then set
+/// `floor = 0.75·q25` and `ceiling = 1.5·q75` from the first and third quartiles
+/// of the voiced f0. Returns `None` when the recording has too few voiced frames
+/// to estimate a range (see [`voiced_f0_quantiles`]).
+///
+/// Reference: De Looze, C. & Hirst, D.J. (2008). "Detecting changes in key and
+/// range for the automatic modelling and coding of intonation." Speech Prosody
+/// 2008, 135–138. <https://doi.org/10.21437/SpeechProsody.2008-32>
+pub fn estimate_pitch_range(
+    audio: &Audio,
+    config: &PitchConfig,
+    method: PitchMethod,
+) -> Option<(f32, f32)> {
+    let mut wide = *config;
+    wide.min_freq_hz = TWO_PASS_FLOOR_HZ;
+    wide.max_freq_hz = TWO_PASS_CEILING_HZ;
+    let frames = pitch(audio, &wide, method);
+    let q = voiced_f0_quantiles(&frames, config.voicing_threshold, &[0.25, 0.75])?;
+    Some(pitch_range_from_quartiles(q[0], q[1]))
+}
+
+/// The De Looze & Hirst (2008) floor/ceiling formula from a recording's first
+/// (`q25`) and third (`q75`) voiced-f0 quartiles: `floor = 0.75·q25`,
+/// `ceiling = 1.5·q75`, clamped to stay positive and ordered. Shared by the
+/// single-recording ([`estimate_pitch_range`]) and speaker-level estimators.
+pub fn pitch_range_from_quartiles(q25: f32, q75: f32) -> (f32, f32) {
+    let floor = (0.75 * q25).max(1.0);
+    let ceiling = (1.5 * q75).max(floor + 1.0);
+    (floor, ceiling)
+}
+
+/// Two-pass adaptive pitch tracking (De Looze & Hirst 2008): estimate a
+/// speaker-appropriate floor/ceiling from the signal with
+/// [`estimate_pitch_range`], then track with that refined range. Falls back to
+/// the `config`'s own range when the estimate is unavailable (too few voiced
+/// frames), degrading to a single pass rather than failing.
+pub fn two_pass_pitch(audio: &Audio, config: &PitchConfig, method: PitchMethod) -> Vec<PitchFrame> {
+    let mut cfg = *config;
+    if let Some((floor, ceiling)) = estimate_pitch_range(audio, config, method) {
+        cfg.min_freq_hz = floor;
+        cfg.max_freq_hz = ceiling;
+    }
+    pitch(audio, &cfg, method)
+}
+
 // [docs-impl:sadda.dsp.f0]  — engine algorithm behind the `sadda.dsp.f0`
 // PyO3 shim; the source-link scanner renders this as the "impl" link.
 /// Estimates f0 using naive time-domain autocorrelation (Phase-0 method).

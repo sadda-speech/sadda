@@ -3869,6 +3869,13 @@ fn parse_mfcc_method(s: &str) -> PyResult<sadda_engine::dsp::MfccMethod> {
 ///
 /// `voicing_threshold` is informational here: the function returns voicing
 /// values for every frame so callers can apply their own threshold.
+///
+/// `range_mode` selects how the analysis floor/ceiling are chosen:
+/// - `"manual"` (default) — use `min_freq_hz` / `max_freq_hz` as given.
+/// - `"two_pass"` — adapt them to the recording via De Looze & Hirst (2008):
+///   analyse over a wide range, then set `floor = 0.75·q25`, `ceiling = 1.5·q75`
+///   from the voiced-f0 quartiles, and re-track. `min_freq_hz` / `max_freq_hz`
+///   are then ignored. See `estimate_pitch_range`.
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -3877,6 +3884,7 @@ fn parse_mfcc_method(s: &str) -> PyResult<sadda_engine::dsp::MfccMethod> {
     min_freq_hz=75.0, max_freq_hz=500.0,
     method="boersma",
     voicing_threshold=0.45,
+    range_mode="manual",
 ))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
@@ -3889,6 +3897,7 @@ fn voiced_pitch<'py>(
     max_freq_hz: f32,
     method: &str,
     voicing_threshold: f32,
+    range_mode: &str,
 ) -> PyResult<(
     Bound<'py, PyArray1<f64>>,
     Bound<'py, PyArray1<f32>>,
@@ -3903,7 +3912,15 @@ fn voiced_pitch<'py>(
         voicing_threshold,
         ..sadda_engine::pitch::PitchConfig::default()
     };
-    let frames = sadda_engine::pitch::pitch(&audio.inner, &config, pitch_method);
+    let frames = match range_mode {
+        "manual" => sadda_engine::pitch::pitch(&audio.inner, &config, pitch_method),
+        "two_pass" => sadda_engine::pitch::two_pass_pitch(&audio.inner, &config, pitch_method),
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown range_mode {other:?}; expected \"manual\" or \"two_pass\""
+            )));
+        }
+    };
     let times: Vec<f64> = frames.iter().map(|f| f.time_seconds).collect();
     let freqs: Vec<f32> = frames.iter().map(|f| f.frequency_hz.value()).collect();
     let voicing: Vec<f32> = frames.iter().map(|f| f.voicing).collect();
@@ -3911,6 +3928,37 @@ fn voiced_pitch<'py>(
         times.into_pyarray(py),
         freqs.into_pyarray(py),
         voicing.into_pyarray(py),
+    ))
+}
+
+/// Estimates a speaker-appropriate `(floor_hz, ceiling_hz)` from a recording via
+/// the De Looze & Hirst (2008) two-pass rule: analyse f0 over a wide range, then
+/// `floor = 0.75·q25`, `ceiling = 1.5·q75` from the first/third quartiles of the
+/// voiced f0. Returns `None` when the recording has too few voiced frames.
+///
+/// This is the range `voiced_pitch(..., range_mode="two_pass")` derives before
+/// its second pass; call it directly to inspect or reuse the range.
+///
+/// Reference: De Looze & Hirst (2008), "Detecting changes in key and range for
+/// the automatic modelling and coding of intonation," Speech Prosody 2008,
+/// <https://doi.org/10.21437/SpeechProsody.2008-32>.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (audio, *, method="boersma", voicing_threshold=0.45))]
+fn estimate_pitch_range(
+    audio: &PyAudio,
+    method: &str,
+    voicing_threshold: f32,
+) -> PyResult<Option<(f32, f32)>> {
+    let pitch_method = parse_pitch_method(method)?;
+    let config = sadda_engine::pitch::PitchConfig {
+        voicing_threshold,
+        ..sadda_engine::pitch::PitchConfig::default()
+    };
+    Ok(sadda_engine::pitch::estimate_pitch_range(
+        &audio.inner,
+        &config,
+        pitch_method,
     ))
 }
 
@@ -4564,6 +4612,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(spectrogram, m)?)?;
     m.add_function(wrap_pyfunction!(intensity, m)?)?;
     m.add_function(wrap_pyfunction!(voiced_pitch, m)?)?;
+    m.add_function(wrap_pyfunction!(estimate_pitch_range, m)?)?;
     m.add_function(wrap_pyfunction!(formants, m)?)?;
     m.add_function(wrap_pyfunction!(mfcc, m)?)?;
     m.add_function(wrap_pyfunction!(log_mel_whisper, m)?)?;
