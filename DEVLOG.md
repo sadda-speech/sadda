@@ -18,6 +18,17 @@ Picking off the figure-export backlog refinements. Running log:
   voice: a 130–170 Hz contour now yields a tight ~70–198 Hz axis (was inflated
   before). Engine test asserts the axis brackets 150 Hz.
 
+- **Embedding-raster heatmap.** The deferred second G4 heatmap: an
+  `embedding_tier_id` option draws a `continuous_vector` tier's `(frames × dims)`
+  matrix as a heatmap lane. Refactored the MFCC bake into a shared
+  `io::figure::matrix_heatmap` (per-feature min-max normalise → colormap bake);
+  MFCC and the embedding lane both use it. The tier read happens in
+  `figure_spec_for_bundle` (the pure `build_spec` can't read tiers). Three
+  surfaces: Python `export_figure(embedding_tier_id=…)`; GUI mirrors the
+  on-screen embedding lane (`persisted.embedding.selected_tier_id`). Verified: a
+  structured 8-dim embedding renders as the expected diagonal band (`d0`→`d7`),
+  and it sidecars into TikZ via the same generalised path.
+
 ## 2026-07-08 — G4: heatmap lanes (MFCC) + style knobs — completes the G-series
 
 The last G-series slice: an **MFCC heatmap lane** and the first **style knobs**,

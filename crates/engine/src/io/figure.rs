@@ -1359,6 +1359,10 @@ pub struct FigureExportOptions {
     pub include_intensity: bool,
     /// Draw the MFCC heatmap lane.
     pub include_mfcc: bool,
+    /// If set, draw an embedding heatmap lane from this `continuous_vector`
+    /// tier's `(frames × dims)` matrix. Resolved by the exporter (which has the
+    /// project); `build_spec` alone can't read tier data.
+    pub embedding_tier_id: Option<i64>,
     /// Overall figure width in px.
     pub width: f64,
     /// Base font-size override in px (style knob); `None` keeps the default.
@@ -1385,6 +1389,7 @@ impl Default for FigureExportOptions {
             include_formants: false,
             include_intensity: false,
             include_mfcc: false,
+            embedding_tier_id: None,
             width: FigureStyle::default().width,
             font_size: None,
             window_ms: 25.0,
@@ -1487,35 +1492,64 @@ fn build_heatmap_lanes(
             crate::dsp::MfccMethod::default(),
         );
         let (n_frames, n_mfcc) = (arr.nrows(), arr.ncols());
-        if n_frames > 0 && n_mfcc > 0 {
-            // Per-coefficient min-max → [0, 1], coeff-major (row = coefficient).
-            let mut norm = vec![0.0_f32; n_mfcc * n_frames];
-            for c in 0..n_mfcc {
-                let mut lo = f32::INFINITY;
-                let mut hi = f32::NEG_INFINITY;
-                for f in 0..n_frames {
-                    let v = arr[[f, c]];
-                    lo = lo.min(v);
-                    hi = hi.max(v);
-                }
-                let span = (hi - lo).max(1e-9);
-                for f in 0..n_frames {
-                    norm[c * n_frames + f] = (arr[[f, c]] - lo) / span;
-                }
-            }
-            let rgba = crate::dsp::colormap_bake(&norm, n_frames, n_mfcc, opts.colormap);
-            lanes.push(HeatmapLane {
-                name: "MFCC".to_string(),
-                rgba,
-                width: n_frames,
-                height: n_mfcc,
-                top_label: format!("c{}", n_mfcc - 1),
-                bottom_label: "c0".to_string(),
-                raster_ref: None,
-            });
+        if let Some(lane) = matrix_heatmap(
+            "MFCC",
+            |f, c| arr[[f, c]],
+            n_frames,
+            n_mfcc,
+            opts.colormap,
+            &format!("c{}", n_mfcc.saturating_sub(1)),
+            "c0",
+        ) {
+            lanes.push(lane);
         }
     }
     lanes
+}
+
+/// Bakes a `(n_frames × n_features)` matrix (accessed as `get(frame, feature)`)
+/// into a [`HeatmapLane`]: **per-feature min-max normalised** so no single row
+/// (e.g. the MFCC energy term) dominates the colour scale, laid out
+/// feature-major (row 0 = top = highest feature index) and colormap-baked.
+/// Returns `None` for an empty matrix.
+///
+/// Shared by the MFCC lane and the embedding-tier lane.
+pub fn matrix_heatmap(
+    name: &str,
+    get: impl Fn(usize, usize) -> f32,
+    n_frames: usize,
+    n_features: usize,
+    colormap: crate::dsp::ColormapKind,
+    top_label: &str,
+    bottom_label: &str,
+) -> Option<HeatmapLane> {
+    if n_frames == 0 || n_features == 0 {
+        return None;
+    }
+    let mut norm = vec![0.0_f32; n_features * n_frames];
+    for feat in 0..n_features {
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for f in 0..n_frames {
+            let v = get(f, feat);
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        let span = (hi - lo).max(1e-9);
+        for f in 0..n_frames {
+            norm[feat * n_frames + f] = (get(f, feat) - lo) / span;
+        }
+    }
+    let rgba = crate::dsp::colormap_bake(&norm, n_frames, n_features, colormap);
+    Some(HeatmapLane {
+        name: name.to_string(),
+        rgba,
+        width: n_frames,
+        height: n_features,
+        top_label: top_label.to_string(),
+        bottom_label: bottom_label.to_string(),
+        raster_ref: None,
+    })
 }
 
 /// Computes the requested measure lanes (f0 / formants / intensity) from audio

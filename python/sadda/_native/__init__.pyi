@@ -1716,7 +1716,7 @@ class Project:
         its native rows (faithful, unlike the flattened CSV). If `tier_ids`
         is given, only those tiers are exported. Dense tiers are skipped.
         """
-    def export_figure(self, bundle_id: builtins.int, path: builtins.str | os.PathLike | pathlib.Path, *, format: builtins.str = 'svg', tier_ids: typing.Optional[typing.Sequence[builtins.int]] = None, title: typing.Optional[builtins.str] = None, waveform: builtins.bool = True, spectrogram: builtins.bool = True, f0: builtins.bool = False, formants: builtins.bool = False, intensity: builtins.bool = False, mfcc: builtins.bool = False, width: builtins.float = 800.0, font_size: typing.Optional[builtins.float] = None, window_ms: builtins.float = 25.0, hop_ms: builtins.float = 5.0, dynamic_range_db: builtins.float = 70.0, colormap: builtins.str = 'viridis') -> None:
+    def export_figure(self, bundle_id: builtins.int, path: builtins.str | os.PathLike | pathlib.Path, *, format: builtins.str = 'svg', tier_ids: typing.Optional[typing.Sequence[builtins.int]] = None, title: typing.Optional[builtins.str] = None, waveform: builtins.bool = True, spectrogram: builtins.bool = True, f0: builtins.bool = False, formants: builtins.bool = False, intensity: builtins.bool = False, mfcc: builtins.bool = False, embedding_tier_id: typing.Optional[builtins.int] = None, width: builtins.float = 800.0, font_size: typing.Optional[builtins.float] = None, window_ms: builtins.float = 25.0, hop_ms: builtins.float = 5.0, dynamic_range_db: builtins.float = 70.0, colormap: builtins.str = 'viridis') -> None:
         r"""
         Exports a publication **figure** of `bundle_id` to `path` — a stacked
         waveform / spectrogram / annotation-tier figure sharing one time axis,
@@ -1733,7 +1733,9 @@ class Project:
         order (default: all drawable tiers). `waveform` / `spectrogram` toggle
         the signal lanes; `f0` / `formants` / `intensity` add measure-track lanes
         and `mfcc` adds an MFCC heatmap lane (all off by default), each computed
-        from the audio; `window_ms` / `hop_ms` / `dynamic_range_db` / `colormap`
+        from the audio; `embedding_tier_id` adds a heatmap of that
+        `continuous_vector` tier's `(frames × dims)` matrix; `window_ms` /
+        `hop_ms` / `dynamic_range_db` / `colormap`
         control the spectrogram + heatmap colormap (∈ viridis, magma, hot,
         cividis, greyscale). `width` and `font_size` are style knobs (`font_size`
         defaults when `None`); `title` is an optional caption.

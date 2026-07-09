@@ -3397,14 +3397,16 @@ impl PyProject {
     /// order (default: all drawable tiers). `waveform` / `spectrogram` toggle
     /// the signal lanes; `f0` / `formants` / `intensity` add measure-track lanes
     /// and `mfcc` adds an MFCC heatmap lane (all off by default), each computed
-    /// from the audio; `window_ms` / `hop_ms` / `dynamic_range_db` / `colormap`
+    /// from the audio; `embedding_tier_id` adds a heatmap of that
+    /// `continuous_vector` tier's `(frames × dims)` matrix; `window_ms` /
+    /// `hop_ms` / `dynamic_range_db` / `colormap`
     /// control the spectrogram + heatmap colormap (∈ viridis, magma, hot,
     /// cividis, greyscale). `width` and `font_size` are style knobs (`font_size`
     /// defaults when `None`); `title` is an optional caption.
     #[pyo3(signature = (bundle_id, path, *, format="svg", tier_ids=None, title=None,
         waveform=true, spectrogram=true, f0=false, formants=false, intensity=false,
-        mfcc=false, width=800.0, font_size=None, window_ms=25.0, hop_ms=5.0,
-        dynamic_range_db=70.0, colormap="viridis"))]
+        mfcc=false, embedding_tier_id=None, width=800.0, font_size=None, window_ms=25.0,
+        hop_ms=5.0, dynamic_range_db=70.0, colormap="viridis"))]
     #[allow(clippy::too_many_arguments)]
     fn export_figure(
         &self,
@@ -3419,6 +3421,7 @@ impl PyProject {
         formants: bool,
         intensity: bool,
         mfcc: bool,
+        embedding_tier_id: Option<i64>,
         width: f64,
         font_size: Option<f64>,
         window_ms: f32,
@@ -3440,6 +3443,7 @@ impl PyProject {
             include_formants: formants,
             include_intensity: intensity,
             include_mfcc: mfcc,
+            embedding_tier_id,
             width,
             font_size,
             window_ms,

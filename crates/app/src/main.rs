@@ -2722,6 +2722,9 @@ impl SaddaApp {
             include_formants: lanes.formants,
             include_intensity: lanes.intensity,
             include_mfcc: lanes.mfcc,
+            // The embedding heatmap mirrors the on-screen embedding lane (which
+            // is visible exactly when a tier is selected for it).
+            embedding_tier_id: self.persisted.embedding.selected_tier_id,
             width: sadda_engine::io::figure::FigureStyle::default().width,
             font_size: None,
             window_ms: sc.window_ms,
@@ -2776,6 +2779,9 @@ impl SaddaApp {
             include_formants: lanes.formants,
             include_intensity: lanes.intensity,
             include_mfcc: lanes.mfcc,
+            // The embedding heatmap mirrors the on-screen embedding lane (which
+            // is visible exactly when a tier is selected for it).
+            embedding_tier_id: self.persisted.embedding.selected_tier_id,
             width: sadda_engine::io::figure::FigureStyle::default().width,
             font_size: None,
             window_ms: sc.window_ms,

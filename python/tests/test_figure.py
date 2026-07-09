@@ -118,6 +118,23 @@ def test_export_figure_mfcc_tikz_writes_heatmap_sidecar() -> None:
         assert (Path(td) / "hm-heatmap0.png").exists()
 
 
+def test_export_figure_embedding_heatmap_from_tier() -> None:
+    import numpy as np
+
+    with tempfile.TemporaryDirectory() as td:
+        proj, bundle = _project_with_annotated_bundle(Path(td))
+        emb = proj.add_tier(bundle, "emb", "continuous_vector")
+        # 20 frames × 4 dims of dense vectors at 100 Hz.
+        mat = np.random.RandomState(0).rand(20, 4).astype(np.float64)
+        proj.write_continuous_vector(emb, mat, 100.0)
+        out = Path(td) / "emb.svg"
+        proj.export_figure(bundle, out, embedding_tier_id=emb)
+        svg = out.read_text()
+        assert ">embedding</text>" in svg
+        # Two rasters: the spectrogram + the embedding heatmap.
+        assert svg.count("data:image/png;base64,") == 2
+
+
 def test_export_figure_respects_include_flags() -> None:
     with tempfile.TemporaryDirectory() as td:
         proj, bundle = _project_with_annotated_bundle(Path(td))

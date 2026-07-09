@@ -207,12 +207,12 @@ _Designed 2026-07-01 (see DEVLOG design entry). `FigureSpec` IR in
   (`mfcc=`/`font_size=` + GUI). Completes the "whole signal column". **Deferred:**
   embedding-raster heatmap (needs continuous_vector tier data); fuller style
   knobs. — _added 2026-07-01_
-- [ ] **Figure heatmap/style follow-ups** — (1) **embedding-raster heatmap lane**
-  from a `continuous_vector` tier (the other G4 heatmap; needs dense-tier read
-  plumbing into `build_heatmap_lanes`). (2) **Fuller style knobs** across Python
-  + GUI: per-lane heights, colormap per heatmap/spectrogram separately, palette,
-  font family/dimensions. (3) label crowding in short measure-lane left margins
-  (tighten spacing when lanes are thin). — _added 2026-07-08_
+- [ ] **Figure heatmap/style follow-ups** — ~~embedding-raster heatmap lane~~
+  (done 2026-07-09: `embedding_tier_id` + shared `matrix_heatmap`). Remaining:
+  (1) **Fuller style knobs** across Python + GUI: per-lane heights, colormap per
+  heatmap/spectrogram separately, palette, font family/dimensions. (2) label
+  crowding in short measure-lane left margins (tighten spacing when lanes are
+  thin). — _added 2026-07-08_
 ## Documentation-image pathway
 
 _Designed 2026-07-02 (see DEVLOG design entry). North star: an **automatable,

@@ -5763,12 +5763,27 @@ impl Project {
         let audio = self.load_audio(bundle_id)?;
         let samples: Vec<f32> = audio.mono_samples().collect();
         let tiers = self.gather_figure_tiers(bundle_id, tier_ids)?;
-        Ok(crate::io::figure::build_spec(
-            &samples,
-            audio.sample_rate,
-            tiers,
-            opts,
-        ))
+        let mut spec = crate::io::figure::build_spec(&samples, audio.sample_rate, tiers, opts);
+
+        // The embedding heatmap needs tier data, which `build_spec` (pure) can't
+        // read — bake it here where the project is in hand.
+        if let Some(tier_id) = opts.embedding_tier_id {
+            let matrix = self.read_continuous_vector(tier_id)?;
+            let (n_frames, n_dims) = (matrix.nrows(), matrix.ncols());
+            if let Some(lane) = crate::io::figure::matrix_heatmap(
+                "embedding",
+                |f, d| matrix[[f, d]] as f32,
+                n_frames,
+                n_dims,
+                opts.colormap,
+                &format!("d{}", n_dims.saturating_sub(1)),
+                "d0",
+            ) {
+                spec.heatmaps.push(lane);
+            }
+        }
+
+        Ok(spec)
     }
 
     /// Rasterises a publication figure of `bundle_id` to an `(width, height,
