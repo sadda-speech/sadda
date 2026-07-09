@@ -48,6 +48,20 @@ impl ColormapKind {
         }
     }
 
+    /// Maps a lowercase name (`"viridis"`, `"magma"`, `"hot"`, `"cividis"`,
+    /// `"greyscale"` / `"grayscale"`) to a variant. Used by the Python/GUI
+    /// figure-export surface; returns `None` for anything else.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "viridis" => Some(Self::Viridis),
+            "magma" => Some(Self::Magma),
+            "hot" => Some(Self::Hot),
+            "cividis" => Some(Self::Cividis),
+            "greyscale" | "grayscale" | "grey" | "gray" => Some(Self::Greyscale),
+            _ => None,
+        }
+    }
+
     /// Samples the colormap at `t ∈ [0, 1]` (clamped), returning an `(r, g, b)`
     /// 8-bit triple.
     pub fn sample(self, t: f32) -> (u8, u8, u8) {

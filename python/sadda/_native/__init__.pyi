@@ -1716,6 +1716,22 @@ class Project:
         its native rows (faithful, unlike the flattened CSV). If `tier_ids`
         is given, only those tiers are exported. Dense tiers are skipped.
         """
+    def export_figure(self, bundle_id: builtins.int, path: builtins.str | os.PathLike | pathlib.Path, *, format: builtins.str = 'svg', tier_ids: typing.Optional[typing.Sequence[builtins.int]] = None, title: typing.Optional[builtins.str] = None, waveform: builtins.bool = True, spectrogram: builtins.bool = True, width: builtins.float = 800.0, window_ms: builtins.float = 25.0, hop_ms: builtins.float = 5.0, dynamic_range_db: builtins.float = 70.0, colormap: builtins.str = 'viridis') -> None:
+        r"""
+        Exports a publication **figure** of `bundle_id` to `path` — a stacked
+        waveform / spectrogram / annotation-tier figure sharing one time axis,
+        the staple of a phonetics paper.
+        
+        `format` is `"svg"` (a self-contained SVG with the Doulos SIL font and
+        the spectrogram raster embedded, so it renders identically anywhere and
+        IPA labels stay real, selectable text); PDF and TikZ arrive in later
+        slices. `tier_ids` selects which interval/point tiers to draw, in that
+        order (default: all drawable tiers). `waveform` / `spectrogram` toggle
+        the signal lanes; `window_ms` / `hop_ms` / `dynamic_range_db` /
+        `colormap` control the spectrogram (colormap ∈ viridis, magma, hot,
+        cividis, greyscale). `width` is the figure width in px; `title` is an
+        optional caption.
+        """
     def import_csv(self, path: builtins.str | os.PathLike | pathlib.Path, bundle_id: builtins.int) -> builtins.list[builtins.int]:
         r"""
         Imports a flat CSV (as written by `export_csv`) into `bundle_id`. Rows

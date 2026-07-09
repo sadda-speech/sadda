@@ -151,10 +151,27 @@ _Designed 2026-07-01 (see DEVLOG design entry). `FigureSpec` IR in
   accessor (`VisibleLanes`, reads the current post-S3 visibility model).
   Bake-parity via moved unit tests + a new end-to-end pipeline test. No user
   surface. — _added 2026-07-01_
-- [ ] **G1 — first shippable figure** — `FigureSpec` IR + **SVG** serializer for
-  waveform + spectrogram + tiers (specTeX-parity core) + PDF via SVG→PDF; Python
-  `export_figure(...)`; GUI "Export figure…" dialog with per-element include
-  checkboxes (default from `visible_lanes()`) + format choice. — _added 2026-07-01_
+- [x] **G1 — first shippable figure** _(done 2026-07-08, feat/figure-export-g0)_ —
+  `FigureSpec` IR + **SVG** serializer (`io::figure`): waveform band + spectrogram
+  raster + tier boxes with panel-crossing boundary lines + shared time axis;
+  IPA as real text in embedded Doulos SIL (SIL OFL, bundled). `build_spec` +
+  `Project::export_figure`; Python `export_figure(...)`; GUI File ▸ Export ▸
+  Publication figure (SVG)… (defaults from `visible_lanes()`). Three surfaces
+  tested. **Deferred from G1:** PDF (see G1.1); the per-element checkbox dialog
+  (menu exports the visible set for now); SVG font subsetting (full embed →
+  ~1.2 MB SVGs). — _added 2026-07-01_
+- [ ] **G1.1 — figure export to PDF** — SVG→PDF via `svg2pdf` (feature-gated so
+  the base engine/wheel stay lean; the usvg/resvg tree is heavy). Wire the
+  `format="pdf"` path in `Project::export_figure` (today it raises an actionable
+  error) + Python + a GUI format choice. svg2pdf/krilla subsets embedded fonts,
+  so the PDF stays small even though the SVG embeds the full font. — _added 2026-07-08_
+- [ ] **G1 refinements — SVG font subsetting + per-element export dialog** —
+  (1) subset the embedded Doulos SIL to the glyphs a figure uses (tens of KB vs
+  the current full-font ~1.2 MB embed); validate no IPA glyph/diacritic is
+  dropped. (2) A proper export dialog with per-element include checkboxes
+  (waveform/spectrogram/each tier) + width/colormap/title, defaulting from
+  `visible_lanes()`, replacing the current "export what's visible" menu item. —
+  _added 2026-07-08_
 - [ ] **G2 — TikZ backend** — TikZ serializer off the same IR + standalone `.tex`
   preview wrapper (specTeX integration model). — _added 2026-07-01_
 - [ ] **G3 — measure lanes in figures** — f0 / formants / intensity / VAD as

@@ -5609,6 +5609,89 @@ impl Project {
         Ok(())
     }
 
+    /// Writes a publication **figure** of `bundle_id` (waveform / spectrogram /
+    /// annotation-tier lanes on a shared time axis) to `path`.
+    ///
+    /// `format` is currently `"svg"` — a self-contained SVG with the font and
+    /// spectrogram raster embedded; PDF and TikZ arrive in later G-series
+    /// slices. `tier_ids` (if given) selects which interval/point tiers to
+    /// draw, in that order; dense/reference tiers are never drawable. `opts`
+    /// controls the spectrogram parameters, which signal lanes to include, the
+    /// figure width, and the title.
+    pub fn export_figure(
+        &self,
+        bundle_id: i64,
+        path: impl AsRef<Path>,
+        format: &str,
+        tier_ids: Option<&[i64]>,
+        opts: &crate::io::figure::FigureExportOptions,
+    ) -> Result<()> {
+        if !format.eq_ignore_ascii_case("svg") {
+            return Err(EngineError::Corpus(format!(
+                "figure export format {format:?} is not supported yet (only \"svg\"); \
+                 PDF and TikZ arrive in later slices"
+            )));
+        }
+        let audio = self.load_audio(bundle_id)?;
+        let samples: Vec<f32> = audio.mono_samples().collect();
+        let tiers = self.gather_figure_tiers(bundle_id, tier_ids)?;
+        let spec = crate::io::figure::build_spec(&samples, audio.sample_rate, tiers, opts);
+        let svg = crate::io::figure::to_svg(&spec);
+        std::fs::write(path.as_ref(), svg)
+            .map_err(|e| EngineError::Corpus(format!("figure export write failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Gathers a bundle's interval + point tiers as drawable
+    /// [`crate::io::figure::FigureTier`]s — filtered by `tier_ids` (in that
+    /// order) if given, otherwise all tiers in natural order. Dense and
+    /// reference tiers are skipped (they have no figure representation yet).
+    fn gather_figure_tiers(
+        &self,
+        bundle_id: i64,
+        tier_ids: Option<&[i64]>,
+    ) -> Result<Vec<crate::io::figure::FigureTier>> {
+        use crate::io::figure::{FigureInterval, FigurePoint, FigureTier, FigureTierContent};
+        let all = self.tiers(Some(bundle_id))?;
+        let ordered: Vec<&Tier> = match tier_ids {
+            Some(ids) => ids
+                .iter()
+                .filter_map(|id| all.iter().find(|t| t.id == *id))
+                .collect(),
+            None => all.iter().collect(),
+        };
+        let mut out = Vec::new();
+        for tier in ordered {
+            let content = match tier.r#type {
+                TierType::Interval => FigureTierContent::Intervals(
+                    self.intervals(tier.id)?
+                        .into_iter()
+                        .map(|iv| FigureInterval {
+                            start: iv.start_seconds,
+                            end: iv.end_seconds,
+                            label: iv.label.unwrap_or_default(),
+                        })
+                        .collect(),
+                ),
+                TierType::Point => FigureTierContent::Points(
+                    self.points(tier.id)?
+                        .into_iter()
+                        .map(|p| FigurePoint {
+                            time: p.time_seconds,
+                            label: p.label.unwrap_or_default(),
+                        })
+                        .collect(),
+                ),
+                _ => continue, // dense / reference tiers aren't drawable
+            };
+            out.push(FigureTier {
+                name: tier.name.clone(),
+                content,
+            });
+        }
+        Ok(out)
+    }
+
     /// Imports an ELAN `.eaf` into `bundle_id`. Each EAF tier becomes a
     /// new [`Tier`] (interval / point / reference based on stereotype and
     /// annotation shape); each annotation becomes an `annotation_*` row

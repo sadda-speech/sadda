@@ -6,6 +6,57 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-08 — G1: first shippable publication figure (FigureSpec → SVG, three surfaces)
+
+The user-facing payoff of the figure-export strand: export a journal-ready
+**waveform / spectrogram / annotation-tier** figure — the staple of a phonetics
+paper — as a self-contained SVG, across engine + Python + GUI.
+
+**Engine (`io::figure`).** A `FigureSpec` IR + free serializers, mirroring the
+tabular `ExportBundle → to_csv` split. `to_svg` renders a self-contained SVG: a
+vector waveform band (min/max envelope — improving on specTeX, which rasterises
+the waveform), the baked spectrogram raster embedded as a PNG `<image>`, tier
+boxes whose **boundary lines extend through the signal panels** (the specTeX
+signature), and a shared "Time (s)" axis. `build_spec` assembles a `FigureSpec`
+from raw audio + tiers headlessly (STFT → power → dB-normalise → G0's
+`colormap_bake`), so Python and the GUI share one path; `Project::export_figure`
+glues bundle data to it.
+
+**IPA as real text.** Labels render as SVG `<text>` in **Doulos SIL** (the
+phonetics IPA reference face, the specTeX baseline), embedded via a base64
+`@font-face` — so a figure renders identically anywhere *and* the IPA stays
+selectable/editable, without the viewer having the font. Font + SIL OFL license
+bundled under `crates/engine/assets/fonts/` (user chose Doulos over Charis;
+both OFL). Full-font embed for correctness (subsetting an IPA font risks dropping
+a diacritic) → ~1.2 MB SVGs; **subsetting is a flagged follow-up**.
+
+**Python.** `Project.export_figure(bundle, path, *, format, tier_ids, title,
+waveform, spectrogram, width, window_ms, hop_ms, dynamic_range_db, colormap)`.
+Verified end to end through the real wheel (5 tests) — including a live render of
+a 300→700 Hz sweep whose magma spectrogram shows the rising ridge + harmonics.
+
+**GUI.** File ▸ Export ▸ **Publication figure (SVG)…** — exports *what's on
+screen*: which signal lanes from `visible_lanes()` (G0), spectrogram params +
+colormap from the current config, tiers minus the hidden set. (The design's
+per-element checkbox dialog is deferred to a refinement; "export the visible
+set" is the strong default.)
+
+**Scope call (user-approved).** Shipped **SVG across all three surfaces** now;
+**PDF via `svg2pdf` is a fast-follow (G1.1)** — its usvg/resvg tree is heavy and
+wants a feature gate, and SVG already drops into LaTeX/Word/web and converts to
+PDF with one `rsvg-convert`. `export_figure(format="pdf")` raises an actionable
+error until then.
+
+**Verification.** Engine 313 tests (10 figure/colormap); Python 5; app compiles
++ workspace `clippy -D warnings` + `fmt` clean; stubs regenerated. Structural
+goldens normalize the embedded font/PNG blobs so they stay small. Visually
+validated by rasterising sample figures (waveform + viridis/magma spectrogram +
+`p ɹ ɑː t` tiers) — hits the design's G1 specTeX-parity checkpoint.
+
+**Next:** G1.1 PDF (svg2pdf, feature-gated) · G2 TikZ backend · G3 measure lanes
+· G4 heatmaps + style knobs. Refinements: SVG font subsetting, the per-element
+export dialog.
+
 ## 2026-07-08 — G0: figure-export groundwork (bake moves engine-side)
 
 First slice of the **G-series** (publication figure export), picking up the

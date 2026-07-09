@@ -599,6 +599,180 @@ fn fmt_num(v: f64) -> String {
     s
 }
 
+/// Options for assembling a [`FigureSpec`] from a bundle's audio + tiers.
+/// [`Default`] mirrors the GUI's spectrogram defaults (25 ms window / 5 ms hop
+/// / Viridis / 70 dB range) and a full waveform + spectrogram figure at the
+/// default figure width.
+pub struct FigureExportOptions {
+    /// Optional figure title.
+    pub title: Option<String>,
+    /// Draw the waveform band.
+    pub include_waveform: bool,
+    /// Draw the spectrogram raster.
+    pub include_spectrogram: bool,
+    /// Overall figure width in px.
+    pub width: f64,
+    /// STFT window length in milliseconds.
+    pub window_ms: f32,
+    /// STFT hop length in milliseconds.
+    pub hop_ms: f32,
+    /// Spectrogram dynamic-range floor in dB.
+    pub dynamic_range_db: f32,
+    /// Spectrogram colormap.
+    pub colormap: crate::dsp::ColormapKind,
+}
+
+impl Default for FigureExportOptions {
+    fn default() -> Self {
+        Self {
+            title: None,
+            include_waveform: true,
+            include_spectrogram: true,
+            width: FigureStyle::default().width,
+            window_ms: 25.0,
+            hop_ms: 5.0,
+            dynamic_range_db: 70.0,
+            colormap: crate::dsp::ColormapKind::Viridis,
+        }
+    }
+}
+
+/// Max spectrogram raster width (time cells) before time-downsampling, so the
+/// embedded PNG stays bounded on long files (mirrors the app's cap).
+const MAX_FIGURE_SPECTROGRAM_WIDTH: usize = 4096;
+
+/// Assembles a [`FigureSpec`] from a bundle's mono audio + already-converted
+/// drawable tiers, computing the waveform envelope and the spectrogram raster
+/// (STFT → power → dB-normalise → colormap bake) headlessly — so Python and
+/// the GUI share one figure-assembly path.
+///
+/// A signal too short for the requested window simply yields no spectrogram
+/// (and empty audio yields no waveform) rather than an error.
+pub fn build_spec(
+    samples: &[f32],
+    sample_rate: u32,
+    tiers: Vec<FigureTier>,
+    opts: &FigureExportOptions,
+) -> FigureSpec {
+    let duration = if sample_rate > 0 {
+        samples.len() as f64 / sample_rate as f64
+    } else {
+        0.0
+    };
+    let style = FigureStyle {
+        width: opts.width,
+        ..FigureStyle::default()
+    };
+
+    let waveform = if opts.include_waveform && !samples.is_empty() {
+        let cols = (opts.width - style.margin_left - style.margin_right).max(1.0);
+        let minmax = minmax_envelope(samples, cols as usize);
+        // Scale the band to the actual peak so quiet signals still fill the lane.
+        let peak = minmax
+            .iter()
+            .flat_map(|&(mn, mx)| [mn.abs(), mx.abs()])
+            .fold(0.0_f32, f32::max)
+            .max(1e-6);
+        Some(WaveformLane {
+            minmax,
+            amplitude_range: (-peak, peak),
+        })
+    } else {
+        None
+    };
+
+    let spectrogram = if opts.include_spectrogram {
+        build_spectrogram_lane(samples, sample_rate, opts)
+    } else {
+        None
+    };
+
+    FigureSpec {
+        title: opts.title.clone(),
+        time_range: (0.0, duration.max(f64::MIN_POSITIVE)),
+        waveform,
+        spectrogram,
+        tiers,
+        style,
+    }
+}
+
+/// Computes a [`SpectrogramLane`] from audio, or `None` if the signal is too
+/// short / the rate is unknown.
+fn build_spectrogram_lane(
+    samples: &[f32],
+    sample_rate: u32,
+    opts: &FigureExportOptions,
+) -> Option<SpectrogramLane> {
+    if sample_rate == 0 {
+        return None;
+    }
+    let sr = sample_rate as f32;
+    let window_samples = ((opts.window_ms / 1000.0) * sr).round() as usize;
+    let hop_samples = ((opts.hop_ms / 1000.0) * sr).round() as usize;
+    if window_samples < 4 || hop_samples == 0 || samples.len() < window_samples {
+        return None;
+    }
+    let window = crate::dsp::hann(window_samples);
+    let (stft_out, shape) = crate::dsp::stft(samples, &window, hop_samples);
+    if shape.n_frames == 0 || shape.n_freq_bins == 0 {
+        return None;
+    }
+    let power = crate::dsp::power_spectrogram(&stft_out, shape);
+    let normalized = crate::dsp::power_to_db_normalized(&power, opts.dynamic_range_db);
+
+    // Time-downsample (average pooling) if wider than the cap.
+    let (width, display) = if shape.n_frames > MAX_FIGURE_SPECTROGRAM_WIDTH {
+        let stride = shape.n_frames.div_ceil(MAX_FIGURE_SPECTROGRAM_WIDTH);
+        let new_width = shape.n_frames.div_ceil(stride);
+        let mut out = vec![0.0_f32; shape.n_freq_bins * new_width];
+        for b in 0..shape.n_freq_bins {
+            for x in 0..new_width {
+                let start = x * stride;
+                let end = (start + stride).min(shape.n_frames);
+                let mut acc = 0.0_f32;
+                for f in start..end {
+                    acc += normalized[b * shape.n_frames + f];
+                }
+                out[b * new_width + x] = acc / (end - start) as f32;
+            }
+        }
+        (new_width, out)
+    } else {
+        (shape.n_frames, normalized)
+    };
+
+    let rgba = crate::dsp::colormap_bake(&display, width, shape.n_freq_bins, opts.colormap);
+    Some(SpectrogramLane {
+        rgba,
+        width,
+        height: shape.n_freq_bins,
+        max_freq_hz: sr / 2.0,
+    })
+}
+
+/// A min/max amplitude envelope of `samples` bucketed into `n_cols` columns,
+/// left → right. Each column is the `(min, max)` over its slice of samples.
+fn minmax_envelope(samples: &[f32], n_cols: usize) -> Vec<(f32, f32)> {
+    if samples.is_empty() || n_cols == 0 {
+        return Vec::new();
+    }
+    let n = samples.len();
+    let mut out = Vec::with_capacity(n_cols);
+    for c in 0..n_cols {
+        let start = c * n / n_cols;
+        let end = (((c + 1) * n / n_cols).max(start + 1)).min(n);
+        let mut mn = f32::INFINITY;
+        let mut mx = f32::NEG_INFINITY;
+        for &s in &samples[start..end] {
+            mn = mn.min(s);
+            mx = mx.max(s);
+        }
+        out.push((mn, mx));
+    }
+    out
+}
+
 /// Escapes the five XML metacharacters so labels can't break the document.
 fn xml_escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -775,6 +949,71 @@ mod tests {
         assert!(svg.contains(">events</text>"));
         assert!(svg.contains(">praat</text>")); // title
         assert!(svg.contains("Hz")); // spectrogram freq axis
+    }
+
+    #[test]
+    fn build_spec_from_audio_populates_lanes() {
+        let sr = 16_000u32;
+        // 0.25 s, 440 Hz sine.
+        let n = sr as usize / 4;
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (std::f32::consts::TAU * 440.0 * i as f32 / sr as f32).sin() * 0.6)
+            .collect();
+        let tiers = vec![FigureTier {
+            name: "w".to_string(),
+            content: FigureTierContent::Intervals(vec![FigureInterval {
+                start: 0.0,
+                end: 0.25,
+                label: "aː".to_string(),
+            }]),
+        }];
+        let spec = build_spec(&samples, sr, tiers, &FigureExportOptions::default());
+        // Time range ≈ duration.
+        assert!((spec.time_range.1 - 0.25).abs() < 1e-3);
+        // Both signal lanes materialised.
+        let wave = spec.waveform.as_ref().expect("waveform");
+        assert!(!wave.minmax.is_empty());
+        assert!(wave.amplitude_range.1 > 0.0);
+        let sg = spec.spectrogram.as_ref().expect("spectrogram");
+        assert_eq!(sg.rgba.len(), sg.width * sg.height * 4);
+        assert!((sg.max_freq_hz - 8000.0).abs() < 1.0); // Nyquist
+        // And it serialises.
+        assert!(to_svg(&spec).contains(">aː</text>"));
+    }
+
+    #[test]
+    fn build_spec_too_short_for_window_skips_spectrogram() {
+        // 3 samples can't fill a 25 ms window; no spectrogram, but no panic.
+        let spec = build_spec(
+            &[0.1, -0.1, 0.2],
+            16_000,
+            vec![],
+            &FigureExportOptions::default(),
+        );
+        assert!(spec.spectrogram.is_none());
+        assert!(spec.waveform.is_some());
+    }
+
+    #[test]
+    fn build_spec_respects_include_flags() {
+        let samples = vec![0.3_f32; 16_000];
+        let opts = FigureExportOptions {
+            include_spectrogram: false,
+            ..FigureExportOptions::default()
+        };
+        let spec = build_spec(&samples, 16_000, vec![], &opts);
+        assert!(spec.spectrogram.is_none());
+        assert!(spec.waveform.is_some());
+    }
+
+    #[test]
+    fn minmax_envelope_captures_extremes() {
+        let samples = vec![0.0, 1.0, -1.0, 0.5, -0.5, 0.2];
+        let env = minmax_envelope(&samples, 2);
+        assert_eq!(env.len(), 2);
+        // First bucket [0,1,-1] → (-1, 1); second [0.5,-0.5,0.2] → (-0.5, 0.5).
+        assert_eq!(env[0], (-1.0, 1.0));
+        assert_eq!(env[1], (-0.5, 0.5));
     }
 
     /// Extracts the `height="…"` from the `<svg>` open tag.

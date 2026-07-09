@@ -2701,6 +2701,55 @@ impl SaddaApp {
         }
     }
 
+    /// Exports a publication figure (G1) of the active bundle to `path` as SVG.
+    /// The figure mirrors **what's on screen**: which signal lanes to draw come
+    /// from [`crate::state::PersistedState::visible_lanes`], the spectrogram
+    /// parameters + colormap from the current `spectrogram` config, and the
+    /// tiers from those not hidden in the tier strip.
+    fn export_figure_for_active_bundle(&mut self, path: PathBuf) {
+        let Some(bundle_id) = self.selected_bundle_id else {
+            return;
+        };
+        let lanes = self.persisted.visible_lanes();
+        let sc = self.persisted.spectrogram;
+        let hidden = self.persisted.hidden_tier_ids.clone();
+        let opts = sadda_engine::io::figure::FigureExportOptions {
+            title: None,
+            include_waveform: lanes.waveform,
+            include_spectrogram: lanes.spectrogram,
+            width: sadda_engine::io::figure::FigureStyle::default().width,
+            window_ms: sc.window_ms,
+            hop_ms: sc.hop_ms,
+            dynamic_range_db: sc.dynamic_range_db,
+            colormap: sc.colormap,
+        };
+        let AppState::ProjectLoaded { project, .. } = &self.app_state else {
+            return;
+        };
+        // The tier strip's visible tiers, in order (empty when the strip is hidden).
+        let tier_ids: Option<Vec<i64>> = if lanes.tier_strip {
+            Some(
+                project
+                    .tiers(Some(bundle_id))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|t| !hidden.contains(&t.id))
+                    .map(|t| t.id)
+                    .collect(),
+            )
+        } else {
+            Some(Vec::new())
+        };
+        let result = project.export_figure(bundle_id, &path, "svg", tier_ids.as_deref(), &opts);
+        match result {
+            Ok(()) => {
+                self.error = None;
+                self.set_info(format!("Wrote figure to {}", path.display()));
+            }
+            Err(e) => self.set_error(format!("Figure export failed: {e}")),
+        }
+    }
+
     /// Pops a save-file dialog defaulting to the project's
     /// `exports/` directory + the active bundle's name + the
     /// requested extension. Returns `None` if the user cancels.
@@ -10462,6 +10511,20 @@ impl SaddaApp {
                         ui.close();
                         if let Some(path) = self.suggest_export_path("json") {
                             self.export_json_for_active_bundle(path);
+                        }
+                    }
+                    ui.separator();
+                    if ui
+                        .button("Publication figure (SVG)…")
+                        .on_hover_text(
+                            "Export a waveform / spectrogram / tier figure of what's on \
+                             screen as a self-contained SVG",
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        if let Some(path) = self.suggest_export_path("svg") {
+                            self.export_figure_for_active_bundle(path);
                         }
                     }
                 });
