@@ -1,11 +1,12 @@
 //! Publication figure export — a `FigureSpec` intermediate representation and
-//! pluggable serializers (SVG now; PDF via `svg2pdf`; TikZ in G2).
+//! pluggable serializers: [`to_svg`] (self-contained SVG), `to_pdf` (via
+//! `svg2pdf`, `figure-pdf` feature), and [`to_tikz`] (standalone TikZ/LaTeX).
 //!
 //! Mirrors the [`super::tabular`] split: a plain-data IR ([`FigureSpec`] +
-//! its lanes) built by the caller, and free serializer functions
-//! ([`to_svg`]) that render it — so the same figure description can target
-//! several backends and be assembled headlessly (Python, the doc-render
-//! harness) or from the GUI.
+//! its lanes) built by the caller, and free serializer functions that render
+//! it off a shared [`FigureLayout`] — so the same figure description can
+//! target every backend consistently and be assembled headlessly (Python, the
+//! doc-render harness) or from the GUI.
 //!
 //! ## The figure
 //!
@@ -178,6 +179,86 @@ impl FigureStyle {
     }
 }
 
+/// The computed vertical + horizontal geometry of a figure — where each lane
+/// sits and how time maps to x. Shared by every serializer ([`to_svg`],
+/// [`to_tikz`]) so the SVG, PDF, and TikZ backends can't drift apart.
+struct FigureLayout {
+    /// Top y of the signal-panel region (boundary lines start here).
+    panels_top: f64,
+    /// Top y of the waveform lane, if present.
+    wave_y: Option<f64>,
+    /// Top y of the spectrogram lane, if present.
+    spec_y: Option<f64>,
+    /// Bottom y of the signal-panel region (tiers start here; boundary lines
+    /// end here).
+    panels_bottom: f64,
+    /// Top y of each tier row, in order.
+    tier_tops: Vec<f64>,
+    /// y of the shared time axis line.
+    axis_y: f64,
+    /// Total figure height.
+    total_height: f64,
+    /// Left / right / width of the plot area (between the margins).
+    plot_x0: f64,
+    plot_x1: f64,
+    plot_w: f64,
+    /// Time window.
+    t0: f64,
+    t1: f64,
+}
+
+impl FigureLayout {
+    fn compute(spec: &FigureSpec) -> Self {
+        let s = &spec.style;
+        let mut y = s.margin_top + s.title_height(spec.title.is_some());
+        let panels_top = y;
+
+        let wave_y = spec.waveform.as_ref().map(|_| {
+            let top = y;
+            y += s.waveform_height;
+            top
+        });
+        let spec_y = spec.spectrogram.as_ref().map(|_| {
+            let top = y;
+            y += s.spectrogram_height;
+            top
+        });
+        let panels_bottom = y;
+
+        let mut tier_tops = Vec::with_capacity(spec.tiers.len());
+        for _ in &spec.tiers {
+            tier_tops.push(y);
+            y += s.tier_height;
+        }
+        let axis_y = y;
+        let total_height = axis_y + s.axis_height;
+
+        let plot_x0 = s.margin_left;
+        let plot_x1 = s.width - s.margin_right;
+        let (t0, t1) = spec.time_range;
+        Self {
+            panels_top,
+            wave_y,
+            spec_y,
+            panels_bottom,
+            tier_tops,
+            axis_y,
+            total_height,
+            plot_x0,
+            plot_x1,
+            plot_w: (plot_x1 - plot_x0).max(1.0),
+            t0,
+            t1,
+        }
+    }
+
+    /// Maps a time in seconds to an x coordinate in the plot area.
+    fn x_of(&self, t: f64) -> f64 {
+        let span = (self.t1 - self.t0).max(f64::MIN_POSITIVE);
+        self.plot_x0 + ((t - self.t0) / span) * self.plot_w
+    }
+}
+
 /// Serializes a [`FigureSpec`] to a **self-contained SVG** string (embedded
 /// font + embedded spectrogram raster; no external references).
 ///
@@ -187,38 +268,22 @@ impl FigureStyle {
 /// panels (the specTeX signature).
 pub fn to_svg(spec: &FigureSpec) -> String {
     let s = &spec.style;
-    let has_title = spec.title.is_some();
-
-    // --- vertical layout: assign each lane a top y and a height ---------
-    let mut y = s.margin_top + s.title_height(has_title);
-    let panels_top = y; // where the signal panels begin (for boundary lines)
-
-    let wave_y = spec.waveform.as_ref().map(|_| {
-        let top = y;
-        y += s.waveform_height;
-        top
-    });
-    let spec_y = spec.spectrogram.as_ref().map(|_| {
-        let top = y;
-        y += s.spectrogram_height;
-        top
-    });
-    let panels_bottom = y; // signal panels end here (tiers begin)
-
-    let mut tier_tops = Vec::with_capacity(spec.tiers.len());
-    for _ in &spec.tiers {
-        tier_tops.push(y);
-        y += s.tier_height;
-    }
-    let axis_y = y;
-    let total_height = axis_y + s.axis_height;
-
-    let plot_x0 = s.margin_left;
-    let plot_x1 = s.width - s.margin_right;
-    let plot_w = (plot_x1 - plot_x0).max(1.0);
-    let (t0, t1) = spec.time_range;
-    let tspan = (t1 - t0).max(f64::MIN_POSITIVE);
-    let x_of = |t: f64| plot_x0 + ((t - t0) / tspan) * plot_w;
+    let lay = FigureLayout::compute(spec);
+    let FigureLayout {
+        panels_top,
+        wave_y,
+        spec_y,
+        panels_bottom,
+        ref tier_tops,
+        axis_y,
+        total_height,
+        plot_x0,
+        plot_x1,
+        plot_w,
+        t0,
+        t1,
+    } = lay;
+    let x_of = |t: f64| lay.x_of(t);
 
     // --- assemble ------------------------------------------------------
     let mut out = String::with_capacity(4096);
@@ -279,7 +344,7 @@ pub fn to_svg(spec: &FigureSpec) -> String {
     }
 
     // Tier rows.
-    for (tier, &top) in spec.tiers.iter().zip(&tier_tops) {
+    for (tier, &top) in spec.tiers.iter().zip(tier_tops) {
         out.push_str(&tier_svg(
             tier,
             top,
@@ -295,6 +360,293 @@ pub fn to_svg(spec: &FigureSpec) -> String {
     out.push_str(&time_axis_svg(t0, t1, axis_y, plot_x0, plot_x1, &x_of, s));
 
     out.push_str("</svg>\n");
+    out
+}
+
+/// Serializes a [`FigureSpec`] to a **standalone TikZ/LaTeX document** (the
+/// specTeX integration model). Compile with **XeLaTeX or LuaLaTeX** — it uses
+/// `fontspec` + Doulos SIL so IPA typesets in the document's own font.
+///
+/// TikZ can't embed a raster, so the spectrogram is not inlined: if the figure
+/// has one, pass `raster_ref` = the filename of a sidecar PNG (written next to
+/// the `.tex` by [`crate::corpus::Project::export_figure`]) and it is
+/// `\includegraphics`'d; pass `None` to omit it.
+///
+/// Everything else (waveform band, tier boxes, panel-crossing boundary lines,
+/// axes, text) is native vector TikZ off the shared [`FigureLayout`], so it
+/// matches the SVG/PDF backends. Coordinates are px-as-pt, y flipped for TikZ's
+/// y-up convention; scale on `\includegraphics` when embedding.
+pub fn to_tikz(spec: &FigureSpec, raster_ref: Option<&str>) -> String {
+    let s = &spec.style;
+    let lay = FigureLayout::compute(spec);
+    let h = lay.total_height;
+    // TikZ is y-up; map top-down SVG-space y to (h - y). Emit px as pt.
+    let ty = |y: f64| h - y;
+
+    let mut b = String::with_capacity(4096);
+    b.push_str("% Publication figure exported by sadda.\n");
+    b.push_str("% Compile with XeLaTeX or LuaLaTeX (fontspec + Doulos SIL for IPA).\n");
+    b.push_str("% The spectrogram is the sidecar PNG referenced below.\n");
+    b.push_str("\\documentclass[border=5pt]{standalone}\n");
+    b.push_str("\\usepackage{tikz}\n\\usepackage{graphicx}\n\\usepackage{fontspec}\n");
+    b.push_str(
+        "\\setmainfont{Doulos SIL}% IPA reference face (SIL OFL); install it or add [Path=...]\n",
+    );
+    b.push_str("\\begin{document}\n\\begin{tikzpicture}[x=1pt,y=1pt]\n");
+    b.push_str(&format!(
+        "\\definecolor{{figstroke}}{{HTML}}{{{}}}\n",
+        hex_rgb(&s.stroke)
+    ));
+    b.push_str(&format!(
+        "\\definecolor{{figwave}}{{HTML}}{{{}}}\n",
+        hex_rgb(&s.waveform_fill)
+    ));
+
+    if let Some(title) = &spec.title {
+        b.push_str(&format!(
+            "\\node[anchor=north] at ({:.1},{:.1}) {{\\large {}}};\n",
+            s.width / 2.0,
+            ty(s.margin_top),
+            tex_escape(title),
+        ));
+    }
+
+    // Waveform band + zero line + amplitude labels.
+    if let (Some(top), Some(wave)) = (lay.wave_y, &spec.waveform) {
+        let (amin, amax) = wave.amplitude_range;
+        let aspan = (amax - amin).max(f32::MIN_POSITIVE) as f64;
+        let n = wave.minmax.len();
+        let wx = |i: usize| {
+            if n <= 1 {
+                lay.plot_x0
+            } else {
+                lay.plot_x0 + (i as f64 / (n - 1) as f64) * lay.plot_w
+            }
+        };
+        let wy = |amp: f32| ty(top + (1.0 - ((amp - amin) as f64) / aspan) * s.waveform_height);
+        if n > 0 {
+            b.push_str("\\fill[figwave] ");
+            for (i, &(_, mx)) in wave.minmax.iter().enumerate() {
+                b.push_str(&format!("({:.1},{:.1}) -- ", wx(i), wy(mx)));
+            }
+            for (i, &(mn, _)) in wave.minmax.iter().enumerate().rev() {
+                b.push_str(&format!("({:.1},{:.1}) -- ", wx(i), wy(mn)));
+            }
+            b.push_str("cycle;\n");
+        }
+        let yz = wy(0.0);
+        b.push_str(&format!(
+            "\\draw[figstroke,line width=0.4pt] ({:.1},{:.1}) -- ({:.1},{:.1});\n",
+            lay.plot_x0,
+            yz,
+            lay.plot_x0 + lay.plot_w,
+            yz,
+        ));
+        b.push_str(&tikz_ylabel(
+            lay.plot_x0,
+            ty(top + s.font_size),
+            &fmt_num(amax as f64),
+        ));
+        b.push_str(&tikz_ylabel(
+            lay.plot_x0,
+            ty(top + s.waveform_height),
+            &fmt_num(amin as f64),
+        ));
+    }
+
+    // Spectrogram: the sidecar raster + frequency labels.
+    if let (Some(top), Some(sg)) = (lay.spec_y, &spec.spectrogram) {
+        if let Some(r) = raster_ref {
+            b.push_str(&format!(
+                "\\node[anchor=north west,inner sep=0] at ({:.1},{:.1}) \
+                 {{\\includegraphics[width={:.1}pt,height={:.1}pt]{{{}}}}};\n",
+                lay.plot_x0,
+                ty(top),
+                lay.plot_w,
+                s.spectrogram_height,
+                r,
+            ));
+        }
+        b.push_str(&tikz_ylabel(
+            lay.plot_x0,
+            ty(top + s.font_size),
+            &fmt_num(sg.max_freq_hz as f64),
+        ));
+        b.push_str(&tikz_ylabel(
+            lay.plot_x0,
+            ty(top + s.spectrogram_height),
+            "0",
+        ));
+        b.push_str(&format!(
+            "\\node[anchor=east,font=\\small] at ({:.1},{:.1}) {{Hz}};\n",
+            lay.plot_x0 - 6.0,
+            ty(top + s.spectrogram_height / 2.0),
+        ));
+    }
+
+    // Boundary lines through the signal panels (interval tiers only).
+    if lay.panels_bottom > lay.panels_top {
+        for tier in &spec.tiers {
+            if let FigureTierContent::Intervals(ivs) = &tier.content {
+                for iv in ivs {
+                    for &bd in &[iv.start, iv.end] {
+                        if bd > lay.t0 && bd < lay.t1 {
+                            let x = lay.x_of(bd);
+                            b.push_str(&format!(
+                                "\\draw[figstroke,opacity=0.5,line width=0.3pt] \
+                                 ({:.1},{:.1}) -- ({:.1},{:.1});\n",
+                                x,
+                                ty(lay.panels_top),
+                                x,
+                                ty(lay.panels_bottom),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Tier rows.
+    for (tier, &top) in spec.tiers.iter().zip(&lay.tier_tops) {
+        let mid = top + s.tier_height / 2.0;
+        b.push_str(&format!(
+            "\\node[anchor=east,font=\\small] at ({:.1},{:.1}) {{{}}};\n",
+            lay.plot_x0 - 6.0,
+            ty(mid),
+            tex_escape(&tier.name),
+        ));
+        b.push_str(&format!(
+            "\\draw[figstroke,line width=0.4pt] ({:.1},{:.1}) -- ({:.1},{:.1});\n",
+            lay.plot_x0,
+            ty(top),
+            lay.plot_x1,
+            ty(top),
+        ));
+        match &tier.content {
+            FigureTierContent::Intervals(ivs) => {
+                for iv in ivs {
+                    let xa = lay.x_of(iv.start).clamp(lay.plot_x0, lay.plot_x1);
+                    let xb = lay.x_of(iv.end).clamp(lay.plot_x0, lay.plot_x1);
+                    b.push_str(&format!(
+                        "\\draw[figstroke,line width=0.4pt] ({:.1},{:.1}) -- ({:.1},{:.1});\n",
+                        xa,
+                        ty(top),
+                        xa,
+                        ty(top + s.tier_height),
+                    ));
+                    if !iv.label.is_empty() {
+                        b.push_str(&format!(
+                            "\\node at ({:.1},{:.1}) {{{}}};\n",
+                            (xa + xb) / 2.0,
+                            ty(mid),
+                            tex_escape(&iv.label),
+                        ));
+                    }
+                }
+            }
+            FigureTierContent::Points(pts) => {
+                for pt in pts {
+                    let x = lay.x_of(pt.time);
+                    if x < lay.plot_x0 || x > lay.plot_x1 {
+                        continue;
+                    }
+                    b.push_str(&format!(
+                        "\\draw[figstroke,line width=0.5pt] ({:.1},{:.1}) -- ({:.1},{:.1});\n",
+                        x,
+                        ty(top),
+                        x,
+                        ty(top + s.tier_height),
+                    ));
+                    if !pt.label.is_empty() {
+                        b.push_str(&format!(
+                            "\\node at ({:.1},{:.1}) {{{}}};\n",
+                            x,
+                            ty(mid),
+                            tex_escape(&pt.label),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // Shared time axis.
+    b.push_str(&format!(
+        "\\draw[figstroke,line width=0.6pt] ({:.1},{:.1}) -- ({:.1},{:.1});\n",
+        lay.plot_x0,
+        ty(lay.axis_y),
+        lay.plot_x1,
+        ty(lay.axis_y),
+    ));
+    for frac in [0.0, 0.5, 1.0] {
+        let t = lay.t0 + (lay.t1 - lay.t0) * frac;
+        let x = lay.x_of(t);
+        b.push_str(&format!(
+            "\\draw[figstroke,line width=0.6pt] ({:.1},{:.1}) -- ({:.1},{:.1});\n",
+            x,
+            ty(lay.axis_y),
+            x,
+            ty(lay.axis_y + 4.0),
+        ));
+        b.push_str(&format!(
+            "\\node[anchor=north,font=\\small] at ({:.1},{:.1}) {{{}}};\n",
+            x,
+            ty(lay.axis_y + 5.0),
+            fmt_num(t),
+        ));
+    }
+    b.push_str(&format!(
+        "\\node[anchor=north,font=\\small] at ({:.1},{:.1}) {{Time (s)}};\n",
+        (lay.plot_x0 + lay.plot_x1) / 2.0,
+        ty(lay.axis_y + 5.0 + s.font_size * 1.6),
+    ));
+
+    b.push_str("\\end{tikzpicture}\n\\end{document}\n");
+    b
+}
+
+/// A right-aligned TikZ y-axis label node.
+fn tikz_ylabel(plot_x0: f64, y: f64, text: &str) -> String {
+    format!(
+        "\\node[anchor=east,font=\\small] at ({:.1},{:.1}) {{{}}};\n",
+        plot_x0 - 6.0,
+        y,
+        tex_escape(text),
+    )
+}
+
+/// Extracts a 6-hex-digit `RRGGBB` from a `#rrggbb` CSS colour for xcolor's
+/// `{HTML}` model, falling back to black for anything else (named colours,
+/// short hex — the style defaults are all full hex).
+fn hex_rgb(css: &str) -> String {
+    let h = css.trim_start_matches('#');
+    if h.len() == 6 && h.bytes().all(|c| c.is_ascii_hexdigit()) {
+        h.to_ascii_uppercase()
+    } else {
+        "000000".to_string()
+    }
+}
+
+/// Escapes the LaTeX special characters so a tier/axis label can't break the
+/// document. IPA and other Unicode pass through (rendered via fontspec).
+fn tex_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("\\&"),
+            '%' => out.push_str("\\%"),
+            '$' => out.push_str("\\$"),
+            '#' => out.push_str("\\#"),
+            '_' => out.push_str("\\_"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            '~' => out.push_str("\\textasciitilde{}"),
+            '^' => out.push_str("\\textasciicircum{}"),
+            '\\' => out.push_str("\\textbackslash{}"),
+            _ => out.push(c),
+        }
+    }
     out
 }
 
@@ -618,8 +970,8 @@ fn y_label(plot_x0: f64, y: f64, text: &str, s: &FigureStyle) -> String {
     )
 }
 
-/// PNG-encodes an RGBA8 raster and base64s it for an SVG `data:` URI.
-fn rgba_to_png_base64(rgba: &[u8], width: usize, height: usize) -> String {
+/// PNG-encodes an RGBA8 raster to bytes.
+fn rgba_to_png(rgba: &[u8], width: usize, height: usize) -> Vec<u8> {
     let mut png_bytes = Vec::new();
     {
         let mut enc = png::Encoder::new(&mut png_bytes, width as u32, height as u32);
@@ -631,7 +983,22 @@ fn rgba_to_png_base64(rgba: &[u8], width: usize, height: usize) -> String {
         let mut writer = enc.write_header().expect("png header");
         writer.write_image_data(rgba).expect("png data");
     }
-    base64::engine::general_purpose::STANDARD.encode(&png_bytes)
+    png_bytes
+}
+
+/// PNG-encodes an RGBA8 raster and base64s it for an SVG `data:` URI.
+fn rgba_to_png_base64(rgba: &[u8], width: usize, height: usize) -> String {
+    base64::engine::general_purpose::STANDARD.encode(rgba_to_png(rgba, width, height))
+}
+
+/// The figure's spectrogram lane as a standalone PNG (the sidecar the TikZ
+/// backend `\includegraphics`'s), or `None` if the figure has no spectrogram.
+pub fn spectrogram_png(spec: &FigureSpec) -> Option<Vec<u8>> {
+    let sg = spec.spectrogram.as_ref()?;
+    if sg.width == 0 || sg.height == 0 || sg.rgba.len() != sg.width * sg.height * 4 {
+        return None;
+    }
+    Some(rgba_to_png(&sg.rgba, sg.width, sg.height))
 }
 
 /// Formats a number for an axis label: up to 3 significant decimals, trailing
@@ -1023,6 +1390,56 @@ mod tests {
         assert!(rgba.chunks_exact(4).all(|px| px[3] == 255));
         // Width matches the style width (the SVG viewBox width).
         assert_eq!(w, spec.style.width as u32);
+    }
+
+    #[test]
+    fn to_tikz_is_a_compilable_standalone_with_raster_and_ipa() {
+        let tikz = to_tikz(&sample_spec(), Some("fig-spectrogram.png"));
+        assert!(tikz.contains("\\documentclass[border=5pt]{standalone}"));
+        assert!(tikz.contains("\\usepackage{fontspec}"));
+        assert!(tikz.contains("\\begin{tikzpicture}"));
+        assert!(tikz.trim_end().ends_with("\\end{document}"));
+        // Spectrogram is the sidecar raster, not inlined.
+        assert!(tikz.contains("\\includegraphics"));
+        assert!(tikz.contains("fig-spectrogram.png"));
+        // IPA + axis text survive as real LaTeX text.
+        assert!(tikz.contains("{ɹ}"));
+        assert!(tikz.contains("Time (s)"));
+        assert!(tikz.contains("{\\large praat}")); // title
+    }
+
+    #[test]
+    fn to_tikz_without_raster_ref_omits_the_image() {
+        let tikz = to_tikz(&sample_spec(), None);
+        assert!(!tikz.contains("\\includegraphics"));
+        // The rest still renders.
+        assert!(tikz.contains("\\begin{tikzpicture}"));
+        assert!(tikz.contains("{ɹ}"));
+    }
+
+    #[test]
+    fn tex_escape_escapes_latex_specials_not_ipa() {
+        assert_eq!(tex_escape("a & b_c #1 %x"), "a \\& b\\_c \\#1 \\%x");
+        // IPA passes through untouched.
+        assert_eq!(tex_escape("ɑː"), "ɑː");
+    }
+
+    #[test]
+    fn hex_rgb_parses_full_hex_and_falls_back() {
+        assert_eq!(hex_rgb("#333333"), "333333");
+        assert_eq!(hex_rgb("#ffffff"), "FFFFFF");
+        assert_eq!(hex_rgb("red"), "000000"); // named → fallback
+        assert_eq!(hex_rgb("#abc"), "000000"); // short hex → fallback
+    }
+
+    #[test]
+    fn spectrogram_png_round_trips_a_raster() {
+        let png = spectrogram_png(&sample_spec()).expect("has a spectrogram");
+        // PNG magic number.
+        assert_eq!(
+            &png[..8],
+            &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']
+        );
     }
 
     #[test]

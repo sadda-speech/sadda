@@ -104,12 +104,28 @@ def test_export_figure_pdf_is_self_contained() -> None:
         assert len(data) > 1000
 
 
-def test_export_figure_rejects_unsupported_format() -> None:
+def test_export_figure_tikz_writes_tex_and_raster_sidecar() -> None:
     with tempfile.TemporaryDirectory() as td:
         proj, bundle = _project_with_annotated_bundle(Path(td))
         out = Path(td) / "fig.tex"
+        proj.export_figure(bundle, out, format="tikz", title="praat")
+        tex = out.read_text()
+        assert "\\begin{tikzpicture}" in tex
+        assert "\\end{document}" in tex.rstrip()
+        # IPA survives as real LaTeX text (rendered via fontspec + Doulos SIL).
+        assert "{ɹ}" in tex
+        # The spectrogram is a sidecar PNG next to the .tex.
+        sidecar = Path(td) / "fig-spectrogram.png"
+        assert sidecar.exists()
+        assert "\\includegraphics" in tex and "fig-spectrogram.png" in tex
+
+
+def test_export_figure_rejects_unsupported_format() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        proj, bundle = _project_with_annotated_bundle(Path(td))
+        out = Path(td) / "fig.png"
         with pytest.raises(Exception, match="not supported"):
-            proj.export_figure(bundle, out, format="tikz")
+            proj.export_figure(bundle, out, format="png")
 
 
 def test_export_figure_rejects_unknown_colormap() -> None:

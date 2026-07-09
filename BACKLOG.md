@@ -179,8 +179,12 @@ _Designed 2026-07-01 (see DEVLOG design entry). `FigureSpec` IR in
   (waveform/spectrogram/each tier) + width/colormap/title, defaulting from
   `visible_lanes()`, replacing the current "export what's visible" menu item. —
   _added 2026-07-08_
-- [ ] **G2 — TikZ backend** — TikZ serializer off the same IR + standalone `.tex`
-  preview wrapper (specTeX integration model). — _added 2026-07-01_
+- [x] **G2 — TikZ backend** _(done 2026-07-08, feat/figure-export-g0)_ —
+  `io::figure::to_tikz` off the shared `FigureLayout`: standalone compilable
+  `.tex` (fontspec + Doulos SIL, native TikZ vector) + a `<stem>-spectrogram.png`
+  sidecar (TikZ can't inline a raster). `Project::export_figure` `"tikz"` branch
+  (no feature gate) + Python + GUI. Verified by a real `xelatex` compile. —
+  _added 2026-07-01_
 - [ ] **G3 — measure lanes in figures** — f0 / formants / intensity / VAD as
   stacked rows, both backends. — _added 2026-07-01_
 - [ ] **G4 — heatmap lanes + style knobs** — MFCC + embedding rasters; expose

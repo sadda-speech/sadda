@@ -10605,6 +10605,19 @@ impl SaddaApp {
                         }
                     }
                     if ui
+                        .button("Publication figure (TikZ)…")
+                        .on_hover_text(
+                            "Export a standalone TikZ/LaTeX document (+ a spectrogram \
+                             PNG sidecar) — compile with XeLaTeX/LuaLaTeX",
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        if let Some(path) = self.suggest_export_path("tex") {
+                            self.export_figure_for_active_bundle(path, "tikz");
+                        }
+                    }
+                    if ui
                         .button("Copy figure to clipboard")
                         .on_hover_text(
                             "Render the on-screen figure to an image and copy it — paste \

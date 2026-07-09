@@ -5631,18 +5631,43 @@ impl Project {
         // otherwise it falls through to the unsupported-format error below.
         let is_svg = fmt == "svg";
         let is_pdf = fmt == "pdf" && cfg!(feature = "figure-pdf");
-        if !is_svg && !is_pdf {
-            let pdf_hint = if cfg!(feature = "figure-pdf") {
-                "\"svg\" or \"pdf\""
+        let is_tikz = fmt == "tikz";
+        if !is_svg && !is_pdf && !is_tikz {
+            let hint = if cfg!(feature = "figure-pdf") {
+                "\"svg\", \"pdf\", or \"tikz\""
             } else {
-                "\"svg\" (this build has no PDF support)"
+                "\"svg\" or \"tikz\" (this build has no PDF support)"
             };
             return Err(EngineError::Corpus(format!(
-                "figure export format {format:?} is not supported; expected {pdf_hint}. \
-                 TikZ arrives in a later slice"
+                "figure export format {format:?} is not supported; expected {hint}"
             )));
         }
         let spec = self.figure_spec_for_bundle(bundle_id, tier_ids, opts)?;
+
+        // TikZ writes a `.tex` plus a sidecar spectrogram PNG (TikZ can't embed
+        // a raster), so it takes its own path.
+        if is_tikz {
+            let raster_ref = match crate::io::figure::spectrogram_png(&spec) {
+                Some(png) => {
+                    let stem = path
+                        .as_ref()
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("figure");
+                    let name = format!("{stem}-spectrogram.png");
+                    let raster_path = path.as_ref().with_file_name(&name);
+                    std::fs::write(&raster_path, png).map_err(|e| {
+                        EngineError::Corpus(format!("figure raster write failed: {e}"))
+                    })?;
+                    Some(name)
+                }
+                None => None,
+            };
+            let tex = crate::io::figure::to_tikz(&spec, raster_ref.as_deref());
+            std::fs::write(path.as_ref(), tex)
+                .map_err(|e| EngineError::Corpus(format!("figure export write failed: {e}")))?;
+            return Ok(());
+        }
 
         let bytes: Vec<u8> = if is_svg {
             crate::io::figure::to_svg(&spec).into_bytes()

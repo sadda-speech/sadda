@@ -6,6 +6,40 @@ Newest entries at the top. Each entry is dated `YYYY-MM-DD` and tagged with a sh
 
 ---
 
+## 2026-07-08 — G2: TikZ backend (standalone .tex + raster sidecar, three surfaces)
+
+Second G-series backend: export the figure as a **standalone TikZ/LaTeX
+document** off the same `FigureSpec` IR — the specTeX integration model, for
+users who want LaTeX-native, hand-editable, document-font-matched figures.
+
+**Shared layout first.** Factored the vertical/horizontal geometry out of
+`to_svg` into a `FigureLayout` (lane y-positions, plot area, time→x), so the
+SVG, PDF, and TikZ backends compute identical geometry and can't drift. `to_svg`
+refactored onto it with no output change (goldens unchanged).
+
+**`to_tikz(spec, raster_ref)`.** Emits a compilable `standalone` document:
+`fontspec` + `\setmainfont{Doulos SIL}` for IPA, native TikZ `\draw`/`\fill` for
+the waveform band / tier boxes / panel-crossing boundary lines / axes, and text
+as real LaTeX nodes (`tex_escape` guards the specials; IPA passes through).
+TikZ can't embed a raster, so the spectrogram is a **sidecar PNG**
+(`<stem>-spectrogram.png`) written next to the `.tex` and `\includegraphics`'d —
+exactly specTeX's raster-plus-.tex split. `Project::export_figure` grew the
+`"tikz"` branch (writes both files); the format is pure-string + PNG, so it needs
+**no feature gate** (unlike PDF).
+
+**Three surfaces.** Python `export_figure(format="tikz")`; GUI File ▸ Export ▸
+Publication figure (TikZ)….
+
+**Verified end to end — actually compiled it.** Emitted a real `.tex` via the
+Python API and ran **`xelatex`** (with `OSFONTDIR` → the bundled Doulos): clean
+compile → a PDF whose figure is correct (waveform + viridis spectrogram sidecar
++ `p ɹ ɑː t` in Doulos SIL + axes). Engine 15 figure tests (incl. TikZ structure,
+`tex_escape`, `hex_rgb`, sidecar PNG magic); Python 7; workspace `clippy -D
+warnings` + `fmt` clean.
+
+**Next:** G3 measure lanes (f0/formants/intensity/VAD rows, both backends) · G4
+heatmaps + style knobs.
+
 ## 2026-07-08 — Figure → clipboard (GUI): rasterise + copy for quick sharing
 
 A small GUI convenience riding on the resvg tree G1.1 pulled in: **File ▸ Export

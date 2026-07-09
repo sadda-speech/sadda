@@ -3386,11 +3386,14 @@ impl PyProject {
     /// waveform / spectrogram / annotation-tier figure sharing one time axis,
     /// the staple of a phonetics paper.
     ///
-    /// `format` is `"svg"` (a self-contained SVG with the Doulos SIL font and
-    /// the spectrogram raster embedded, so it renders identically anywhere and
-    /// IPA labels stay real, selectable text) or `"pdf"` (a self-contained
-    /// vector PDF; its text is flattened to outlines). TikZ arrives in a later
-    /// slice. `tier_ids` selects which interval/point tiers to draw, in that
+    /// `format` is one of: `"svg"` (a self-contained SVG with the Doulos SIL
+    /// font and the spectrogram raster embedded, so it renders identically
+    /// anywhere and IPA labels stay real, selectable text); `"pdf"` (a
+    /// self-contained vector PDF; its text is flattened to outlines); or
+    /// `"tikz"` (a standalone TikZ/LaTeX document — compile with XeLaTeX or
+    /// LuaLaTeX — plus a sidecar `<stem>-spectrogram.png` written next to it,
+    /// since TikZ can't embed a raster). `tier_ids` selects which interval/point
+    /// tiers to draw, in that
     /// order (default: all drawable tiers). `waveform` / `spectrogram` toggle
     /// the signal lanes; `window_ms` / `hop_ms` / `dynamic_range_db` /
     /// `colormap` control the spectrogram (colormap ∈ viridis, magma, hot,
