@@ -3869,6 +3869,13 @@ fn parse_mfcc_method(s: &str) -> PyResult<sadda_engine::dsp::MfccMethod> {
 ///
 /// `voicing_threshold` is informational here: the function returns voicing
 /// values for every frame so callers can apply their own threshold.
+///
+/// `range_mode` selects how the analysis floor/ceiling are chosen:
+/// - `"manual"` (default) — use `min_freq_hz` / `max_freq_hz` as given.
+/// - `"two_pass"` — adapt them to the recording via De Looze & Hirst (2008):
+///   analyse over a wide range, then set `floor = 0.75·q25`, `ceiling = 1.5·q75`
+///   from the voiced-f0 quartiles, and re-track. `min_freq_hz` / `max_freq_hz`
+///   are then ignored. See `estimate_pitch_range`.
 #[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (
@@ -3877,6 +3884,7 @@ fn parse_mfcc_method(s: &str) -> PyResult<sadda_engine::dsp::MfccMethod> {
     min_freq_hz=75.0, max_freq_hz=500.0,
     method="boersma",
     voicing_threshold=0.45,
+    range_mode="manual",
 ))]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
@@ -3889,6 +3897,7 @@ fn voiced_pitch<'py>(
     max_freq_hz: f32,
     method: &str,
     voicing_threshold: f32,
+    range_mode: &str,
 ) -> PyResult<(
     Bound<'py, PyArray1<f64>>,
     Bound<'py, PyArray1<f32>>,
@@ -3903,7 +3912,15 @@ fn voiced_pitch<'py>(
         voicing_threshold,
         ..sadda_engine::pitch::PitchConfig::default()
     };
-    let frames = sadda_engine::pitch::pitch(&audio.inner, &config, pitch_method);
+    let frames = match range_mode {
+        "manual" => sadda_engine::pitch::pitch(&audio.inner, &config, pitch_method),
+        "two_pass" => sadda_engine::pitch::two_pass_pitch(&audio.inner, &config, pitch_method),
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown range_mode {other:?}; expected \"manual\" or \"two_pass\""
+            )));
+        }
+    };
     let times: Vec<f64> = frames.iter().map(|f| f.time_seconds).collect();
     let freqs: Vec<f32> = frames.iter().map(|f| f.frequency_hz.value()).collect();
     let voicing: Vec<f32> = frames.iter().map(|f| f.voicing).collect();
@@ -3912,6 +3929,130 @@ fn voiced_pitch<'py>(
         freqs.into_pyarray(py),
         voicing.into_pyarray(py),
     ))
+}
+
+/// Estimates a speaker-appropriate `(floor_hz, ceiling_hz)` from a recording via
+/// the De Looze & Hirst (2008) two-pass rule: analyse f0 over a wide range, then
+/// `floor = 0.75·q25`, `ceiling = 1.5·q75` from the first/third quartiles of the
+/// voiced f0. Returns `None` when the recording has too few voiced frames.
+///
+/// This is the range `voiced_pitch(..., range_mode="two_pass")` derives before
+/// its second pass; call it directly to inspect or reuse the range.
+///
+/// Reference: De Looze & Hirst (2008), "Detecting changes in key and range for
+/// the automatic modelling and coding of intonation," Speech Prosody 2008,
+/// <https://doi.org/10.21437/SpeechProsody.2008-32>.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (audio, *, method="boersma", voicing_threshold=0.45))]
+fn estimate_pitch_range(
+    audio: &PyAudio,
+    method: &str,
+    voicing_threshold: f32,
+) -> PyResult<Option<(f32, f32)>> {
+    let pitch_method = parse_pitch_method(method)?;
+    let config = sadda_engine::pitch::PitchConfig {
+        voicing_threshold,
+        ..sadda_engine::pitch::PitchConfig::default()
+    };
+    Ok(sadda_engine::pitch::estimate_pitch_range(
+        &audio.inner,
+        &config,
+        pitch_method,
+    ))
+}
+
+/// Complete-pooling speaker pitch range: pool the voiced f0 of all of a
+/// speaker's recordings into one distribution, then apply the De Looze & Hirst
+/// (2008) rule once (`floor = 0.75·q25`, `ceiling = 1.5·q75`). Returns one
+/// `(floor_hz, ceiling_hz)` for the speaker, or `None` if too few voiced frames
+/// pooled across the recordings.
+///
+/// Each recording is analysed over a wide range first so the pooled quartiles
+/// aren't clipped. This is the "complete pooling" baseline; its partial-pooling
+/// companion is `speaker_pitch_ranges_shrunk` (empirical Bayes).
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (audios, *, method="boersma", voicing_threshold=0.45))]
+fn speaker_pitch_range_pooled(
+    py: Python<'_>,
+    audios: Vec<Py<PyAudio>>,
+    method: &str,
+    voicing_threshold: f32,
+) -> PyResult<Option<(f32, f32)>> {
+    let pitch_method = parse_pitch_method(method)?;
+    let wide = sadda_engine::pitch::PitchConfig {
+        min_freq_hz: sadda_engine::pitch::TWO_PASS_FLOOR_HZ,
+        max_freq_hz: sadda_engine::pitch::TWO_PASS_CEILING_HZ,
+        voicing_threshold,
+        ..sadda_engine::pitch::PitchConfig::default()
+    };
+    let recordings: Vec<Vec<sadda_engine::pitch::PitchFrame>> = audios
+        .iter()
+        .map(|a| sadda_engine::pitch::pitch(&a.borrow(py).inner, &wide, pitch_method))
+        .collect();
+    Ok(sadda_engine::pitch::pooled_pitch_range(
+        &recordings,
+        voicing_threshold,
+    ))
+}
+
+/// Empirical-Bayes speaker pitch ranges: *partially* pool a speaker's
+/// recordings. Each recording's quartiles are shrunk toward the speaker-pooled
+/// quartiles by an amount that grows as its voiced-frame count falls, then the
+/// De Looze & Hirst (2008) rule is applied per recording. Returns a list aligned
+/// with `audios`: each entry is that recording's shrunken `(floor_hz,
+/// ceiling_hz)`, or `None` if it had too few voiced frames to summarise.
+///
+/// The partial-pooling companion to `speaker_pitch_range_pooled`: short/noisy
+/// recordings borrow strength from the speaker; well-sampled ones keep their own
+/// estimate.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (audios, *, method="boersma", voicing_threshold=0.45))]
+fn speaker_pitch_ranges_shrunk(
+    py: Python<'_>,
+    audios: Vec<Py<PyAudio>>,
+    method: &str,
+    voicing_threshold: f32,
+) -> PyResult<Vec<Option<(f32, f32)>>> {
+    let pitch_method = parse_pitch_method(method)?;
+    let wide = sadda_engine::pitch::PitchConfig {
+        min_freq_hz: sadda_engine::pitch::TWO_PASS_FLOOR_HZ,
+        max_freq_hz: sadda_engine::pitch::TWO_PASS_CEILING_HZ,
+        voicing_threshold,
+        ..sadda_engine::pitch::PitchConfig::default()
+    };
+    // Summarise each recording; skip those too sparse to yield quartiles, but
+    // remember their positions so the output stays aligned with `audios`.
+    let mut summaries = Vec::new();
+    let mut positions = Vec::new();
+    for (i, a) in audios.iter().enumerate() {
+        let frames = sadda_engine::pitch::pitch(&a.borrow(py).inner, &wide, pitch_method);
+        let n_voiced = frames
+            .iter()
+            .filter(|f| {
+                let hz = f.frequency_hz.value();
+                f.voicing >= voicing_threshold && hz.is_finite() && hz > 0.0
+            })
+            .count();
+        if let Some(q) =
+            sadda_engine::pitch::voiced_f0_quantiles(&frames, voicing_threshold, &[0.25, 0.75])
+        {
+            summaries.push(sadda_engine::pitch::RecordingF0Summary {
+                q25: q[0],
+                q75: q[1],
+                n_voiced,
+            });
+            positions.push(i);
+        }
+    }
+    let ranges = sadda_engine::pitch::empirical_bayes_pitch_ranges(&summaries);
+    let mut out = vec![None; audios.len()];
+    for (pos, &i) in positions.iter().enumerate() {
+        out[i] = Some(ranges[pos]);
+    }
+    Ok(out)
 }
 
 /// Computes per-frame formants over an [`Audio`] via LPC + polynomial
@@ -4564,6 +4705,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(spectrogram, m)?)?;
     m.add_function(wrap_pyfunction!(intensity, m)?)?;
     m.add_function(wrap_pyfunction!(voiced_pitch, m)?)?;
+    m.add_function(wrap_pyfunction!(estimate_pitch_range, m)?)?;
+    m.add_function(wrap_pyfunction!(speaker_pitch_range_pooled, m)?)?;
+    m.add_function(wrap_pyfunction!(speaker_pitch_ranges_shrunk, m)?)?;
     m.add_function(wrap_pyfunction!(formants, m)?)?;
     m.add_function(wrap_pyfunction!(mfcc, m)?)?;
     m.add_function(wrap_pyfunction!(log_mel_whisper, m)?)?;

@@ -267,6 +267,232 @@ pub fn pitch_with_params(audio: &Audio, params: &PitchParams) -> Vec<PitchFrame>
     pitch(audio, &params.config, params.method)
 }
 
+/// First-pass floor for the two-pass adaptive range estimator (De Looze &
+/// Hirst 2008): the low end of a deliberately wide bracket so the initial
+/// analysis captures the speaker's true range before it is refined. The paper's
+/// exact first-pass value.
+pub const TWO_PASS_FLOOR_HZ: f32 = 60.0;
+/// First-pass ceiling for the two-pass adaptive range estimator (De Looze &
+/// Hirst 2008): the high end of the wide first-pass bracket. The paper's exact
+/// first-pass value.
+pub const TWO_PASS_CEILING_HZ: f32 = 750.0;
+
+/// Minimum voiced frames before an adaptive range estimate is trusted; below
+/// this the f0 distribution is too sparse for stable quartiles.
+pub const ADAPTIVE_MIN_VOICED: usize = 10;
+
+/// The usable voiced f0 values (Hz) in `frames`: `voicing >= voicing_threshold`,
+/// finite and positive.
+fn voiced_f0_values(
+    frames: &[PitchFrame],
+    voicing_threshold: f32,
+) -> impl Iterator<Item = f64> + '_ {
+    frames
+        .iter()
+        .filter(move |f| f.voicing >= voicing_threshold)
+        .map(|f| f.frequency_hz.value() as f64)
+        .filter(|&hz| hz.is_finite() && hz > 0.0)
+}
+
+/// Quantiles of a set of values by type-7 linear interpolation (NumPy's default
+/// `quantile`). `qs` are cut points in `[0, 1]`. Returns `None` when fewer than
+/// [`ADAPTIVE_MIN_VOICED`] values are present — too few for a stable estimate.
+fn quantiles_of(mut vs: Vec<f64>, qs: &[f64]) -> Option<Vec<f32>> {
+    if vs.len() < ADAPTIVE_MIN_VOICED {
+        return None;
+    }
+    vs.sort_by(|a, b| a.total_cmp(b));
+    let n = vs.len();
+    Some(
+        qs.iter()
+            .map(|&q| {
+                let pos = q.clamp(0.0, 1.0) * (n - 1) as f64;
+                let lo = pos.floor() as usize;
+                let hi = pos.ceil() as usize;
+                let frac = pos - lo as f64;
+                (vs[lo] + (vs[hi] - vs[lo]) * frac) as f32
+            })
+            .collect(),
+    )
+}
+
+/// Quantiles of the voiced f0 values in `frames` (those with
+/// `voicing >= voicing_threshold`).
+///
+/// `qs` are cut points in `[0, 1]`; each is evaluated by linear interpolation
+/// on the sorted voiced-f0 values (the "linear" / type-7 convention, matching
+/// NumPy's default `quantile`). Non-finite or non-positive f0 values are
+/// dropped. Returns `None` when fewer than [`ADAPTIVE_MIN_VOICED`] usable voiced
+/// frames remain — too few for a stable estimate.
+pub fn voiced_f0_quantiles(
+    frames: &[PitchFrame],
+    voicing_threshold: f32,
+    qs: &[f64],
+) -> Option<Vec<f32>> {
+    quantiles_of(voiced_f0_values(frames, voicing_threshold).collect(), qs)
+}
+
+/// Estimates a speaker-appropriate `(floor_hz, ceiling_hz)` from a single
+/// recording via the De Looze & Hirst (2008) two-pass rule: analyse f0 over a
+/// wide range ([`TWO_PASS_FLOOR_HZ`]–[`TWO_PASS_CEILING_HZ`]), then set
+/// `floor = 0.75·q25` and `ceiling = 1.5·q75` from the first and third quartiles
+/// of the voiced f0. Returns `None` when the recording has too few voiced frames
+/// to estimate a range (see [`voiced_f0_quantiles`]).
+///
+/// Reference: De Looze, C. & Hirst, D.J. (2008). "Detecting changes in key and
+/// range for the automatic modelling and coding of intonation." Speech Prosody
+/// 2008, 135–138. <https://doi.org/10.21437/SpeechProsody.2008-32>
+pub fn estimate_pitch_range(
+    audio: &Audio,
+    config: &PitchConfig,
+    method: PitchMethod,
+) -> Option<(f32, f32)> {
+    let mut wide = *config;
+    wide.min_freq_hz = TWO_PASS_FLOOR_HZ;
+    wide.max_freq_hz = TWO_PASS_CEILING_HZ;
+    let frames = pitch(audio, &wide, method);
+    let q = voiced_f0_quantiles(&frames, config.voicing_threshold, &[0.25, 0.75])?;
+    Some(pitch_range_from_quartiles(q[0], q[1]))
+}
+
+/// The De Looze & Hirst (2008) floor/ceiling formula from a recording's first
+/// (`q25`) and third (`q75`) voiced-f0 quartiles: `floor = 0.75·q25`,
+/// `ceiling = 1.5·q75`, clamped to stay positive and ordered. Shared by the
+/// single-recording ([`estimate_pitch_range`]) and speaker-level estimators.
+pub fn pitch_range_from_quartiles(q25: f32, q75: f32) -> (f32, f32) {
+    let floor = (0.75 * q25).max(1.0);
+    let ceiling = (1.5 * q75).max(floor + 1.0);
+    (floor, ceiling)
+}
+
+/// Two-pass adaptive pitch tracking (De Looze & Hirst 2008): estimate a
+/// speaker-appropriate floor/ceiling from the signal with
+/// [`estimate_pitch_range`], then track with that refined range. Falls back to
+/// the `config`'s own range when the estimate is unavailable (too few voiced
+/// frames), degrading to a single pass rather than failing.
+pub fn two_pass_pitch(audio: &Audio, config: &PitchConfig, method: PitchMethod) -> Vec<PitchFrame> {
+    let mut cfg = *config;
+    if let Some((floor, ceiling)) = estimate_pitch_range(audio, config, method) {
+        cfg.min_freq_hz = floor;
+        cfg.max_freq_hz = ceiling;
+    }
+    pitch(audio, &cfg, method)
+}
+
+/// Complete-pooling speaker pitch range: pool the voiced f0 of *all* a speaker's
+/// recordings into one distribution, then apply the De Looze & Hirst formula
+/// once (`floor = 0.75·q25`, `ceiling = 1.5·q75`). One range shared by the
+/// speaker — the "complete pooling" end of the partial-pooling spectrum.
+///
+/// This is sadda's own speaker-adaptive baseline (the underlying quartile rule
+/// is De Looze & Hirst 2008); pair it with [`empirical_bayes_pitch_ranges`],
+/// which partially pools instead. Each recording's `frames` should come from a
+/// wide first pass (see [`TWO_PASS_FLOOR_HZ`]/[`TWO_PASS_CEILING_HZ`]) so the
+/// pooled distribution isn't clipped. Returns `None` if the speaker has too few
+/// voiced frames pooled across all recordings.
+pub fn pooled_pitch_range(
+    recordings: &[Vec<PitchFrame>],
+    voicing_threshold: f32,
+) -> Option<(f32, f32)> {
+    let pooled: Vec<f64> = recordings
+        .iter()
+        .flat_map(|frames| voiced_f0_values(frames, voicing_threshold))
+        .collect();
+    let q = quantiles_of(pooled, &[0.25, 0.75])?;
+    Some(pitch_range_from_quartiles(q[0], q[1]))
+}
+
+/// A recording's voiced-f0 summary for the empirical-Bayes speaker estimator:
+/// its first/third quartiles (from a wide first pass) and the voiced-frame count
+/// they were computed from (the reliability weight).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecordingF0Summary {
+    /// First quartile (q25) of the recording's voiced f0, in Hz.
+    pub q25: f32,
+    /// Third quartile (q75) of the recording's voiced f0, in Hz.
+    pub q75: f32,
+    /// Number of voiced frames the quartiles were computed from.
+    pub n_voiced: usize,
+}
+
+/// Empirical-Bayes speaker pitch ranges: *partially* pool a speaker's
+/// recordings. Each recording's quartiles are shrunk toward the speaker-pooled
+/// quartiles by an amount that grows as the recording's voiced-frame count
+/// (reliability) falls, then the De Looze & Hirst formula is applied per
+/// recording. Returns one `(floor_hz, ceiling_hz)` per input, in order.
+///
+/// The middle ground between each recording's own two-pass range and the single
+/// [`pooled_pitch_range`]: short/noisy recordings borrow strength from the
+/// speaker; well-sampled ones keep their own estimate. sadda's own method (named
+/// as ours), after Efron & Morris's empirical Bayes; the quartile rule is De
+/// Looze & Hirst (2008).
+///
+/// Model, per quartile independently: each recording's quartile
+/// `x_i ~ N(θ_i, σ²/n_i)` with `θ_i ~ N(μ, τ²)`. `μ` is the reliability-weighted
+/// mean; `σ²` and `τ²` are estimated by method of moments (a least-squares fit
+/// of the squared deviations `(x_i − μ)²` on `1/n_i`). The James–Stein posterior
+/// mean `θ_i = μ + (1 − B_i)(x_i − μ)` with `B_i = (σ²/n_i)/(σ²/n_i + τ²)` shrinks
+/// low-`n` recordings harder. With a single recording — or when the sample sizes
+/// carry no information to separate between-recording signal (`τ²`) from
+/// sampling noise (`σ²`) — it returns the unshrunk per-recording ranges.
+pub fn empirical_bayes_pitch_ranges(recordings: &[RecordingF0Summary]) -> Vec<(f32, f32)> {
+    if recordings.is_empty() {
+        return Vec::new();
+    }
+    let ns: Vec<f64> = recordings
+        .iter()
+        .map(|r| r.n_voiced.max(1) as f64)
+        .collect();
+    let q25: Vec<f64> = recordings.iter().map(|r| r.q25 as f64).collect();
+    let q75: Vec<f64> = recordings.iter().map(|r| r.q75 as f64).collect();
+    let s25 = shrink_toward_prior(&q25, &ns);
+    let s75 = shrink_toward_prior(&q75, &ns);
+    s25.iter()
+        .zip(&s75)
+        .map(|(&a, &b)| pitch_range_from_quartiles(a as f32, b as f32))
+        .collect()
+}
+
+/// Shrink each `xs[i]` toward the reliability-weighted mean `μ` by a James–Stein
+/// factor from a normal-normal empirical-Bayes fit (variance components by
+/// method of moments, regressing the squared deviations on `1/ns[i]`). Falls
+/// back to no shrinkage when it can't be identified — a single value, or sample
+/// sizes with no spread (all equal `n`). Weights `ns` are assumed `>= 1`.
+fn shrink_toward_prior(xs: &[f64], ns: &[f64]) -> Vec<f64> {
+    let k = xs.len();
+    let sum_n: f64 = ns.iter().sum();
+    let mu = xs.iter().zip(ns).map(|(&x, &n)| x * n).sum::<f64>() / sum_n;
+    if k < 2 {
+        return xs.to_vec();
+    }
+    // Method of moments: (x_i − μ)² ≈ τ² + σ²·(1/n_i). Least-squares slope σ²,
+    // intercept τ². Needs spread in 1/n_i to be identifiable.
+    let inv: Vec<f64> = ns.iter().map(|&n| 1.0 / n).collect();
+    let d: Vec<f64> = xs.iter().map(|&x| (x - mu).powi(2)).collect();
+    let mean_inv = inv.iter().sum::<f64>() / k as f64;
+    let mean_d = d.iter().sum::<f64>() / k as f64;
+    let mut cov = 0.0;
+    let mut var_inv = 0.0;
+    for i in 0..k {
+        cov += (inv[i] - mean_inv) * (d[i] - mean_d);
+        var_inv += (inv[i] - mean_inv).powi(2);
+    }
+    if var_inv <= f64::EPSILON {
+        return xs.to_vec(); // equal sample sizes → nothing to identify σ² with
+    }
+    let sigma2 = (cov / var_inv).max(0.0);
+    let tau2 = (mean_d - sigma2 * mean_inv).max(0.0);
+    xs.iter()
+        .zip(ns)
+        .map(|(&x, &n)| {
+            let within = sigma2 / n;
+            let denom = within + tau2;
+            let b = if denom > 0.0 { within / denom } else { 0.0 };
+            mu + (1.0 - b) * (x - mu)
+        })
+        .collect()
+}
+
 // [docs-impl:sadda.dsp.f0]  — engine algorithm behind the `sadda.dsp.f0`
 // PyO3 shim; the source-link scanner renders this as the "impl" link.
 /// Estimates f0 using naive time-domain autocorrelation (Phase-0 method).

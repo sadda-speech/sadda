@@ -59,6 +59,9 @@ __all__ = [
     "spectrogram",
     "stft",
     "voiced_pitch",
+    "estimate_pitch_range",
+    "speaker_pitch_range_pooled",
+    "speaker_pitch_ranges_shrunk",
 ]
 
 hann = stable(_native.hann)
@@ -171,6 +174,7 @@ def voiced_pitch(
     max_freq_hz: float = 500.0,
     method: str = "boersma",
     voicing_threshold: float = 0.45,
+    range_mode: str = "manual",
 ):
     """Estimate f0 with a voicing decision; returns ``(times, frequencies,
     voicing)`` as three NumPy arrays.
@@ -180,7 +184,14 @@ def voiced_pitch(
     ``swipe``) with the common analysis keywords, or pass ``params=`` a
     :class:`PitchParams` (from a preset, optionally edited with
     ``.replace(...)``). When ``params`` is given it fully determines the
-    computation and the other keywords are ignored."""
+    computation and the other keywords are ignored.
+
+    ``range_mode`` chooses how the analysis floor/ceiling are set:
+    ``"manual"`` (default) uses ``min_freq_hz`` / ``max_freq_hz`` as given;
+    ``"two_pass"`` adapts them to the recording (De Looze & Hirst 2008 —
+    ``floor = 0.75·q25``, ``ceiling = 1.5·q75`` from a wide first pass, then
+    re-track), ignoring ``min_freq_hz`` / ``max_freq_hz``. See
+    :func:`estimate_pitch_range`."""
     if params is not None:
         return _native.pitch_preset.compute(audio, params)
     return _native.voiced_pitch(
@@ -191,6 +202,72 @@ def voiced_pitch(
         max_freq_hz=max_freq_hz,
         method=method,
         voicing_threshold=voicing_threshold,
+        range_mode=range_mode,
+    )
+
+
+@stable
+def estimate_pitch_range(
+    audio,
+    *,
+    method: str = "boersma",
+    voicing_threshold: float = 0.45,
+):
+    """Estimate a speaker-appropriate ``(floor_hz, ceiling_hz)`` from one
+    recording via the De Looze & Hirst (2008) two-pass rule, or ``None`` if the
+    recording has too few voiced frames.
+
+    Analyses f0 over a wide range, then returns ``floor = 0.75·q25`` and
+    ``ceiling = 1.5·q75`` from the first/third quartiles of the voiced f0 — the
+    same range :func:`voiced_pitch` derives under ``range_mode="two_pass"``.
+
+    Reference: De Looze & Hirst (2008),
+    https://doi.org/10.21437/SpeechProsody.2008-32."""
+    return _native.estimate_pitch_range(
+        audio, method=method, voicing_threshold=voicing_threshold
+    )
+
+
+@stable
+def speaker_pitch_range_pooled(
+    audios,
+    *,
+    method: str = "boersma",
+    voicing_threshold: float = 0.45,
+):
+    """Complete-pooling speaker pitch range: pool the voiced f0 of *all* a
+    speaker's recordings (``audios``, an iterable of :class:`Audio`) into one
+    distribution, then return a single ``(floor_hz, ceiling_hz)`` via the De
+    Looze & Hirst (2008) rule (``floor = 0.75·q25``, ``ceiling = 1.5·q75``), or
+    ``None`` if the pooled f0 has too few voiced frames.
+
+    Each recording is analysed over a wide range first so the pooled quartiles
+    aren't clipped. The partial-pooling companion is
+    :func:`speaker_pitch_ranges_shrunk` (empirical Bayes)."""
+    return _native.speaker_pitch_range_pooled(
+        list(audios), method=method, voicing_threshold=voicing_threshold
+    )
+
+
+@stable
+def speaker_pitch_ranges_shrunk(
+    audios,
+    *,
+    method: str = "boersma",
+    voicing_threshold: float = 0.45,
+):
+    """Empirical-Bayes speaker pitch ranges: *partially* pool a speaker's
+    recordings (``audios``, an iterable of :class:`Audio`). Each recording's
+    quartiles are shrunk toward the speaker-pooled quartiles by an amount that
+    grows as its voiced-frame count falls, then the De Looze & Hirst (2008) rule
+    is applied per recording.
+
+    Returns a list aligned with ``audios``: each entry is that recording's
+    shrunken ``(floor_hz, ceiling_hz)``, or ``None`` if it had too few voiced
+    frames. The partial-pooling companion to :func:`speaker_pitch_range_pooled`
+    (sadda's own method, after Efron & Morris empirical Bayes)."""
+    return _native.speaker_pitch_ranges_shrunk(
+        list(audios), method=method, voicing_threshold=voicing_threshold
     )
 
 
