@@ -109,6 +109,10 @@ follow, and CI enforces them:
 This isn't a judgment on using AI. It's about a clean, honest record of who
 stands behind each change — and that's you.
 
+_(Some commits in this repo's older history still carry such trailers from
+before this policy — we're in the process of removing those errant authorship
+credentials, so please forgive the temporary hypocrisy.)_
+
 ## Filing a good issue
 
 Many contributions start as an issue. A well formed issue lets
