@@ -89,7 +89,9 @@ and `align` separately.
 
 ## Languages
 
-`espeak-ng` covers 100+ languages, and the acoustic model is multilingual, so
+`espeak-ng` covers [100+ languages](https://github.com/espeak-ng/espeak-ng/blob/master/docs/languages.md),
+and the acoustic model is multilingual (Xu et al. 2022, cited in the References
+below), so
 alignment is: translated/target-language transcript + the matching `voice=`:
 
 ```python

@@ -134,7 +134,7 @@ sadda.tts.synthesize("hi", "hi.wav", backend="espeak-ng")
 
 | Backend | Status | Notes |
 |---|---|---|
-| `espeak-ng` | **default** | Offline formant synth; robotic but reproducible, CI-safe, 100+ languages |
+| `espeak-ng` | **default** | Offline formant synth; robotic but reproducible, CI-safe, [100+ languages](https://github.com/espeak-ng/espeak-ng/blob/master/docs/languages.md) |
 | `kokoro` | *pending* | Planned high-quality neural default (Kokoro-82M, Apache-2.0). Registered but not yet wired — raises an actionable error until the `sadda[tts]` extra lands |
 
 Cloud backends (ElevenLabs / OpenAI) are intended to plug in the same way as
@@ -166,8 +166,10 @@ is handy for tests and for backends that need constructor arguments.
 
 ## Languages and localization
 
-The `espeak-ng` backend covers **100+ languages and regional variants** — far
-more than any neural option. Pass the language as the `voice`; list what your
+The `espeak-ng` backend covers [**100+ languages and regional
+variants**](https://github.com/espeak-ng/espeak-ng/blob/master/docs/languages.md)
+— far more than the neural backends here, which (like most neural TTS voices)
+are trained per-language. Pass the language as the `voice`; list what your
 install supports with `espeak-ng --voices`:
 
 ```python
@@ -194,8 +196,9 @@ Two honest caveats for localization:
    on it.
 
 !!! note "espeak-ng and Japanese"
-    eSpeak NG does no Japanese word-segmentation and has no kanji dictionary,
-    so raw Japanese text mispronounces badly. To get clean output you must
+    In our testing (espeak-ng 1.50), eSpeak NG does no Japanese
+    word-segmentation and has no kanji dictionary, so raw Japanese text
+    mispronounces badly. To get clean output you must
     preprocess: convert **kanji → kana**, insert **spaces between words**
     (without them the `ー` long-vowel mark is misread), and write grammatical
     particles phonetically (は → ワ, へ → エ). A tokenizer such as

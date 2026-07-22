@@ -24,7 +24,9 @@
 
 /// Sonority rank of an IPA phone label — higher is more sonorous. Classified by
 /// the phone's base symbol (leading tie-bars/spacing are skipped; diacritics and
-/// length marks are ignored). The scale is the standard sonority hierarchy:
+/// length marks are ignored). The scale is a standard sonority hierarchy
+/// (Clements 1990 — see the module references; the ranking of fine distinctions
+/// such as the obstruent voicing split varies across authors):
 /// vowel > glide > rhotic > lateral > nasal > voiced fricative > voiceless
 /// fricative > voiced stop > voiceless stop. Unclassifiable labels rank lowest.
 pub fn sonority(phone: &str) -> u8 {

@@ -9,6 +9,17 @@
 //! *differences/ratios* of dB levels, so they're invariant to the
 //! spectrum's overall normalization — only its shape matters, which is
 //! why they match Praat readily.
+//!
+//! ## References
+//! - Frøkjær-Jensen, B. & Prytz, S. (1976). "Registration of voice quality."
+//!   *Brüel & Kjær Technical Review* 3: 3–17. — origin of the **alpha ratio**
+//!   (the >1 kHz vs <1 kHz spectral-balance measure). No stable weblink is
+//!   available (a Brüel & Kjær technical review with no DOI).
+//! - **Slope** and **tilt** are standard LTAS spectral-balance descriptors
+//!   rather than any single group's coinage; sadda mirrors Praat's
+//!   `Ltas: Get slope` (energy averaging) and a least-squares dB-vs-frequency
+//!   fit, validated against Praat
+//!   (<https://www.fon.hum.uva.nl/praat/manual/Ltas.html>).
 
 use realfft::RealFftPlanner;
 
@@ -82,7 +93,8 @@ impl Ltas {
     }
 
     /// Alpha ratio: energy above 1 kHz relative to below 1 kHz, in dB
-    /// (a common breathiness/brightness measure).
+    /// (a common breathiness/brightness measure; Frøkjær-Jensen & Prytz 1976 —
+    /// see the module references).
     pub fn alpha_ratio(&self) -> Decibels {
         let nyq = self.sample_rate as f32 / 2.0;
         self.slope((0.0, 1000.0), (1000.0, nyq))

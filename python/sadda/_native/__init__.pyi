@@ -2394,7 +2394,7 @@ def cpps(audio: Audio, *, pitch_floor_hz: builtins.float = 60.0, pitch_ceiling_h
     signal is too short. Intended for sustained vowels.
     """
 
-def f0(audio: Audio, *, frame_size_seconds: builtins.float = 0.029999999329447746, hop_size_seconds: builtins.float = 0.009999999776482582, min_freq_hz: builtins.float = 75.0, max_freq_hz: builtins.float = 500.0) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float32]]:
+def f0(audio: Audio, *, frame_size_seconds: builtins.float = 0.029999999329447746, hop_size_seconds: builtins.float = 0.009999999776482582, min_freq_hz: builtins.float = 75.0, max_freq_hz: builtins.float = 600.0) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float32]]:
     r"""
     Estimates f0 over an Audio via time-domain autocorrelation.
     
@@ -2616,7 +2616,7 @@ def version() -> builtins.str:
     Returns the underlying engine version string.
     """
 
-def voiced_pitch(audio: Audio, *, frame_size_seconds: builtins.float = 0.029999999329447746, hop_size_seconds: builtins.float = 0.009999999776482582, min_freq_hz: builtins.float = 75.0, max_freq_hz: builtins.float = 500.0, method: builtins.str = 'boersma', voicing_threshold: builtins.float = 0.44999998807907104) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float32], numpy.typing.NDArray[numpy.float32]]:
+def voiced_pitch(audio: Audio, *, frame_size_seconds: builtins.float = 0.029999999329447746, hop_size_seconds: builtins.float = 0.009999999776482582, min_freq_hz: builtins.float = 75.0, max_freq_hz: builtins.float = 600.0, method: builtins.str = 'boersma', voicing_threshold: builtins.float = 0.44999998807907104) -> tuple[numpy.typing.NDArray[numpy.float64], numpy.typing.NDArray[numpy.float32], numpy.typing.NDArray[numpy.float32]]:
     r"""
     Estimates f0 with a voicing decision and returns `(times, frequencies,
     voicing)` as three NumPy arrays. `times` is float64 seconds at frame

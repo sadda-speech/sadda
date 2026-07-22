@@ -54,7 +54,7 @@ def test_empty_store_lists_only_builtins(tmp_path: Path) -> None:
 def test_params_path_matches_method_path(tone) -> None:
     praat = dsp.pitch_preset("praat-ac")
     by_params = dsp.voiced_pitch(tone, params=praat.params)
-    by_method = dsp.voiced_pitch(tone, method="boersma", min_freq_hz=75.0, max_freq_hz=500.0)
+    by_method = dsp.voiced_pitch(tone, method="boersma", min_freq_hz=75.0, max_freq_hz=600.0)
     for a, b in zip(by_params, by_method):
         assert np.array_equal(a, b)
 

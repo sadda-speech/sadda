@@ -66,7 +66,13 @@ fn read_golden() -> Vec<GoldenRow> {
 #[test]
 fn yin_median_f0_matches_librosa_within_tolerance() {
     let golden = read_golden();
-    let cfg = PitchConfig::default();
+    // Pin the ceiling to the librosa golden's 500 Hz (see the module doc) so
+    // this comparison stays valid independent of the engine default, which is
+    // 600 Hz to match Praat's `To Pitch (ac)`.
+    let cfg = PitchConfig {
+        max_freq_hz: 500.0,
+        ..PitchConfig::default()
+    };
     let mut checked = 0;
     for row in &golden {
         if row.method != "yin" {
@@ -109,7 +115,13 @@ fn yin_median_f0_matches_librosa_within_tolerance() {
 #[test]
 fn pyin_median_f0_matches_librosa_within_tolerance() {
     let golden = read_golden();
-    let cfg = PitchConfig::default();
+    // Pin the ceiling to the librosa golden's 500 Hz (see the module doc) so
+    // this comparison stays valid independent of the engine default, which is
+    // 600 Hz to match Praat's `To Pitch (ac)`.
+    let cfg = PitchConfig {
+        max_freq_hz: 500.0,
+        ..PitchConfig::default()
+    };
     let mut checked = 0;
     for row in &golden {
         if row.method != "pyin" {

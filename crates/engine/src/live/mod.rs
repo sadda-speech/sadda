@@ -81,7 +81,7 @@ impl Default for LiveConfig {
             analysis_hop_ms: 10.0,
             num_formants: 4,
             min_pitch_hz: 75.0,
-            max_pitch_hz: 500.0,
+            max_pitch_hz: 600.0,
         }
     }
 }
